@@ -217,7 +217,7 @@ def main():
 
     while True:
         try:
-            user_input = console.input(f"[dim]{_soul_bar_text()}[/]\n[bold green]  ⚡ >[/] ").strip()
+            user_input = console.input("[bold green]  ⚡ >[/] ").strip()
         except (EOFError, KeyboardInterrupt):
             
             console.print("\n  [dim]👋 bye[/]")
@@ -282,6 +282,7 @@ def main():
             subtitle=f"[dim]{footer}[/]",
             subtitle_align="right",
         ))
+        console.print(f"  [dim]{_soul_bar_text()}[/]")
 
 
 if __name__ == "__main__":
