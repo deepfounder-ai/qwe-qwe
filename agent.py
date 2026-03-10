@@ -78,6 +78,9 @@ def run(user_input: str) -> TurnResult:
     client = _get_client()
     result = TurnResult()
 
+    # Sanitize surrogates (WSL terminal issue)
+    user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
+    
     # Save user message
     db.save_message("user", user_input)
 

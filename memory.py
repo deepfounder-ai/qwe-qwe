@@ -45,6 +45,8 @@ def _get_embed() -> OpenAI:
 
 
 def _embed(text: str) -> list[float]:
+    # Sanitize surrogates that can appear in WSL terminals
+    text = text.encode("utf-8", errors="replace").decode("utf-8")
     resp = _get_embed().embeddings.create(input=text, model=config.EMBED_MODEL)
     return resp.data[0].embedding
 
