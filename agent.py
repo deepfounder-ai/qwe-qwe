@@ -91,10 +91,11 @@ def run(user_input: str) -> TurnResult:
     rounds = 0
 
     while rounds < config.MAX_TOOL_ROUNDS:
+        all_tools = tools.get_all_tools()
         resp = client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=messages,
-            tools=tools.TOOLS,
+            tools=all_tools,
             tool_choice="auto",
             temperature=0.7,
             max_tokens=2048,

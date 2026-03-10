@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
-import agent, db, soul
+import agent, db, soul, skills
 
 console = Console()
 
@@ -19,10 +19,11 @@ LOGO = """[bold yellow]
    ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝     ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝[/]"""
 
 COMMANDS = {
-    "/soul": "Show/edit personality",
+    "/soul": "Personality",
+    "/skills": "Manage skills",
     "/memory": "Search memories",
-    "/stats": "Session stats",
-    "/clear": "Reset history",
+    "/stats": "Stats",
+    "/clear": "Reset",
     "/quit": "Exit",
 }
 
@@ -95,6 +96,34 @@ def handle_soul_command(args: str):
     console.print(f"  [magenta]{result}[/]")
 
 
+def handle_skills_command(args: str):
+    if not args:
+        all_skills = skills.list_all()
+        if not all_skills:
+            console.print("  [dim]No skills found in skills/ folder.[/]")
+            return
+        for s in all_skills:
+            status = "[green]●[/]" if s["active"] else "[dim]○[/]"
+            tools_count = f"[dim]({s['tools']} tools)[/]"
+            desc = f"[dim]— {s['description']}[/]" if s["description"] else ""
+            console.print(f"  {status} [bold]{s['name']}[/] {tools_count} {desc}")
+        console.print("\n  [dim]/skills on <name>  |  /skills off <name>[/]")
+        return
+
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        console.print("  [dim]Usage: /skills on <name>  |  /skills off <name>[/]")
+        return
+
+    action, name = parts
+    if action == "on":
+        console.print(f"  [green]{skills.enable(name)}[/]")
+    elif action == "off":
+        console.print(f"  [yellow]{skills.disable(name)}[/]")
+    else:
+        console.print("  [dim]Usage: /skills on <name>  |  /skills off <name>[/]")
+
+
 def search_memory():
     query = console.input("[cyan]  search query >[/] ").strip()
     if not query:
@@ -137,6 +166,9 @@ def main():
             continue
         if user_input.startswith("/soul"):
             handle_soul_command(user_input[5:].strip())
+            continue
+        if user_input.startswith("/skills"):
+            handle_skills_command(user_input[7:].strip())
             continue
         if user_input == "/memory":
             search_memory()

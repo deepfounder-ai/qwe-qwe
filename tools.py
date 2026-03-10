@@ -150,7 +150,18 @@ def execute(name: str, args: dict) -> str:
             return text
 
         else:
+            # Try skills
+            import skills
+            result = skills.execute(name, args)
+            if result is not None:
+                return result
             return f"Unknown tool: {name}"
 
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}"
+
+
+def get_all_tools() -> list[dict]:
+    """Get base tools + active skill tools."""
+    import skills
+    return TOOLS + skills.get_tools()
