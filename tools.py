@@ -70,11 +70,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "shell",
-            "description": "Run a shell command and return output. Use for system tasks, listing files, installing packages, etc.",
+            "description": "Run a shell command and return output. Use for system tasks, listing files, installing packages, git operations, etc. For long commands (installs, builds) set timeout higher.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to execute"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, use 120+ for installs)"},
                 },
                 "required": ["command"],
             },
@@ -130,8 +131,9 @@ def execute(name: str, args: dict) -> str:
             return f"Written {len(args['content'])} chars to {p}"
 
         elif name == "shell":
+            t = min(args.get("timeout", 30), 300)  # max 5 min
             result = subprocess.run(
-                args["command"], shell=True, capture_output=True, text=True, timeout=30
+                args["command"], shell=True, capture_output=True, text=True, timeout=t
             )
             output = result.stdout
             if result.stderr:
