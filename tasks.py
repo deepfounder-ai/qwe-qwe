@@ -1,0 +1,134 @@
+"""Background task runner — sub-agent tasks that run sequentially."""
+
+import threading, queue, time, json, re
+from openai import OpenAI
+import config, db, memory, tools
+
+_task_queue: queue.Queue = queue.Queue()
+_results: list[dict] = []  # [{id, task, status, result, ts}]
+_worker_started = False
+_lock = threading.Lock()
+_task_counter = 0
+
+
+def _strip_thinking(text: str) -> str:
+    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+
+
+def _run_task(task_id: int, task_desc: str):
+    """Run a single task through the LLM with tools."""
+    client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+
+    messages = [
+        {"role": "system", "content": (
+            "You are a background worker. Complete the task efficiently.\n"
+            "Use tools to accomplish the task. Be concise.\n"
+            "When done, summarize what you did in one sentence."
+        )},
+        {"role": "user", "content": task_desc},
+    ]
+
+    all_tools = tools.get_all_tools()
+    rounds = 0
+    max_rounds = 5
+
+    while rounds < max_rounds:
+        try:
+            resp = client.chat.completions.create(
+                model=config.LLM_MODEL,
+                messages=messages,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=0.5,
+                max_tokens=1024,
+            )
+        except Exception as e:
+            _save_result(task_id, task_desc, "error", str(e))
+            return
+
+        msg = resp.choices[0].message
+
+        if msg.tool_calls:
+            assistant_msg = {"role": "assistant", "content": msg.content or ""}
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ]
+            messages.append(assistant_msg)
+
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+                result = tools.execute(tc.function.name, args)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+            rounds += 1
+            continue
+
+        # Final response
+        reply = _strip_thinking(msg.content or "")
+        _save_result(task_id, task_desc, "done", reply)
+        return
+
+    _save_result(task_id, task_desc, "done", "Task completed (max rounds reached)")
+
+
+def _save_result(task_id: int, task_desc: str, status: str, result: str):
+    with _lock:
+        _results.append({
+            "id": task_id,
+            "task": task_desc,
+            "status": status,
+            "result": result,
+            "ts": time.time(),
+        })
+
+
+def _worker():
+    """Background worker thread — processes tasks one by one."""
+    while True:
+        task_id, task_desc = _task_queue.get()
+        try:
+            _run_task(task_id, task_desc)
+        except Exception as e:
+            _save_result(task_id, task_desc, "error", str(e))
+        finally:
+            _task_queue.task_done()
+
+
+def spawn(task_desc: str) -> int:
+    """Add a task to the queue. Returns task id."""
+    global _worker_started, _task_counter
+
+    if not _worker_started:
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        _worker_started = True
+
+    with _lock:
+        _task_counter += 1
+        task_id = _task_counter
+
+    _task_queue.put((task_id, task_desc))
+    return task_id
+
+
+def get_results(clear: bool = True) -> list[dict]:
+    """Get completed task results."""
+    with _lock:
+        results = list(_results)
+        if clear:
+            _results.clear()
+    return results
+
+
+def pending_count() -> int:
+    return _task_queue.qsize()
+
+
+def completed_count() -> int:
+    with _lock:
+        return len(_results)

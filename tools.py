@@ -80,6 +80,20 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_task",
+            "description": "Run a task in the background. Use for things that can run independently while you continue chatting. Returns task id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Task description — what the background worker should do"},
+                },
+                "required": ["task"],
+            },
+        },
+    },
 ]
 
 # NOTE: web_fetch removed from core — small models handle 5 tools better than 6.
@@ -143,6 +157,11 @@ def execute(name: str, args: dict) -> str:
             if len(output) > 2000:
                 output = output[:1000] + "\n...(truncated)...\n" + output[-500:]
             return output.strip() or "(no output)"
+
+        elif name == "spawn_task":
+            import tasks
+            task_id = tasks.spawn(args["task"])
+            return f"Task #{task_id} queued: {args['task'][:60]}"
 
         else:
             # Try skills

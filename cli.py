@@ -5,15 +5,15 @@ import sys, time, readline
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-import agent, db, soul, skills
+import agent, db, soul, skills, tasks
 
 console = Console()
 
 # Enable readline for input history + arrow keys
-readline.parse_and_bind('"\e[A": previous-history')
-readline.parse_and_bind('"\e[B": next-history')
-readline.parse_and_bind('"\e[C": forward-char')
-readline.parse_and_bind('"\e[D": backward-char')
+readline.parse_and_bind('"\\e[A": previous-history')
+readline.parse_and_bind('"\\e[B": next-history')
+readline.parse_and_bind('"\\e[C": forward-char')
+readline.parse_and_bind('"\\e[D": backward-char')
 
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
@@ -209,6 +209,29 @@ def handle_skills_command(args: str):
         render()
 
 
+def show_tasks():
+    results = tasks.get_results(clear=False)
+    pending = tasks.pending_count()
+    if not results and pending == 0:
+        console.print("  [dim]No tasks.[/]")
+        return
+    if pending:
+        console.print(f"  [yellow]⏳ {pending} task(s) running...[/]")
+    for r in results:
+        icon = "[green]✅[/]" if r["status"] == "done" else "[red]❌[/]"
+        console.print(f"  {icon} #{r['id']} {r['task'][:50]}")
+        console.print(f"      [dim]{r['result'][:100]}[/]")
+
+
+def _check_background_tasks():
+    """Show completed background tasks."""
+    results = tasks.get_results(clear=True)
+    for r in results:
+        icon = "✅" if r["status"] == "done" else "❌"
+        console.print(f"\n  [bold]{icon} Task #{r['id']}:[/] {r['task'][:60]}")
+        console.print(f"  [dim]{r['result'][:200]}[/]\n")
+
+
 def search_memory():
     query = console.input("[cyan]  search query >[/] ").strip()
     if not query:
@@ -231,6 +254,8 @@ def main():
 
     while True:
         try:
+            # Check background tasks
+            _check_background_tasks()
             # Status line + input separator
             console.print(f"  [dim]{_status_line()}[/]")
             console.print("  [dim]" + "─" * (console.width - 4) + "[/]")
@@ -256,6 +281,9 @@ def main():
             continue
         if user_input.startswith("/skills"):
             handle_skills_command(user_input[7:].strip())
+            continue
+        if user_input == "/tasks":
+            show_tasks()
             continue
         if user_input == "/memory":
             search_memory()
