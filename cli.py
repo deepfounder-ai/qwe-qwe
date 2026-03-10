@@ -51,7 +51,7 @@ def show_banner():
         justify="center",
     )
     console.print(
-        "  [dim]/soul  /skills  /memory  /stats  /clear  /quit[/]\n"
+        "  [dim]/soul  /skills  /memory  /cron  /tasks  /stats  /clear  /quit[/]\n"
     )
 
 
