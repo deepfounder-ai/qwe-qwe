@@ -215,7 +215,7 @@ def main():
             # Status line + input separator
             console.print(f"  [dim]{_status_line()}[/]")
             console.print("  [dim]" + "─" * (console.width - 4) + "[/]")
-            user_input = console.input("  ").strip()
+            user_input = console.input("  [bold yellow]⚡ >[/] ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n  [dim]👋[/]")
             break
