@@ -75,17 +75,15 @@ def to_prompt(soul: dict) -> str:
     """Build a compact, instruction-dense system prompt optimized for small models."""
     lines = []
 
-    # Identity (1 line)
-    traits_active = []
+    # Identity + personality as levels
+    lines.append(f"You are {soul['name']}. Reply in {soul['language']}.")
+    lines.append("Personality (0=min, 10=max):")
     for trait, value in soul.items():
         if trait in ("name", "language"):
             continue
         if trait in TRAIT_DESCRIPTIONS:
-            _, high = TRAIT_DESCRIPTIONS[trait]
-            if value >= 7:
-                traits_active.append(high.split(",")[0])  # just first descriptor
-    trait_str = f" Style: {', '.join(traits_active)}." if traits_active else ""
-    lines.append(f"You are {soul['name']}. Reply in {soul['language']}.{trait_str}")
+            low, high = TRAIT_DESCRIPTIONS[trait]
+            lines.append(f"  {trait}={value} ({low} ← → {high})")
 
     # System info (1 line)
     lines.append(f"System: {_get_sysinfo()}")
