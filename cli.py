@@ -264,12 +264,11 @@ def main():
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
             continue
 
-        with console.status("[yellow]  ...[/]", spinner="dots"):
-            try:
-                result = agent.run(user_input)
-            except Exception as e:
-                console.print(f"  [red]✗ {e}[/]")
-                continue
+        try:
+            result = agent.run(user_input)
+        except Exception as e:
+            console.print(f"  [red]✗ {e}[/]")
+            continue
 
         console.print()
         console.print(f"  🦆 ", end="")

@@ -1,15 +1,23 @@
 """Core agent loop — the brain of qwe-qwe."""
 
-import json, re
+import json, re, sys
 from openai import OpenAI
+from rich.console import Console
 import config, db, tools, memory, soul
 
 _client: OpenAI | None = None
+_console = Console()
 
 
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks from model output."""
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+
+
+def _extract_thinking(text: str) -> str | None:
+    """Extract thinking content."""
+    m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    return m.group(1).strip() if m else None
 
 
 def _get_client() -> OpenAI:
@@ -148,49 +156,111 @@ def run(user_input: str) -> TurnResult:
 
     while rounds < config.MAX_TOOL_ROUNDS:
         all_tools = tools.get_all_tools()
-        resp = client.chat.completions.create(
+
+        # Stream the response
+        stream = client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=messages,
             tools=all_tools,
             tool_choice="auto",
             temperature=0.7,
             max_tokens=2048,
+            stream=True,
         )
 
-        # Accumulate usage
-        if resp.usage:
-            result.prompt_tokens += resp.usage.prompt_tokens or 0
-            result.completion_tokens += resp.usage.completion_tokens or 0
-            result.total_tokens += resp.usage.total_tokens or 0
+        # Collect streamed response
+        full_content = ""
+        tool_calls_data: dict[int, dict] = {}  # index -> {id, name, arguments}
+        in_think = False
+        think_shown = False
+        finish_reason = None
 
-        choice = resp.choices[0]
-        msg = choice.message
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if not delta:
+                continue
 
-        # If model wants to call tools
-        if msg.tool_calls:
-            assistant_msg = {"role": "assistant", "content": msg.content or ""}
+            finish_reason = chunk.choices[0].finish_reason
+
+            # Stream content (text)
+            if delta.content:
+                full_content += delta.content
+
+                # Show thinking in real-time (dimmed)
+                text = delta.content
+                if "<think>" in text:
+                    in_think = True
+                    if not think_shown:
+                        _console.print("  [dim]💭 ", end="")
+                        think_shown = True
+                    text = text.replace("<think>", "")
+                if "</think>" in text:
+                    in_think = False
+                    text = text.replace("</think>", "")
+                    _console.print("[/]", end="")
+
+                if in_think and text.strip():
+                    # Show thinking dimmed, truncated
+                    clean = text.replace("\n", " ").strip()
+                    if clean:
+                        print(clean[:80], end="", flush=True)
+                elif not in_think and not think_shown:
+                    pass  # will be shown as final reply
+
+            # Stream tool calls
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_data:
+                        tool_calls_data[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        tool_calls_data[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tool_calls_data[idx]["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tool_calls_data[idx]["arguments"] += tc_delta.function.arguments
+
+        if think_shown:
+            _console.print()  # newline after thinking
+
+        # Process tool calls
+        if tool_calls_data:
+            assistant_msg = {"role": "assistant", "content": full_content}
             assistant_msg["tool_calls"] = [
                 {
-                    "id": tc.id,
+                    "id": tc["id"],
                     "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
                 }
-                for tc in msg.tool_calls
+                for tc in tool_calls_data.values()
             ]
             messages.append(assistant_msg)
 
-            for tc in msg.tool_calls:
-                result.tool_calls_made.append(tc.function.name)
-                try:
-                    args = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+            for tc in tool_calls_data.values():
+                result.tool_calls_made.append(tc["name"])
 
-                tool_result = tools.execute(tc.function.name, args)
+                # Show tool call
+                try:
+                    args = json.loads(tc["arguments"])
+                    args_short = json.dumps(args, ensure_ascii=False)
+                    if len(args_short) > 80:
+                        args_short = args_short[:80] + "..."
+                except Exception:
+                    args = {}
+                    args_short = tc["arguments"][:80]
+
+                _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
+
+                tool_result = tools.execute(tc["name"], args)
+
+                # Show tool result preview
+                preview = tool_result.replace("\n", " ")[:100]
+                _console.print(f"  [dim]   → {preview}[/]")
 
                 tool_msg = {
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": tc["id"],
                     "content": tool_result,
                 }
                 messages.append(tool_msg)
@@ -199,35 +269,31 @@ def run(user_input: str) -> TurnResult:
             continue
 
         # No tool calls — final response
-        raw_reply = _strip_thinking(msg.content or "")
+        raw_reply = _strip_thinking(full_content)
 
-        # Retry: if model says "I would..." or "I can..." instead of acting, nudge it
+        # Retry: if model hedges instead of acting
         action_phrases = ["i would", "i can", "i'll", "let me", "shall i", "want me to"]
         if (rounds == 0 and
             any(p in raw_reply.lower()[:100] for p in action_phrases) and
             len(raw_reply) < 300):
-            # Model is hedging instead of acting — retry with nudge
             messages.append({"role": "assistant", "content": raw_reply})
             messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools."})
+            _console.print(f"  [dim]🔄 nudging to use tools...[/]")
             rounds += 1
             continue
 
         result.reply = raw_reply
-
-        # Save to SQLite
         db.save_message("assistant", result.reply)
 
-        # Track cumulative session tokens
-        prev = int(db.kv_get("session_prompt_tokens") or "0")
-        db.kv_set("session_prompt_tokens", str(prev + result.prompt_tokens))
+        # Track session tokens (estimate from content length since streaming doesn't give usage)
+        est_tokens = len(full_content) // 4
         prev = int(db.kv_get("session_completion_tokens") or "0")
-        db.kv_set("session_completion_tokens", str(prev + result.completion_tokens))
+        db.kv_set("session_completion_tokens", str(prev + est_tokens))
         prev = int(db.kv_get("session_turns") or "0")
         db.kv_set("session_turns", str(prev + 1))
 
         return result
 
-    # Hit max rounds
     result.reply = "I've used all my tool rounds for this turn."
     db.save_message("assistant", result.reply)
     return result
