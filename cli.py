@@ -136,29 +136,71 @@ def handle_soul_command(args: str):
 
 
 def handle_skills_command(args: str):
-    if not args:
-        all_skills = skills.list_all()
-        if not all_skills:
-            console.print("  [dim]No skills found in skills/ folder.[/]")
-            return
-        for s in all_skills:
-            status = "[green]●[/]" if s["active"] else "[dim]○[/]"
+    if args:
+        parts = args.split(maxsplit=1)
+        if len(parts) == 2:
+            action, name = parts
+            if action == "on":
+                console.print(f"  [green]{skills.enable(name)}[/]")
+            elif action == "off":
+                console.print(f"  [yellow]{skills.disable(name)}[/]")
+        return
+
+    # Interactive skill selector
+    import readchar
+
+    all_skills = skills.list_all()
+    if not all_skills:
+        console.print("  [dim]No skills found in skills/ folder.[/]")
+        return
+
+    selected = {s["name"] for s in all_skills if s["active"]}
+    cursor = 0
+
+    def render():
+        # Clear previous render
+        if render.first:
+            render.first = False
+        else:
+            # Move up and clear lines
+            lines_to_clear = len(all_skills) + 3
+            sys.stdout.write(f"\033[{lines_to_clear}A\033[J")
+
+        console.print("  [bold magenta]⚡ Skills[/]  [dim]↑↓ move  space toggle  enter save[/]\n")
+        for i, s in enumerate(all_skills):
+            check = "[green]●[/]" if s["name"] in selected else "[dim]○[/]"
+            pointer = "[bold yellow]▸[/]" if i == cursor else " "
+            name_style = "bold" if s["name"] in selected else ""
             tools_count = f"[dim]({s['tools']} tools)[/]"
             desc = f"[dim]— {s['description']}[/]" if s["description"] else ""
-            console.print(f"  {status} [bold]{s['name']}[/] {tools_count} {desc}")
-        console.print("\n  [dim]/skills on <name>  |  /skills off <name>[/]")
-        return
-    parts = args.split(maxsplit=1)
-    if len(parts) < 2:
-        console.print("  [dim]Usage: /skills on <name>  |  /skills off <name>[/]")
-        return
-    action, name = parts
-    if action == "on":
-        console.print(f"  [green]{skills.enable(name)}[/]")
-    elif action == "off":
-        console.print(f"  [yellow]{skills.disable(name)}[/]")
-    else:
-        console.print("  [dim]Usage: /skills on <name>  |  /skills off <name>[/]")
+            console.print(f"  {pointer} {check} [{name_style}]{s['name']}[/] {tools_count} {desc}")
+        console.print()
+
+    render.first = True
+    render()
+
+    while True:
+        key = readchar.readkey()
+
+        if key in (readchar.key.UP, "k"):
+            cursor = (cursor - 1) % len(all_skills)
+        elif key in (readchar.key.DOWN, "j"):
+            cursor = (cursor + 1) % len(all_skills)
+        elif key == " ":
+            name = all_skills[cursor]["name"]
+            if name in selected:
+                selected.discard(name)
+            else:
+                selected.add(name)
+        elif key in (readchar.key.ENTER, "\r", "\n"):
+            # Save
+            skills.set_active(selected)
+            console.print(f"  [green]✓ Active: {', '.join(sorted(selected)) or 'none'}[/]")
+            return
+        elif key in ("q", readchar.key.ESC):
+            return
+
+        render()
 
 
 def search_memory():
