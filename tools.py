@@ -131,7 +131,7 @@ def execute(name: str, args: dict) -> str:
             return f"Written {len(args['content'])} chars to {p}"
 
         elif name == "shell":
-            t = min(args.get("timeout", 30), 300)  # max 5 min
+            t = min(args.get("timeout", 120), 300)  # default 2min, max 5min
             result = subprocess.run(
                 args["command"], shell=True, capture_output=True, text=True, timeout=t
             )
