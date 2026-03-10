@@ -255,6 +255,13 @@ def run(user_input: str) -> TurnResult:
                 messages.append(tool_msg)
 
             rounds += 1
+
+            # Trim context if too large (4 chars ≈ 1 token, keep under ~6k tokens)
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            if total_chars > 24000:
+                system = messages[0]
+                messages = [system] + messages[-6:]
+
             continue
 
         # No tool calls — final response

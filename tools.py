@@ -139,9 +139,9 @@ def execute(name: str, args: dict) -> str:
                 output += f"\nSTDERR: {result.stderr}"
             if result.returncode != 0:
                 output += f"\n(exit code: {result.returncode})"
-            # Truncate long outputs
-            if len(output) > 4000:
-                output = output[:2000] + "\n...(truncated)...\n" + output[-1000:]
+            # Truncate long outputs aggressively for small context models
+            if len(output) > 2000:
+                output = output[:1000] + "\n...(truncated)...\n" + output[-500:]
             return output.strip() or "(no output)"
 
         else:
