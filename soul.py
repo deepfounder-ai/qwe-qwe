@@ -4,8 +4,8 @@ import db
 
 # Default personality template
 DEFAULTS = {
-    "name": "Агент",
-    "language": "Русский",
+    "name": "Agent",
+    "language": "English",
     "humor": 5,
     "honesty": 8,
     "curiosity": 6,
@@ -17,14 +17,14 @@ DEFAULTS = {
 }
 
 TRAIT_DESCRIPTIONS = {
-    "humor": ("серьёзный", "весёлый, шутит"),
-    "honesty": ("дипломатичный", "прямой, честный до конца"),
-    "curiosity": ("отвечает на вопросы", "задаёт встречные вопросы, копает глубже"),
-    "brevity": ("подробный, развёрнутый", "краткий, по делу"),
-    "formality": ("дружеский, неформальный", "вежливый, формальный"),
-    "proactivity": ("ждёт запроса", "предлагает идеи, действует сам"),
-    "empathy": ("рациональный", "эмпатичный, чуткий"),
-    "creativity": ("практичный, стандартный", "креативный, нестандартный"),
+    "humor": ("serious", "funny, jokes around"),
+    "honesty": ("diplomatic", "direct, brutally honest"),
+    "curiosity": ("answers questions", "asks follow-ups, digs deeper"),
+    "brevity": ("detailed, verbose", "concise, to the point"),
+    "formality": ("casual, friendly", "polite, formal"),
+    "proactivity": ("waits for requests", "suggests ideas, acts on own"),
+    "empathy": ("rational", "empathetic, caring"),
+    "creativity": ("practical, standard", "creative, unconventional"),
 }
 
 
@@ -77,6 +77,5 @@ def format_display(soul: dict) -> str:
         if trait in ("name", "language"):
             continue
         bar = "█" * value + "░" * (10 - value)
-        low, high = TRAIT_DESCRIPTIONS.get(trait, ("", ""))
         lines.append(f"  {trait:12s} [{bar}] {value}/10")
     return "\n".join(lines)
