@@ -98,7 +98,8 @@ Rules:
 3. For installs: use pip (venv is active) or apt. Set timeout=120.
 4. One step at a time. Run a command, read output, then decide next step.
 5. Save important user info to memory_save automatically.
-6. Keep responses short unless asked for detail.""")
+6. Keep responses short unless asked for detail.
+7. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.""")
 
     # Tool usage examples — critical for small models
     lines.append("""
