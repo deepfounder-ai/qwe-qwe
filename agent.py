@@ -153,6 +153,8 @@ def run(user_input: str) -> TurnResult:
         result.auto_context_hits = system_content.count("\n- [")
 
     rounds = 0
+    last_failed_tool = None
+    fail_count = 0
 
     while rounds < config.MAX_TOOL_ROUNDS:
         all_tools = tools.get_all_tools()
@@ -242,6 +244,20 @@ def run(user_input: str) -> TurnResult:
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
 
                 tool_result = tools.execute(tc["name"], args)
+
+                # Detect repeated failures
+                if tool_result.startswith("Error"):
+                    if tc["name"] == last_failed_tool:
+                        fail_count += 1
+                    else:
+                        last_failed_tool = tc["name"]
+                        fail_count = 1
+
+                    if fail_count >= 2:
+                        tool_result += "\n\nSTOP: This tool failed twice. Do NOT retry. Answer with what you have or try a different approach."
+                else:
+                    last_failed_tool = None
+                    fail_count = 0
 
                 # Show tool result preview
                 preview = tool_result.replace("\n", " ")[:100]
