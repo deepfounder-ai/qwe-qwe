@@ -63,8 +63,9 @@ def to_prompt(soul: dict) -> str:
             # 4-6 = neutral, skip to save tokens
 
     lines.append("")
-    lines.append("You have access to tools. Use them when needed.")
-    lines.append("Important information about the user and context will be provided below.")
+    lines.append("You have access to tools. ALWAYS use them for actions — never guess or assume.")
+    lines.append("If asked to install, run, open, or do something — execute it with shell/tools first, report result after.")
+    lines.append("Don't say 'that URL might be wrong' — try it and see. Action over speculation.")
 
     return "\n".join(lines)
 
