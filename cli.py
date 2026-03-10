@@ -94,12 +94,9 @@ def handle_soul_command(args: str):
         return
 
     # Interactive mode
-    console.print(Panel(
-        "[bold]🧬 Soul Editor[/]\n"
-        "[dim]← → adjust  │  Enter confirm  │  q done[/]",
-        border_style="magenta",
-        padding=(0, 2),
-    ))
+    console.print()
+    console.print("  [bold magenta]🧬 Soul Editor[/]")
+    console.print("  [dim]Enter value or press Enter to keep current. q to finish.[/]\n")
 
     for field in ("name", "language"):
         try:
@@ -111,49 +108,23 @@ def handle_soul_command(args: str):
         except (EOFError, KeyboardInterrupt):
             return
 
+    console.print()
     numeric_traits = [k for k in s if k not in ("name", "language")]
     for trait in numeric_traits:
         value = s[trait]
         low, high = soul.TRAIT_DESCRIPTIONS.get(trait, ("low", "high"))
-        while True:
-            slider = _render_slider(value)
-            console.print(
-                f"\r  [dim]{low[:12]:>12s}[/] {slider} [dim]{high[:12]:<12s}[/]  "
-                f"[bold cyan]{trait}[/] = [bold yellow]{value:>2d}[/]/10",
-                end="",
-            )
-            try:
-                key = console.input("  [dim](←-/+→/enter)[/] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                console.print()
-                return
-            if key in ("-", "a", "[", ","):
-                value = max(0, value - 1)
-            elif key in ("+", "d", "]", ".", "="):
-                value = min(10, value + 1)
-            elif key.isdigit():
-                v = int(key)
-                if v == 1 and value == 1:
-                    value = 10
-                else:
-                    value = min(v, 10)
-                soul.save(trait, value)
-                s[trait] = value
-                break
-            elif key == "":
-                soul.save(trait, value)
-                s[trait] = value
-                break
-            elif key == "q":
-                soul.save(trait, value)
-                console.print()
-                console.print(Panel(
-                    soul.format_display(soul.load()),
-                    title="[bold]🧬 Soul — saved[/]",
-                    border_style="magenta",
-                    padding=(0, 2),
-                ))
-                return
+        bar = "█" * value + "░" * (10 - value)
+        console.print(f"  [{bar}] [bold cyan]{trait}[/] = [bold]{value}[/]  [dim]{low} ← → {high}[/]")
+        try:
+            inp = console.input(f"  [dim]new value 0-10 (enter=keep)[/] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if inp == "q":
+            break
+        if inp.isdigit():
+            v = max(0, min(10, int(inp)))
+            soul.save(trait, v)
+            s[trait] = v
 
     console.print()
     console.print(Panel(
