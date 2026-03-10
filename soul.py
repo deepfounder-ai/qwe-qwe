@@ -1,5 +1,6 @@
 """Soul — agent personality as compact numeric config."""
 
+from pathlib import Path
 import db
 
 # Default personality template
@@ -46,6 +47,36 @@ def save(key: str, value) -> str:
     return f"✓ {key} = {value}"
 
 
+def _system_info() -> str:
+    """Detect system info once."""
+    import platform, os, shutil
+    parts = [f"OS: {platform.system()} {platform.release()}"]
+    parts.append(f"Arch: {platform.machine()}")
+    parts.append(f"Python: {platform.python_version()}")
+    parts.append(f"Shell: {os.environ.get('SHELL', 'unknown')}")
+    parts.append(f"Home: {Path.home()}")
+    parts.append(f"CWD: {os.getcwd()}")
+    # Package managers
+    pms = []
+    for pm in ("apt", "brew", "dnf", "pacman", "pip", "npm"):
+        if shutil.which(pm):
+            pms.append(pm)
+    parts.append(f"Package managers: {', '.join(pms)}")
+    # WSL detection
+    if "microsoft" in platform.release().lower() or "wsl" in platform.release().lower():
+        parts.append("Environment: WSL (Windows Subsystem for Linux)")
+    return " | ".join(parts)
+
+
+_cached_sysinfo: str | None = None
+
+def _get_sysinfo() -> str:
+    global _cached_sysinfo
+    if _cached_sysinfo is None:
+        _cached_sysinfo = _system_info()
+    return _cached_sysinfo
+
+
 def to_prompt(soul: dict) -> str:
     """Convert soul config to a compact system prompt."""
     lines = [f"You are {soul['name']}. Language: {soul['language']}."]
@@ -62,6 +93,8 @@ def to_prompt(soul: dict) -> str:
                 lines.append(f"- {trait}={value}: {low}")
             # 4-6 = neutral, skip to save tokens
 
+    lines.append("")
+    lines.append(f"System: {_get_sysinfo()}")
     lines.append("")
     lines.append("You have access to tools. ALWAYS use them for actions — never guess or assume.")
     lines.append("If asked to install, run, open, or do something — execute it with shell/tools first, report result after.")
