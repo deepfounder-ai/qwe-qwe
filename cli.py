@@ -283,6 +283,7 @@ def main():
     # Start scheduler
     scheduler.on_complete(_on_cron_complete)
     scheduler.start()
+    console.print("  [dim]⏰ Scheduler running[/]")
 
     show_banner()
 
