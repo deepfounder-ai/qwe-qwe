@@ -174,6 +174,10 @@ def main():
             search_memory()
             continue
 
+        if user_input.startswith("/"):
+            console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
+            continue
+
         t0 = time.time()
 
         with console.status("[yellow]  thinking...[/]", spinner="dots"):
