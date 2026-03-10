@@ -274,6 +274,10 @@ _cron_results: list[tuple] = []
 
 def _on_cron_complete(name, task, result):
     _cron_results.append((name, task, result))
+    # Push notification immediately to terminal
+    print(f"\n\n  ⏰ Cron '{name}': {task[:60]}")
+    print(f"  {result[:200]}\n")
+    sys.stdout.flush()
 
 def main():
     # Start scheduler
