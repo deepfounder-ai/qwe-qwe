@@ -5,7 +5,7 @@ import sys, time, readline
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-import agent, db, soul, skills, tasks
+import agent, db, soul, skills, tasks, scheduler
 
 console = Console()
 
@@ -209,6 +209,27 @@ def handle_skills_command(args: str):
         render()
 
 
+def handle_cron(args: str):
+    if args.startswith("rm "):
+        try:
+            task_id = int(args[3:].strip())
+            console.print(f"  {scheduler.remove(task_id)}")
+        except ValueError:
+            console.print("  [dim]Usage: /cron rm <id>[/]")
+        return
+
+    tasks_list = scheduler.list_tasks()
+    if not tasks_list:
+        console.print("  [dim]No scheduled tasks. Agent can create them with schedule_task tool.[/]")
+        return
+    for t in tasks_list:
+        status = "[green]●[/]" if t["enabled"] else "[dim]○[/]"
+        repeat = "🔄" if t["repeat"] else "⏱"
+        console.print(f"  {status} #{t['id']} {repeat} [bold]{t['name']}[/] → {t['next_run']} [dim]({t['schedule']})[/]")
+        console.print(f"      [dim]{t['task'][:80]}[/]")
+    console.print(f"\n  [dim]/cron rm <id> to remove[/]")
+
+
 def show_tasks():
     results = tasks.get_results(clear=False)
     pending = tasks.pending_count()
@@ -249,13 +270,26 @@ def search_memory():
         )
 
 
+_cron_results: list[tuple] = []
+
+def _on_cron_complete(name, task, result):
+    _cron_results.append((name, task, result))
+
 def main():
+    # Start scheduler
+    scheduler.on_complete(_on_cron_complete)
+    scheduler.start()
+
     show_banner()
 
     while True:
         try:
-            # Check background tasks
+            # Check background + scheduled tasks
             _check_background_tasks()
+            while _cron_results:
+                name, task, result = _cron_results.pop(0)
+                console.print(f"\n  [bold]⏰ Cron '{name}':[/] {task[:60]}")
+                console.print(f"  [dim]{result[:200]}[/]\n")
             # Status line + input separator
             console.print(f"  [dim]{_status_line()}[/]")
             console.print("  [dim]" + "─" * (console.width - 4) + "[/]")
@@ -284,6 +318,9 @@ def main():
             continue
         if user_input == "/tasks":
             show_tasks()
+            continue
+        if user_input.startswith("/cron"):
+            handle_cron(user_input[5:].strip())
             continue
         if user_input == "/memory":
             search_memory()

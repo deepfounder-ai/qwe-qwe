@@ -83,6 +83,22 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "schedule_task",
+            "description": "Schedule a task to run later or repeatedly. Formats: 'in 5m', 'in 2h', 'every 30m', 'daily 09:00', '14:30'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short name for the task"},
+                    "task": {"type": "string", "description": "What to do when the time comes"},
+                    "schedule": {"type": "string", "description": "When: 'in 5m', 'every 1h', 'daily 09:00', '14:30'"},
+                },
+                "required": ["name", "task", "schedule"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "spawn_task",
             "description": "Run a task in background while you handle other tasks. MUST use when user gives 2+ separate tasks in one message. Each task gets its own worker.",
             "parameters": {
@@ -157,6 +173,14 @@ def execute(name: str, args: dict) -> str:
             if len(output) > 2000:
                 output = output[:1000] + "\n...(truncated)...\n" + output[-500:]
             return output.strip() or "(no output)"
+
+        elif name == "schedule_task":
+            import scheduler
+            result = scheduler.add(args["name"], args["task"], args["schedule"])
+            if "error" in result:
+                return result["error"]
+            repeat_str = " (repeating)" if result["repeat"] else " (one-time)"
+            return f"✓ Scheduled '{result['name']}' → next run: {result['next_run']}{repeat_str}"
 
         elif name == "spawn_task":
             import tasks
