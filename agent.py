@@ -49,8 +49,17 @@ def _build_messages(user_input: str) -> list[dict]:
 
     msgs = [{"role": "system", "content": system_text}]
 
-    # Recent history from SQLite
+    # Recent history from SQLite (skip if it would create invalid sequences)
     history = db.get_recent_messages()
+
+    # Ensure history starts with user (not assistant) after system
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+
+    # Remove trailing user messages (we'll add the new one)
+    while history and history[-1]["role"] == "user":
+        history.pop()
+
     msgs.extend(history)
 
     # New user message
