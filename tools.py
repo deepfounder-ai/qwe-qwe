@@ -1,22 +1,21 @@
-"""Tool definitions and execution for the agent."""
+"""Tool definitions and execution — optimized for small models."""
 
 import json, subprocess, os
 from pathlib import Path
 import memory
 
-# ── Tool definitions (OpenAI function calling format) ──
+# ── Tool definitions — SHORT descriptions, small models need clarity ──
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "memory_search",
-            "description": "Search long-term memory for relevant information. Use before answering questions about past conversations, user preferences, or stored knowledge.",
+            "description": "Search memories about user, past conversations, or saved facts.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "What to search for"},
-                    "tag": {"type": "string", "description": "Optional tag filter (e.g. 'user', 'project', 'fact')"},
+                    "query": {"type": "string", "description": "Search query"},
                 },
                 "required": ["query"],
             },
@@ -26,12 +25,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "memory_save",
-            "description": "Save important information to long-term memory. Use for user preferences, important facts, decisions, or anything worth remembering across sessions.",
+            "description": "Save important info: user preferences, facts, decisions.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "The information to remember"},
-                    "tag": {"type": "string", "description": "Category tag: 'user', 'project', 'fact', 'task', 'general'"},
+                    "text": {"type": "string", "description": "What to remember"},
+                    "tag": {"type": "string", "description": "Category: user/project/fact/task"},
                 },
                 "required": ["text"],
             },
@@ -40,12 +39,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "read_file",
-            "description": "Read contents of a file.",
+            "name": "shell",
+            "description": "Run any shell command. Use for: installs, file operations, git, system tasks. Returns stdout+stderr.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path to read"},
+                    "command": {"type": "string", "description": "Shell command to run"},
+                    "timeout": {"type": "integer", "description": "Seconds to wait (default 120)"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file's contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
                 },
                 "required": ["path"],
             },
@@ -55,47 +69,21 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write content to a file. Creates parent directories if needed.",
+            "description": "Write content to a file. Creates directories if needed.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path to write"},
-                    "content": {"type": "string", "description": "Content to write"},
+                    "path": {"type": "string", "description": "File path"},
+                    "content": {"type": "string", "description": "File content"},
                 },
                 "required": ["path", "content"],
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "shell",
-            "description": "Run a shell command and return output. Use for system tasks, listing files, installing packages, git operations, etc. For long commands (installs, builds) set timeout higher.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, use 120+ for installs)"},
-                },
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_fetch",
-            "description": "Fetch content from a URL. Returns text content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "URL to fetch"},
-                },
-                "required": ["url"],
-            },
-        },
-    },
 ]
+
+# NOTE: web_fetch removed from core — small models handle 5 tools better than 6.
+# Available as a skill if needed.
 
 
 # ── Tool execution ──
@@ -113,12 +101,12 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "memory_save":
             pid = memory.save(args["text"], tag=args.get("tag", "general"))
-            return f"Saved to memory (id: {pid[:8]})"
+            return f"Saved (id: {pid[:8]})"
 
         elif name == "read_file":
             p = Path(args["path"]).expanduser()
             if not p.exists():
-                return f"Error: file not found: {p}"
+                return f"Error: not found: {p}"
             text = p.read_text(encoding="utf-8", errors="replace")
             if len(text) > 8000:
                 text = text[:8000] + f"\n... (truncated, {len(text)} chars total)"
@@ -131,8 +119,7 @@ def execute(name: str, args: dict) -> str:
             return f"Written {len(args['content'])} chars to {p}"
 
         elif name == "shell":
-            t = min(args.get("timeout", 120), 300)  # default 2min, max 5min
-            # Ensure venv is activated for pip/python commands
+            t = min(args.get("timeout", 120), 300)
             env = os.environ.copy()
             venv = os.environ.get("VIRTUAL_ENV")
             if venv:
@@ -146,16 +133,10 @@ def execute(name: str, args: dict) -> str:
                 output += f"\nSTDERR: {result.stderr}"
             if result.returncode != 0:
                 output += f"\n(exit code: {result.returncode})"
+            # Truncate long outputs
+            if len(output) > 4000:
+                output = output[:2000] + "\n...(truncated)...\n" + output[-1000:]
             return output.strip() or "(no output)"
-
-        elif name == "web_fetch":
-            import urllib.request
-            req = urllib.request.Request(args["url"], headers={"User-Agent": "qwe-qwe/0.1"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
-            if len(text) > 8000:
-                text = text[:8000] + "\n... (truncated)"
-            return text
 
         else:
             # Try skills
@@ -165,6 +146,8 @@ def execute(name: str, args: dict) -> str:
                 return result
             return f"Unknown tool: {name}"
 
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {args.get('timeout', 120)}s"
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}"
 

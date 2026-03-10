@@ -199,7 +199,20 @@ def run(user_input: str) -> TurnResult:
             continue
 
         # No tool calls — final response
-        result.reply = _strip_thinking(msg.content or "")
+        raw_reply = _strip_thinking(msg.content or "")
+
+        # Retry: if model says "I would..." or "I can..." instead of acting, nudge it
+        action_phrases = ["i would", "i can", "i'll", "let me", "shall i", "want me to"]
+        if (rounds == 0 and
+            any(p in raw_reply.lower()[:100] for p in action_phrases) and
+            len(raw_reply) < 300):
+            # Model is hedging instead of acting — retry with nudge
+            messages.append({"role": "assistant", "content": raw_reply})
+            messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools."})
+            rounds += 1
+            continue
+
+        result.reply = raw_reply
 
         # Save to SQLite
         db.save_message("assistant", result.reply)

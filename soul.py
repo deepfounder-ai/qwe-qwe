@@ -1,6 +1,7 @@
 """Soul — agent personality as compact numeric config."""
 
 from pathlib import Path
+import os
 import db
 
 # Default personality template
@@ -10,9 +11,9 @@ DEFAULTS = {
     "humor": 5,
     "honesty": 8,
     "curiosity": 6,
-    "brevity": 7,        # 10 = max concise, 0 = verbose
-    "formality": 3,      # 10 = formal, 0 = casual
-    "proactivity": 5,    # 10 = suggests things, 0 = only answers
+    "brevity": 7,
+    "formality": 3,
+    "proactivity": 5,
     "empathy": 5,
     "creativity": 5,
 }
@@ -30,7 +31,6 @@ TRAIT_DESCRIPTIONS = {
 
 
 def load() -> dict:
-    """Load soul from SQLite, merging with defaults."""
     soul = dict(DEFAULTS)
     for key in DEFAULTS:
         val = db.kv_get(f"soul:{key}")
@@ -40,7 +40,6 @@ def load() -> dict:
 
 
 def save(key: str, value) -> str:
-    """Save a soul trait."""
     if key not in DEFAULTS:
         return f"Unknown trait: {key}. Available: {', '.join(DEFAULTS.keys())}"
     db.kv_set(f"soul:{key}", str(value))
@@ -48,26 +47,18 @@ def save(key: str, value) -> str:
 
 
 def _system_info() -> str:
-    """Detect system info once."""
-    import platform, os, shutil
-    parts = [f"OS: {platform.system()} {platform.release()}"]
-    parts.append(f"Arch: {platform.machine()}")
-    parts.append(f"Python: {platform.python_version()}")
-    parts.append(f"Shell: {os.environ.get('SHELL', 'unknown')}")
-    parts.append(f"Home: {Path.home()}")
-    parts.append(f"CWD: {os.getcwd()}")
+    import platform, shutil
+    parts = [f"{platform.system()} {platform.release()} {platform.machine()}"]
+    # WSL detection
+    if "microsoft" in platform.release().lower():
+        parts[0] += " (WSL)"
+    parts.append(f"Python {platform.python_version()}")
+    parts.append(f"cwd: {os.getcwd()}")
     venv = os.environ.get("VIRTUAL_ENV")
     if venv:
-        parts.append(f"Venv: {venv}")
-    # Package managers
-    pms = []
-    for pm in ("apt", "brew", "dnf", "pacman", "pip", "npm"):
-        if shutil.which(pm):
-            pms.append(pm)
-    parts.append(f"Package managers: {', '.join(pms)}")
-    # WSL detection
-    if "microsoft" in platform.release().lower() or "wsl" in platform.release().lower():
-        parts.append("Environment: WSL (Windows Subsystem for Linux)")
+        parts.append(f"venv: {venv}")
+    pms = [pm for pm in ("apt", "brew", "pip", "npm", "cargo") if shutil.which(pm)]
+    parts.append(f"pkg: {','.join(pms)}")
     return " | ".join(parts)
 
 
@@ -81,33 +72,47 @@ def _get_sysinfo() -> str:
 
 
 def to_prompt(soul: dict) -> str:
-    """Convert soul config to a compact system prompt."""
-    lines = [f"You are {soul['name']}. Language: {soul['language']}."]
-    lines.append("Personality traits (scale 0-10):")
+    """Build a compact, instruction-dense system prompt optimized for small models."""
+    lines = []
 
+    # Identity (1 line)
+    traits_active = []
     for trait, value in soul.items():
         if trait in ("name", "language"):
             continue
         if trait in TRAIT_DESCRIPTIONS:
-            low, high = TRAIT_DESCRIPTIONS[trait]
+            _, high = TRAIT_DESCRIPTIONS[trait]
             if value >= 7:
-                lines.append(f"- {trait}={value}: {high}")
-            elif value <= 3:
-                lines.append(f"- {trait}={value}: {low}")
-            # 4-6 = neutral, skip to save tokens
+                traits_active.append(high.split(",")[0])  # just first descriptor
+    trait_str = f" Style: {', '.join(traits_active)}." if traits_active else ""
+    lines.append(f"You are {soul['name']}. Reply in {soul['language']}.{trait_str}")
 
-    lines.append("")
+    # System info (1 line)
     lines.append(f"System: {_get_sysinfo()}")
-    lines.append("")
-    lines.append("You have access to tools. ALWAYS use them for actions — never guess or assume.")
-    lines.append("If asked to install, run, open, or do something — execute it with shell/tools first, report result after.")
-    lines.append("Don't say 'that URL might be wrong' — try it and see. Action over speculation.")
+
+    # Core rules — explicit, numbered, short
+    lines.append("""
+Rules:
+1. ALWAYS use tools for actions. Never say "I would run..." — run it.
+2. If unsure, TRY first with a tool, then report the result.
+3. For installs: use pip (venv is active) or apt. Set timeout=120.
+4. One step at a time. Run a command, read output, then decide next step.
+5. Save important user info to memory_save automatically.
+6. Keep responses short unless asked for detail.""")
+
+    # Tool usage examples — critical for small models
+    lines.append("""
+Examples of correct tool use:
+User: "install httpie" → shell({"command": "pip install httpie", "timeout": 120})
+User: "what files are here" → shell({"command": "ls -la"})
+User: "remember I like python" → memory_save({"text": "User prefers Python", "tag": "user"})
+User: "what do you know about me" → memory_search({"query": "user preferences"})
+User: "read config.py" → read_file({"path": "config.py"})""")
 
     return "\n".join(lines)
 
 
 def format_display(soul: dict) -> str:
-    """Format soul for CLI display."""
     lines = [f"⚡ {soul['name']} ({soul['language']})"]
     lines.append("")
     for trait, value in soul.items():
