@@ -2,14 +2,14 @@
 
 import json, re
 from openai import OpenAI
-import config, db, tools
+import config, db, tools, memory, soul
+
+_client: OpenAI | None = None
 
 
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks from model output."""
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
-
-_client: OpenAI | None = None
 
 
 def _get_client() -> OpenAI:
@@ -19,12 +19,40 @@ def _get_client() -> OpenAI:
     return _client
 
 
+def _auto_context(user_input: str) -> str:
+    """Auto-retrieve relevant memories for the user's message."""
+    try:
+        results = memory.search(user_input, limit=config.MAX_MEMORY_RESULTS)
+        if not results:
+            return ""
+        lines = ["[Relevant context from memory:]"]
+        for r in results:
+            if r["score"] > 0.3:  # only include if somewhat relevant
+                lines.append(f"- [{r['tag']}] {r['text']}")
+        if len(lines) == 1:
+            return ""
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _build_messages(user_input: str) -> list[dict]:
-    """Build minimal context: system + recent history + new user message."""
-    msgs = [{"role": "system", "content": config.SYSTEM_PROMPT}]
+    """Build minimal context: soul + auto-context + recent history + user message."""
+    # Soul → compact system prompt
+    agent_soul = soul.load()
+    system_text = soul.to_prompt(agent_soul)
+
+    # Auto-retrieve from Qdrant
+    context = _auto_context(user_input)
+    if context:
+        system_text += "\n\n" + context
+
+    msgs = [{"role": "system", "content": system_text}]
+
     # Recent history from SQLite
     history = db.get_recent_messages()
     msgs.extend(history)
+
     # New user message
     msgs.append({"role": "user", "content": user_input})
     return msgs
@@ -33,7 +61,7 @@ def _build_messages(user_input: str) -> list[dict]:
 class TurnResult:
     """Result of one agent turn with debug info."""
     __slots__ = ("reply", "prompt_tokens", "completion_tokens", "total_tokens",
-                 "tool_calls_made", "model")
+                 "tool_calls_made", "model", "auto_context_hits")
 
     def __init__(self):
         self.reply = ""
@@ -42,6 +70,7 @@ class TurnResult:
         self.total_tokens = 0
         self.tool_calls_made: list[str] = []
         self.model = config.LLM_MODEL
+        self.auto_context_hits = 0
 
 
 def run(user_input: str) -> TurnResult:
@@ -53,6 +82,12 @@ def run(user_input: str) -> TurnResult:
     db.save_message("user", user_input)
 
     messages = _build_messages(user_input)
+
+    # Count auto-context hits (memories injected into system prompt)
+    system_content = messages[0]["content"]
+    if "[Relevant context from memory:]" in system_content:
+        result.auto_context_hits = system_content.count("\n- [")
+
     rounds = 0
 
     while rounds < config.MAX_TOOL_ROUNDS:
@@ -76,7 +111,6 @@ def run(user_input: str) -> TurnResult:
 
         # If model wants to call tools
         if msg.tool_calls:
-            # Add assistant message with tool calls
             assistant_msg = {"role": "assistant", "content": msg.content or ""}
             assistant_msg["tool_calls"] = [
                 {
@@ -88,7 +122,6 @@ def run(user_input: str) -> TurnResult:
             ]
             messages.append(assistant_msg)
 
-            # Execute each tool call
             for tc in msg.tool_calls:
                 result.tool_calls_made.append(tc.function.name)
                 try:

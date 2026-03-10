@@ -6,9 +6,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
-from rich.live import Live
-from rich.spinner import Spinner
-import agent, db
+import agent, db, soul
 
 console = Console()
 
@@ -21,9 +19,10 @@ LOGO = """[bold yellow]
    ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝     ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝[/]"""
 
 COMMANDS = {
-    "/clear": "Reset conversation history",
-    "/memory": "Search your memories",
-    "/stats": "Show session stats",
+    "/soul": "Show/edit personality",
+    "/memory": "Search memories",
+    "/stats": "Session stats",
+    "/clear": "Reset history",
     "/quit": "Exit",
 }
 
@@ -37,34 +36,71 @@ def show_banner():
     cols = "  ".join(f"[bold cyan]{k}[/][dim] {v}[/]" for k, v in COMMANDS.items())
     console.print(f"  {cols}\n")
 
+    # Show current soul
+    s = soul.load()
+    console.print(f"  [yellow]⚡ {s['name']}[/] [dim]| {s['language']} | "
+                  f"humor:{s['humor']} honesty:{s['honesty']} brevity:{s['brevity']}[/]\n")
+
 
 def show_stats():
-    history = db.get_recent_messages(limit=9999)
-    user_msgs = sum(1 for m in history if m["role"] == "user")
-    asst_msgs = sum(1 for m in history if m["role"] == "assistant")
     s_prompt = db.kv_get("session_prompt_tokens") or "0"
     s_compl = db.kv_get("session_completion_tokens") or "0"
     s_turns = db.kv_get("session_turns") or "0"
     s_total = int(s_prompt) + int(s_compl)
+    s = soul.load()
     console.print(Panel(
-        f"[cyan]Messages:[/]    {user_msgs} you • {asst_msgs} agent\n"
+        f"[cyan]Agent:[/]       {s['name']}\n"
         f"[cyan]Turns:[/]       {s_turns}\n"
         f"[cyan]Tokens:[/]      ↑{s_prompt} prompt  ↓{s_compl} completion  Σ{s_total} total\n"
         f"[cyan]Model:[/]       {agent.config.LLM_MODEL}\n"
-        f"[cyan]Database:[/]    qwe_qwe.db\n"
-        f"[cyan]Memory:[/]      Qdrant in-memory",
+        f"[cyan]Memory:[/]      Qdrant ({agent.config.QDRANT_MODE})\n"
+        f"[cyan]Database:[/]    {agent.config.DB_PATH}",
         title="[bold]📊 Session Stats[/]",
         border_style="cyan",
         padding=(0, 2),
     ))
 
 
+def handle_soul_command(args: str):
+    s = soul.load()
+    if not args:
+        # Show current soul
+        console.print(Panel(
+            soul.format_display(s),
+            title="[bold]🧬 Soul Config[/]",
+            border_style="magenta",
+            padding=(0, 2),
+        ))
+        console.print("  [dim]Set: /soul name Джоник  |  /soul humor 8  |  /soul language English[/]")
+        return
+
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        console.print(f"  [dim]Current {parts[0]}: {s.get(parts[0], '?')}[/]")
+        return
+
+    key, value = parts
+    # Try to parse as int for numeric traits
+    try:
+        value_int = int(value)
+        if 0 <= value_int <= 10:
+            value = value_int
+        else:
+            console.print("  [red]Value must be 0-10[/]")
+            return
+    except ValueError:
+        pass  # string value (name, language)
+
+    result = soul.save(key, value)
+    console.print(f"  [magenta]{result}[/]")
+
+
 def search_memory():
     query = console.input("[cyan]  search query >[/] ").strip()
     if not query:
         return
-    import memory
-    results = memory.search(query, limit=5)
+    import memory as mem
+    results = mem.search(query, limit=5)
     if not results:
         console.print("  [dim]No memories found.[/]")
         return
@@ -79,7 +115,6 @@ def search_memory():
 def main():
     show_banner()
 
-    turn = 0
     while True:
         try:
             user_input = console.input("[bold green]  ⚡ >[/] ").strip()
@@ -100,11 +135,13 @@ def main():
         if user_input == "/stats":
             show_stats()
             continue
+        if user_input.startswith("/soul"):
+            handle_soul_command(user_input[5:].strip())
+            continue
         if user_input == "/memory":
             search_memory()
             continue
 
-        turn += 1
         t0 = time.time()
 
         with console.status("[yellow]  thinking...[/]", spinner="dots"):
@@ -122,6 +159,8 @@ def main():
         session_total = int(db.kv_get("session_prompt_tokens") or "0") + \
                         int(db.kv_get("session_completion_tokens") or "0")
         parts.append(f"Σ{session_total}")
+        if result.auto_context_hits:
+            parts.append(f"📎{result.auto_context_hits}")
         if result.tool_calls_made:
             parts.append(f"🔧 {', '.join(result.tool_calls_made)}")
         footer = " │ ".join(parts)

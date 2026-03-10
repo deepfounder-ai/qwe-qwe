@@ -18,6 +18,8 @@ def _get_qdrant() -> QdrantClient:
     if _qclient is None:
         if config.QDRANT_MODE == "memory":
             _qclient = QdrantClient(":memory:")
+        elif config.QDRANT_MODE == "disk":
+            _qclient = QdrantClient(path=config.QDRANT_PATH)
         else:
             _qclient = QdrantClient(url=config.QDRANT_URL)
         # Ensure collection exists
