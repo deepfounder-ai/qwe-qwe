@@ -1,4 +1,4 @@
-"""Core agent loop — the brain of NanoClaw."""
+"""Core agent loop — the brain of qwe-qwe."""
 
 import json, re
 from openai import OpenAI

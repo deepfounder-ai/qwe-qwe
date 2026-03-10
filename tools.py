@@ -142,7 +142,7 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "web_fetch":
             import urllib.request
-            req = urllib.request.Request(args["url"], headers={"User-Agent": "NanoClaw/0.1"})
+            req = urllib.request.Request(args["url"], headers={"User-Agent": "qwe-qwe/0.1"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
             if len(text) > 8000:

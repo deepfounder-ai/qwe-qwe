@@ -1,4 +1,4 @@
-"""NanoClaw configuration — all settings in one place."""
+"""qwe-qwe configuration — all settings in one place."""
 
 # LLM
 LLM_BASE_URL = "http://192.168.0.49:1234/v1"
@@ -14,10 +14,10 @@ EMBED_DIM = 768
 # Qdrant (in-memory for full offline, or external server)
 QDRANT_MODE = "memory"  # "memory" | "server"
 QDRANT_URL = "http://localhost:6333"
-QDRANT_COLLECTION = "nanoclaw"
+QDRANT_COLLECTION = "qwe_qwe"
 
 # SQLite
-DB_PATH = "nanoclaw.db"
+DB_PATH = "qwe_qwe.db"
 
 # Agent
 SYSTEM_PROMPT = """You are a helpful AI assistant with access to tools.

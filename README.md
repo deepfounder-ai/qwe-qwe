@@ -47,4 +47,4 @@ Edit `config.py` — LM Studio URL, model names, context limits.
 - `memory.py` — Qdrant semantic memory
 - `db.py` — SQLite storage
 - `cli.py` — terminal interface
-- `nanoclaw.db` — auto-created SQLite database
+- `qwe_qwe.db` — auto-created SQLite database

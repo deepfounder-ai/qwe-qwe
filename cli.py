@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NanoClaw CLI — lightweight AI agent for local models."""
+"""qwe-qwe CLI — lightweight AI agent for local models."""
 
 import sys
 from rich.console import Console
@@ -12,7 +12,7 @@ console = Console()
 
 def main():
     console.print(Panel.fit(
-        "[bold yellow]⚡ NanoClaw[/] — lightweight offline AI agent\n"
+        "[bold yellow]⚡ qwe-qwe[/] — lightweight offline AI agent\n"
         "[dim]Tools: memory_search, memory_save, read_file, write_file, shell, web_fetch\n"
         "Commands: /clear (reset history) | /quit (exit)[/]",
         border_style="yellow",
