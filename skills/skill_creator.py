@@ -156,12 +156,15 @@ def _create_skill(skill_name: str, description: str) -> str:
             target.unlink()
             return f"Generated skill failed to load: {e}"
 
+        # Auto-enable the new skill
+        from skills import enable
+        enable(skill_name)
+
         return (
-            f"✓ Skill '{skill_name}' created!\n"
+            f"✓ Skill '{skill_name}' created and enabled!\n"
             f"  File: {target}\n"
             f"  Tools: {tool_count}\n"
-            f"  Description: {desc}\n"
-            f"  → Enable it with /skills"
+            f"  Description: {desc}"
         )
 
     except Exception as e:
