@@ -5,17 +5,9 @@ import sys, time
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.text import Text
 import agent, db, soul, skills
 
 console = Console()
-
-
-def _soul_bar_text() -> str:
-    """Build soul status text."""
-    s = soul.load()
-    traits = " ".join(f"{k}:{v}" for k, v in s.items() if k not in ("name", "language"))
-    return f"⚡ {s['name']} | {s['language']} | {traits}"
 
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
@@ -25,24 +17,36 @@ LOGO = """[bold yellow]
   ╚██████╔╝╚███╔███╔╝███████╗    ╚██████╔╝╚███╔███╔╝███████╗
    ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝     ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝[/]"""
 
-COMMANDS = {
-    "/soul": "Personality",
-    "/skills": "Manage skills",
-    "/memory": "Search memories",
-    "/stats": "Stats",
-    "/clear": "Reset",
-    "/quit": "Exit",
-}
+
+def _soul_bar_text() -> str:
+    s = soul.load()
+    traits = " ".join(f"{k}:{v}" for k, v in s.items() if k not in ("name", "language"))
+    return f"⚡ {s['name']} | {s['language']} | {traits}"
+
+
+def _status_line() -> str:
+    s = soul.load()
+    s_prompt = int(db.kv_get("session_prompt_tokens") or "0")
+    s_compl = int(db.kv_get("session_completion_tokens") or "0")
+    s_total = s_prompt + s_compl
+    s_turns = db.kv_get("session_turns") or "0"
+    active_skills = skills.get_active()
+    sk = f" | skills: {','.join(sorted(active_skills))}" if active_skills else ""
+    return (
+        f"agent {s['name']} | {agent.config.LLM_MODEL} | "
+        f"tokens {s_total:,} ({s_turns} turns){sk}"
+    )
 
 
 def show_banner():
     console.print(LOGO)
     console.print(
-        "[dim]  lightweight offline AI agent • runs on your hardware[/]\n",
+        "[dim]  lightweight offline AI agent • runs on your hardware[/]",
         justify="center",
     )
-    cols = "  ".join(f"[bold cyan]{k}[/][dim] {v}[/]" for k, v in COMMANDS.items())
-    console.print(f"  {cols}\n")
+    console.print(
+        "  [dim]/soul  /skills  /memory  /stats  /clear  /quit[/]\n"
+    )
 
 
 def show_stats():
@@ -65,7 +69,6 @@ def show_stats():
 
 
 def _render_slider(value: int, width: int = 20) -> str:
-    """Render a visual slider: ───●──────"""
     pos = int(value / 10 * (width - 1))
     bar = "─" * pos + "[bold yellow]●[/]" + "─" * (width - 1 - pos)
     return bar
@@ -98,7 +101,6 @@ def handle_soul_command(args: str):
         padding=(0, 2),
     ))
 
-    # Edit name and language first
     for field in ("name", "language"):
         try:
             current = s[field]
@@ -109,13 +111,10 @@ def handle_soul_command(args: str):
         except (EOFError, KeyboardInterrupt):
             return
 
-    # Interactive sliders for numeric traits
     numeric_traits = [k for k in s if k not in ("name", "language")]
-
     for trait in numeric_traits:
         value = s[trait]
         low, high = soul.TRAIT_DESCRIPTIONS.get(trait, ("low", "high"))
-
         while True:
             slider = _render_slider(value)
             console.print(
@@ -128,7 +127,6 @@ def handle_soul_command(args: str):
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 return
-
             if key in ("-", "a", "[", ","):
                 value = max(0, value - 1)
             elif key in ("+", "d", "]", ".", "="):
@@ -157,7 +155,6 @@ def handle_soul_command(args: str):
                 ))
                 return
 
-    # Show final result
     console.print()
     console.print(Panel(
         soul.format_display(soul.load()),
@@ -180,12 +177,10 @@ def handle_skills_command(args: str):
             console.print(f"  {status} [bold]{s['name']}[/] {tools_count} {desc}")
         console.print("\n  [dim]/skills on <name>  |  /skills off <name>[/]")
         return
-
     parts = args.split(maxsplit=1)
     if len(parts) < 2:
         console.print("  [dim]Usage: /skills on <name>  |  /skills off <name>[/]")
         return
-
     action, name = parts
     if action == "on":
         console.print(f"  [green]{skills.enable(name)}[/]")
@@ -217,18 +212,18 @@ def main():
 
     while True:
         try:
-            user_input = console.input("[bold green]  ⚡ >[/] ").strip()
+            # Status line + input separator
+            console.print(f"  [dim]{_status_line()}[/]")
+            console.print("  [dim]" + "─" * (console.width - 4) + "[/]")
+            user_input = console.input("  ").strip()
         except (EOFError, KeyboardInterrupt):
-            
-            console.print("\n  [dim]👋 bye[/]")
+            console.print("\n  [dim]👋[/]")
             break
 
         if not user_input:
             continue
-
         if user_input == "/quit":
-            
-            console.print("  [dim]👋 bye[/]")
+            console.print("  [dim]👋[/]")
             break
         if user_input == "/clear":
             db.clear_history()
@@ -246,23 +241,26 @@ def main():
         if user_input == "/memory":
             search_memory()
             continue
-
         if user_input.startswith("/"):
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
             continue
 
-        t0 = time.time()
+        # User message
+        console.print()
+        console.print(f"  [bold green]▸[/] {user_input}")
 
-        with console.status("[yellow]  thinking...[/]", spinner="dots"):
+        with console.status("[yellow]  ...[/]", spinner="dots"):
             try:
                 result = agent.run(user_input)
             except Exception as e:
                 console.print(f"  [red]✗ {e}[/]")
                 continue
 
+        # Agent reply
         console.print()
+        console.print(f"  [bold yellow]▸[/] ", end="")
         console.print(Markdown(result.reply))
-        console.print(f"\n  [dim]{_soul_bar_text()}[/]")
+        console.print()
 
 
 if __name__ == "__main__":
