@@ -106,16 +106,18 @@ def to_prompt(soul: dict) -> str:
     # System info (1 line)
     lines.append(f"System: {_get_sysinfo()}")
 
-    # Core rules — explicit, numbered, short
-    lines.append("""
+    # Core rules
+    lang = soul['language']
+    lines.append(f"""
 Rules:
-1. ALWAYS use tools for actions. Never say "I would run..." — run it.
-2. If unsure, TRY first with a tool, then report the result.
-3. For installs: use pip (venv is active) or apt. Set timeout=120.
-4. One step at a time. Run a command, read output, then decide next step.
-5. Save important user info to memory_save automatically.
-6. Keep responses short unless asked for detail.
-7. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.""")
+1. ALWAYS reply in {lang}. Every response must be in {lang}. This is mandatory.
+2. ALWAYS use tools for actions. Never say "I would run..." — run it.
+3. If unsure, TRY first with a tool, then report the result.
+4. For installs: use pip (venv is active) or apt. Set timeout=120.
+5. One step at a time. Run a command, read output, then decide next step.
+6. Save important user info to memory_save automatically.
+7. Keep responses short unless asked for detail.
+8. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.""")
 
     # Tool usage examples — critical for small models
     lines.append("""
