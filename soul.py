@@ -31,12 +31,30 @@ TRAIT_DESCRIPTIONS = {
 
 
 def load() -> dict:
+    # Load custom traits first
+    _load_custom_traits()
     soul = dict(DEFAULTS)
     for key in DEFAULTS:
         val = db.kv_get(f"soul:{key}")
-        if val is not None:
+        if val is not None and val != "":
             soul[key] = int(val) if val.isdigit() else val
     return soul
+
+
+def _load_custom_traits():
+    """Load user-defined traits from DB into DEFAULTS."""
+    import json
+    raw = db.kv_get("soul:_custom_traits")
+    if not raw:
+        return
+    try:
+        custom = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    for name, descs in custom.items():
+        if name not in DEFAULTS:
+            DEFAULTS[name] = 5
+            TRAIT_DESCRIPTIONS[name] = (descs["low"], descs["high"])
 
 
 def save(key: str, value) -> str:
