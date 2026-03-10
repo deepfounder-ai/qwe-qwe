@@ -42,10 +42,17 @@ def show_stats():
     history = db.get_recent_messages(limit=9999)
     user_msgs = sum(1 for m in history if m["role"] == "user")
     asst_msgs = sum(1 for m in history if m["role"] == "assistant")
+    s_prompt = db.kv_get("session_prompt_tokens") or "0"
+    s_compl = db.kv_get("session_completion_tokens") or "0"
+    s_turns = db.kv_get("session_turns") or "0"
+    s_total = int(s_prompt) + int(s_compl)
     console.print(Panel(
-        f"[cyan]Messages:[/] {user_msgs} you • {asst_msgs} agent\n"
-        f"[cyan]Database:[/] qwe_qwe.db\n"
-        f"[cyan]Memory:[/] Qdrant in-memory",
+        f"[cyan]Messages:[/]    {user_msgs} you • {asst_msgs} agent\n"
+        f"[cyan]Turns:[/]       {s_turns}\n"
+        f"[cyan]Tokens:[/]      ↑{s_prompt} prompt  ↓{s_compl} completion  Σ{s_total} total\n"
+        f"[cyan]Model:[/]       {agent.config.LLM_MODEL}\n"
+        f"[cyan]Database:[/]    qwe_qwe.db\n"
+        f"[cyan]Memory:[/]      Qdrant in-memory",
         title="[bold]📊 Session Stats[/]",
         border_style="cyan",
         padding=(0, 2),
@@ -102,19 +109,29 @@ def main():
 
         with console.status("[yellow]  thinking...[/]", spinner="dots"):
             try:
-                reply = agent.run(user_input)
+                result = agent.run(user_input)
             except Exception as e:
                 console.print(f"  [red]✗ {e}[/]")
                 continue
 
         elapsed = time.time() - t0
 
+        # Build footer
+        parts = [f"{elapsed:.1f}s"]
+        parts.append(f"↑{result.prompt_tokens} ↓{result.completion_tokens}")
+        session_total = int(db.kv_get("session_prompt_tokens") or "0") + \
+                        int(db.kv_get("session_completion_tokens") or "0")
+        parts.append(f"Σ{session_total}")
+        if result.tool_calls_made:
+            parts.append(f"🔧 {', '.join(result.tool_calls_made)}")
+        footer = " │ ".join(parts)
+
         console.print()
         console.print(Panel(
-            Markdown(reply),
+            Markdown(result.reply),
             border_style="yellow",
             padding=(0, 2),
-            subtitle=f"[dim]{elapsed:.1f}s[/]",
+            subtitle=f"[dim]{footer}[/]",
             subtitle_align="right",
         ))
 

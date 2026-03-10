@@ -30,9 +30,24 @@ def _build_messages(user_input: str) -> list[dict]:
     return msgs
 
 
-def run(user_input: str) -> str:
+class TurnResult:
+    """Result of one agent turn with debug info."""
+    __slots__ = ("reply", "prompt_tokens", "completion_tokens", "total_tokens",
+                 "tool_calls_made", "model")
+
+    def __init__(self):
+        self.reply = ""
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.tool_calls_made: list[str] = []
+        self.model = config.LLM_MODEL
+
+
+def run(user_input: str) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response."""
     client = _get_client()
+    result = TurnResult()
 
     # Save user message
     db.save_message("user", user_input)
@@ -49,6 +64,12 @@ def run(user_input: str) -> str:
             temperature=0.7,
             max_tokens=2048,
         )
+
+        # Accumulate usage
+        if resp.usage:
+            result.prompt_tokens += resp.usage.prompt_tokens or 0
+            result.completion_tokens += resp.usage.completion_tokens or 0
+            result.total_tokens += resp.usage.total_tokens or 0
 
         choice = resp.choices[0]
         msg = choice.message
@@ -69,17 +90,18 @@ def run(user_input: str) -> str:
 
             # Execute each tool call
             for tc in msg.tool_calls:
+                result.tool_calls_made.append(tc.function.name)
                 try:
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     args = {}
 
-                result = tools.execute(tc.function.name, args)
+                tool_result = tools.execute(tc.function.name, args)
 
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": result,
+                    "content": tool_result,
                 }
                 messages.append(tool_msg)
 
@@ -87,21 +109,22 @@ def run(user_input: str) -> str:
             continue
 
         # No tool calls — final response
-        reply = _strip_thinking(msg.content or "")
+        result.reply = _strip_thinking(msg.content or "")
 
         # Save to SQLite
-        if msg.tool_calls:
-            tc_data = [
-                {"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
-                for tc in msg.tool_calls
-            ]
-            db.save_message("assistant", reply, tool_calls=tc_data)
-        else:
-            db.save_message("assistant", reply)
+        db.save_message("assistant", result.reply)
 
-        return reply
+        # Track cumulative session tokens
+        prev = int(db.kv_get("session_prompt_tokens") or "0")
+        db.kv_set("session_prompt_tokens", str(prev + result.prompt_tokens))
+        prev = int(db.kv_get("session_completion_tokens") or "0")
+        db.kv_set("session_completion_tokens", str(prev + result.completion_tokens))
+        prev = int(db.kv_get("session_turns") or "0")
+        db.kv_set("session_turns", str(prev + 1))
+
+        return result
 
     # Hit max rounds
-    final = "I've used all my tool rounds for this turn. Here's what I have so far."
-    db.save_message("assistant", final)
-    return final
+    result.reply = "I've used all my tool rounds for this turn."
+    db.save_message("assistant", result.reply)
+    return result
