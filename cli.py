@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """qwe-qwe CLI — lightweight AI agent for local models."""
 
-import sys, time
+import sys, time, shutil
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -9,6 +9,17 @@ from rich.text import Text
 import agent, db, soul, skills
 
 console = Console()
+
+
+def _soul_status_bar():
+    """Render persistent soul status bar at bottom of terminal."""
+    s = soul.load()
+    width = shutil.get_terminal_size().columns
+    traits = " ".join(f"{k}:{v}" for k, v in s.items() if k not in ("name", "language"))
+    bar = f" ⚡ {s['name']} | {s['language']} | {traits} "
+    padded = bar.ljust(width)
+    # Move to last line, print, move back
+    print(f"\033[s\033[{shutil.get_terminal_size().lines};0H\033[7m{padded}\033[0m\033[u", end="", flush=True)
 
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
@@ -37,10 +48,9 @@ def show_banner():
     cols = "  ".join(f"[bold cyan]{k}[/][dim] {v}[/]" for k, v in COMMANDS.items())
     console.print(f"  {cols}\n")
 
-    # Show current soul
-    s = soul.load()
-    console.print(f"  [yellow]⚡ {s['name']}[/] [dim]| {s['language']} | "
-                  f"humor:{s['humor']} honesty:{s['honesty']} brevity:{s['brevity']}[/]\n")
+    # Reserve last line for status bar
+    print(f"\033[1;{shutil.get_terminal_size().lines - 1}r", end="", flush=True)
+    _soul_status_bar()
 
 
 def show_stats():
@@ -86,6 +96,7 @@ def handle_soul_command(args: str):
                 pass
             result = soul.save(key, value)
             console.print(f"  [magenta]{result}[/]")
+        _soul_status_bar()
         return
 
     # Interactive mode
@@ -147,13 +158,13 @@ def handle_soul_command(args: str):
             elif key == "q":
                 soul.save(trait, value)
                 console.print()
-                # Show final result
                 console.print(Panel(
                     soul.format_display(soul.load()),
                     title="[bold]🧬 Soul — saved[/]",
                     border_style="magenta",
                     padding=(0, 2),
                 ))
+                _soul_status_bar()
                 return
 
     # Show final result
@@ -164,6 +175,7 @@ def handle_soul_command(args: str):
         border_style="magenta",
         padding=(0, 2),
     ))
+    _soul_status_bar()
 
 
 def handle_skills_command(args: str):
@@ -218,6 +230,7 @@ def main():
         try:
             user_input = console.input("[bold green]  ⚡ >[/] ").strip()
         except (EOFError, KeyboardInterrupt):
+            print("\033[r", end="", flush=True)
             console.print("\n  [dim]👋 bye[/]")
             break
 
@@ -225,6 +238,7 @@ def main():
             continue
 
         if user_input == "/quit":
+            print("\033[r", end="", flush=True)  # reset scroll region
             console.print("  [dim]👋 bye[/]")
             break
         if user_input == "/clear":
