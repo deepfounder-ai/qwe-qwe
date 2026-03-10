@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """qwe-qwe CLI — lightweight AI agent for local models."""
 
-import sys, time
+import sys, time, readline
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 import agent, db, soul, skills
 
 console = Console()
+
+# Enable readline for input history + arrow keys
+readline.parse_and_bind('"\e[A": previous-history')
+readline.parse_and_bind('"\e[B": next-history')
+readline.parse_and_bind('"\e[C": forward-char')
+readline.parse_and_bind('"\e[D": backward-char')
 
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
@@ -228,7 +234,7 @@ def main():
             # Status line + input separator
             console.print(f"  [dim]{_status_line()}[/]")
             console.print("  [dim]" + "─" * (console.width - 4) + "[/]")
-            user_input = console.input("  [bold yellow]⚡ >[/] ").strip()
+            user_input = input("  ⚡ > ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n  [dim]👋[/]")
             break
