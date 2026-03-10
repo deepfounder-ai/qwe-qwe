@@ -253,6 +253,7 @@ def main():
                 continue
 
         console.print()
+        console.print(f"  🦆 ", end="")
         console.print(Markdown(result.reply))
         console.print()
 
