@@ -132,8 +132,14 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "shell":
             t = min(args.get("timeout", 120), 300)  # default 2min, max 5min
+            # Ensure venv is activated for pip/python commands
+            env = os.environ.copy()
+            venv = os.environ.get("VIRTUAL_ENV")
+            if venv:
+                env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
             result = subprocess.run(
-                args["command"], shell=True, capture_output=True, text=True, timeout=t
+                args["command"], shell=True, capture_output=True, text=True,
+                timeout=t, env=env
             )
             output = result.stdout
             if result.stderr:

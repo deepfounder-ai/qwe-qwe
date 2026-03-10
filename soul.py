@@ -56,6 +56,9 @@ def _system_info() -> str:
     parts.append(f"Shell: {os.environ.get('SHELL', 'unknown')}")
     parts.append(f"Home: {Path.home()}")
     parts.append(f"CWD: {os.getcwd()}")
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        parts.append(f"Venv: {venv}")
     # Package managers
     pms = []
     for pm in ("apt", "brew", "dnf", "pacman", "pip", "npm"):
