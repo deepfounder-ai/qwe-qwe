@@ -186,26 +186,15 @@ def run(user_input: str) -> TurnResult:
             if delta.content:
                 full_content += delta.content
 
-                # Show thinking in real-time (dimmed)
+                # Track thinking state
                 text = delta.content
                 if "<think>" in text:
                     in_think = True
                     if not think_shown:
-                        _console.print("  [dim]💭 ", end="")
+                        _console.print("  [dim]💭 thinking...[/]")
                         think_shown = True
-                    text = text.replace("<think>", "")
                 if "</think>" in text:
                     in_think = False
-                    text = text.replace("</think>", "")
-                    _console.print("[/]", end="")
-
-                if in_think and text.strip():
-                    # Show thinking dimmed, truncated
-                    clean = text.replace("\n", " ").strip()
-                    if clean:
-                        print(clean[:80], end="", flush=True)
-                elif not in_think and not think_shown:
-                    pass  # will be shown as final reply
 
             # Stream tool calls
             if delta.tool_calls:

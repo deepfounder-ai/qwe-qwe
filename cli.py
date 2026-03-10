@@ -267,7 +267,7 @@ def main():
         try:
             result = agent.run(user_input)
         except Exception as e:
-            console.print(f"  [red]✗ {e}[/]")
+            console.print(f"  [red]✗ {str(e).replace('[', '(').replace(']', ')')}[/]")
             continue
 
         console.print()
