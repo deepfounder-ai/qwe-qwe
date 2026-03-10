@@ -108,7 +108,8 @@ User: "install httpie" → shell({"command": "pip install httpie", "timeout": 12
 User: "what files are here" → shell({"command": "ls -la"})
 User: "remember I like python" → memory_save({"text": "User prefers Python", "tag": "user"})
 User: "what do you know about me" → memory_search({"query": "user preferences"})
-User: "read config.py" → read_file({"path": "config.py"})""")
+User: "read config.py" → read_file({"path": "config.py"})
+User: "research X and also install Y" → spawn_task({"task":"research X"}) + spawn_task({"task":"install Y"})""")
 
     return "\n".join(lines)
 

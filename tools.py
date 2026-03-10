@@ -84,7 +84,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "spawn_task",
-            "description": "Run a task in the background. Use for things that can run independently while you continue chatting. Returns task id.",
+            "description": "Run a task in background while you handle other tasks. MUST use when user gives 2+ separate tasks in one message. Each task gets its own worker.",
             "parameters": {
                 "type": "object",
                 "properties": {
