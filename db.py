@@ -81,6 +81,28 @@ def clear_history():
     conn.commit()
 
 
+def count_messages() -> int:
+    conn = _get_conn()
+    row = conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+    return row[0]
+
+
+def get_oldest_messages(limit: int) -> list[dict]:
+    """Get oldest messages for compaction."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, role, content FROM messages ORDER BY id ASC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    return [{"id": r[0], "role": r[1], "content": r[2] or ""} for r in rows]
+
+
+def delete_messages_by_ids(ids: list[int]):
+    conn = _get_conn()
+    conn.executemany("DELETE FROM messages WHERE id=?", [(i,) for i in ids])
+    conn.commit()
+
+
 # --- Key-Value ---
 
 def kv_set(key: str, value: str):

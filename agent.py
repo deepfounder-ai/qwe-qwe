@@ -82,6 +82,44 @@ class TurnResult:
         self.auto_context_hits = 0
 
 
+def _maybe_compact():
+    """Auto-compact: summarize old messages into memory when history gets long."""
+    count = db.count_messages()
+    if count < config.COMPACTION_THRESHOLD:
+        return
+
+    # Get oldest messages (keep recent ones)
+    keep_recent = config.MAX_HISTORY_MESSAGES
+    to_compact = db.get_oldest_messages(count - keep_recent)
+    if len(to_compact) < 4:
+        return
+
+    # Build conversation text for summarization
+    convo = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in to_compact if m['content'])
+
+    # Summarize via LLM
+    client = _get_client()
+    try:
+        resp = client.chat.completions.create(
+            model=config.LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "Summarize this conversation in 2-3 bullet points. Include key facts, decisions, and user preferences. Be concise."},
+                {"role": "user", "content": convo},
+            ],
+            temperature=0.3,
+            max_tokens=256,
+        )
+        summary = _strip_thinking(resp.choices[0].message.content or "")
+        if summary:
+            memory.save(f"Session summary: {summary}", tag="session")
+
+        # Delete compacted messages
+        ids = [m["id"] for m in to_compact]
+        db.delete_messages_by_ids(ids)
+    except Exception:
+        pass  # don't break the flow if compaction fails
+
+
 def run(user_input: str) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response."""
     client = _get_client()
@@ -89,7 +127,10 @@ def run(user_input: str) -> TurnResult:
 
     # Sanitize surrogates (WSL terminal issue)
     user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
-    
+
+    # Auto-compact if history is too long
+    _maybe_compact()
+
     # Save user message
     db.save_message("user", user_input)
 

@@ -21,6 +21,7 @@ QDRANT_COLLECTION = "qwe_qwe"
 DB_PATH = "qwe_qwe.db"
 
 # Agent
-MAX_HISTORY_MESSAGES = 6  # last N messages in context
-MAX_MEMORY_RESULTS = 3    # top-K auto-retrieved from Qdrant per turn
-MAX_TOOL_ROUNDS = 5       # max consecutive tool calls per turn
+MAX_HISTORY_MESSAGES = 6   # last N messages in context
+MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
+MAX_TOOL_ROUNDS = 5        # max consecutive tool calls per turn
+COMPACTION_THRESHOLD = 20  # auto-compact after N messages in DB
