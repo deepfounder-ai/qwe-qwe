@@ -170,10 +170,10 @@ def handle_skills_command(args: str):
         for i, s in enumerate(all_skills):
             check = "[green]●[/]" if s["name"] in selected else "[dim]○[/]"
             pointer = "[bold yellow]▸[/]" if i == cursor else " "
-            name_style = "bold" if s["name"] in selected else ""
+            name_fmt = f"[bold]{s['name']}[/]" if s["name"] in selected else s["name"]
             tools_count = f"[dim]({s['tools']} tools)[/]"
             desc = f"[dim]— {s['description']}[/]" if s["description"] else ""
-            console.print(f"  {pointer} {check} [{name_style}]{s['name']}[/] {tools_count} {desc}")
+            console.print(f"  {pointer} {check} {name_fmt} {tools_count} {desc}")
         console.print()
 
     render.first = True
