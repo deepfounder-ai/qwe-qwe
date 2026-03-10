@@ -62,38 +62,108 @@ def show_stats():
     ))
 
 
+def _render_slider(value: int, width: int = 20) -> str:
+    """Render a visual slider: ───●──────"""
+    pos = int(value / 10 * (width - 1))
+    bar = "─" * pos + "[bold yellow]●[/]" + "─" * (width - 1 - pos)
+    return bar
+
+
 def handle_soul_command(args: str):
     s = soul.load()
-    if not args:
-        # Show current soul
-        console.print(Panel(
-            soul.format_display(s),
-            title="[bold]🧬 Soul Config[/]",
-            border_style="magenta",
-            padding=(0, 2),
-        ))
-        console.print("  [dim]Set: /soul name Джоник  |  /soul humor 8  |  /soul language English[/]")
+    if args:
+        parts = args.split(maxsplit=1)
+        if len(parts) == 2:
+            key, value = parts
+            try:
+                value_int = int(value)
+                if 0 <= value_int <= 10:
+                    value = value_int
+                else:
+                    console.print("  [red]Value must be 0-10[/]")
+                    return
+            except ValueError:
+                pass
+            result = soul.save(key, value)
+            console.print(f"  [magenta]{result}[/]")
         return
 
-    parts = args.split(maxsplit=1)
-    if len(parts) < 2:
-        console.print(f"  [dim]Current {parts[0]}: {s.get(parts[0], '?')}[/]")
-        return
+    # Interactive mode
+    console.print(Panel(
+        "[bold]🧬 Soul Editor[/]\n"
+        "[dim]← → adjust  │  Enter confirm  │  q done[/]",
+        border_style="magenta",
+        padding=(0, 2),
+    ))
 
-    key, value = parts
-    # Try to parse as int for numeric traits
-    try:
-        value_int = int(value)
-        if 0 <= value_int <= 10:
-            value = value_int
-        else:
-            console.print("  [red]Value must be 0-10[/]")
+    # Edit name and language first
+    for field in ("name", "language"):
+        try:
+            current = s[field]
+            new_val = console.input(f"  [cyan]{field}[/] [dim]({current})[/] > ").strip()
+            if new_val:
+                soul.save(field, new_val)
+                s[field] = new_val
+        except (EOFError, KeyboardInterrupt):
             return
-    except ValueError:
-        pass  # string value (name, language)
 
-    result = soul.save(key, value)
-    console.print(f"  [magenta]{result}[/]")
+    # Interactive sliders for numeric traits
+    numeric_traits = [k for k in s if k not in ("name", "language")]
+
+    for trait in numeric_traits:
+        value = s[trait]
+        low, high = soul.TRAIT_DESCRIPTIONS.get(trait, ("low", "high"))
+
+        while True:
+            slider = _render_slider(value)
+            console.print(
+                f"\r  [dim]{low[:12]:>12s}[/] {slider} [dim]{high[:12]:<12s}[/]  "
+                f"[bold cyan]{trait}[/] = [bold yellow]{value:>2d}[/]/10",
+                end="",
+            )
+            try:
+                key = console.input("  [dim](←-/+→/enter)[/] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return
+
+            if key in ("-", "a", "[", ","):
+                value = max(0, value - 1)
+            elif key in ("+", "d", "]", ".", "="):
+                value = min(10, value + 1)
+            elif key.isdigit():
+                v = int(key)
+                if v == 1 and value == 1:
+                    value = 10
+                else:
+                    value = min(v, 10)
+                soul.save(trait, value)
+                s[trait] = value
+                break
+            elif key == "":
+                soul.save(trait, value)
+                s[trait] = value
+                break
+            elif key == "q":
+                soul.save(trait, value)
+                console.print()
+                # Show final result
+                console.print(Panel(
+                    soul.format_display(soul.load()),
+                    title="[bold]🧬 Soul — saved[/]",
+                    border_style="magenta",
+                    padding=(0, 2),
+                ))
+                return
+
+    # Show final result
+    console.print()
+    console.print(Panel(
+        soul.format_display(soul.load()),
+        title="[bold]🧬 Soul — saved[/]",
+        border_style="magenta",
+        padding=(0, 2),
+    ))
 
 
 def handle_skills_command(args: str):
