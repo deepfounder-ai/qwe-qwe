@@ -260,29 +260,9 @@ def main():
                 console.print(f"  [red]✗ {e}[/]")
                 continue
 
-        elapsed = time.time() - t0
-
-        # Build footer
-        parts = [f"{elapsed:.1f}s"]
-        parts.append(f"↑{result.prompt_tokens} ↓{result.completion_tokens}")
-        session_total = int(db.kv_get("session_prompt_tokens") or "0") + \
-                        int(db.kv_get("session_completion_tokens") or "0")
-        parts.append(f"Σ{session_total}")
-        if result.auto_context_hits:
-            parts.append(f"📎{result.auto_context_hits}")
-        if result.tool_calls_made:
-            parts.append(f"🔧 {', '.join(result.tool_calls_made)}")
-        footer = " │ ".join(parts)
-
         console.print()
-        console.print(Panel(
-            Markdown(result.reply),
-            border_style="yellow",
-            padding=(0, 2),
-            subtitle=f"[dim]{footer}[/]",
-            subtitle_align="right",
-        ))
-        console.print(f"  [dim]{_soul_bar_text()}[/]")
+        console.print(Markdown(result.reply))
+        console.print(f"\n  [dim]{_soul_bar_text()}[/]")
 
 
 if __name__ == "__main__":
