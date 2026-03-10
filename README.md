@@ -1,4 +1,4 @@
-# ⚡ NanoClaw
+# ⚡ qwe-qwe
 
 Lightweight offline AI agent for local models. Runs on any gaming laptop with a GPU.
 
