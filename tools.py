@@ -119,6 +119,12 @@ def execute(name: str, args: dict) -> str:
             return f"Written {len(args['content'])} chars to {p}"
 
         elif name == "shell":
+            cmd = args["command"]
+            # Block dangerous commands
+            blocked = ["sudo ", "rm -rf /", "mkfs", "> /dev/"]
+            for b in blocked:
+                if b in cmd:
+                    return f"Blocked: '{b}' not allowed. Use pip (venv) instead of sudo apt."
             t = min(args.get("timeout", 120), 300)
             env = os.environ.copy()
             venv = os.environ.get("VIRTUAL_ENV")
@@ -126,7 +132,7 @@ def execute(name: str, args: dict) -> str:
                 env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
             result = subprocess.run(
                 args["command"], shell=True, capture_output=True, text=True,
-                timeout=t, env=env
+                timeout=t, env=env, stdin=subprocess.DEVNULL  # prevent interactive prompts
             )
             output = result.stdout
             if result.stderr:
