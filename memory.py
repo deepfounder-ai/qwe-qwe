@@ -75,18 +75,69 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
     ]
 
 
-def save(text: str, tag: str = "general") -> str:
-    """Save a memory. Returns the point id."""
+def save(text: str, tag: str = "general", dedup: bool = True) -> str:
+    """Save a memory. Deduplicates by default (updates if similar exists)."""
     qc = _get_qdrant()
+    vector = _embed(text)
+
+    # Deduplicate: if very similar memory exists, update it
+    if dedup:
+        try:
+            results = qc.query_points(
+                config.QDRANT_COLLECTION, query=vector, limit=1,
+            )
+            if results.points and results.points[0].score > 0.9:
+                # Update existing point
+                existing = results.points[0]
+                qc.upsert(
+                    config.QDRANT_COLLECTION,
+                    points=[PointStruct(
+                        id=existing.id, vector=vector,
+                        payload={"text": text, "tag": tag, "ts": time.time()},
+                    )],
+                )
+                return str(existing.id)
+        except Exception:
+            pass
+
     point_id = str(uuid.uuid4())
     qc.upsert(
         config.QDRANT_COLLECTION,
         points=[
             PointStruct(
                 id=point_id,
-                vector=_embed(text),
+                vector=vector,
                 payload={"text": text, "tag": tag, "ts": time.time()},
             )
         ],
     )
     return point_id
+
+
+def cleanup(max_age_days: int = 7, tag: str = "session"):
+    """Remove old memories by tag. Returns count deleted."""
+    qc = _get_qdrant()
+    cutoff = time.time() - (max_age_days * 86400)
+    try:
+        from qdrant_client.models import FilterSelector
+        qc.delete(
+            config.QDRANT_COLLECTION,
+            points_selector=FilterSelector(
+                filter=Filter(must=[
+                    FieldCondition(key="tag", match=MatchValue(value=tag)),
+                    FieldCondition(key="ts", range={"lt": cutoff}),
+                ])
+            ),
+        )
+    except Exception:
+        pass
+
+
+def count() -> int:
+    """Count total memories."""
+    try:
+        qc = _get_qdrant()
+        info = qc.get_collection(config.QDRANT_COLLECTION)
+        return info.points_count or 0
+    except Exception:
+        return 0

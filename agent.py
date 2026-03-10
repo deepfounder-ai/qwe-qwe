@@ -103,15 +103,18 @@ def _maybe_compact():
         resp = client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[
-                {"role": "system", "content": "Summarize this conversation in 2-3 bullet points. Include key facts, decisions, and user preferences. Be concise."},
+                {"role": "system", "content": "Extract ONLY important facts from this conversation: user preferences, decisions, names, tasks, technical info. If nothing important — reply with just 'SKIP'. No greetings or chitchat. Be very concise."},
                 {"role": "user", "content": convo},
             ],
             temperature=0.3,
             max_tokens=256,
         )
         summary = _strip_thinking(resp.choices[0].message.content or "")
-        if summary:
-            memory.save(f"Session summary: {summary}", tag="session")
+        if summary and summary.strip().upper() != "SKIP":
+            memory.save(summary, tag="session")
+
+        # Cleanup old session summaries (>7 days)
+        memory.cleanup(max_age_days=7, tag="session")
 
         # Delete compacted messages
         ids = [m["id"] for m in to_compact]

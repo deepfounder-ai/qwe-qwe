@@ -66,7 +66,7 @@ def show_stats():
         f"[cyan]Turns:[/]       {s_turns}\n"
         f"[cyan]Tokens:[/]      ↑{s_prompt} prompt  ↓{s_compl} completion  Σ{s_total} total\n"
         f"[cyan]Model:[/]       {agent.config.LLM_MODEL}\n"
-        f"[cyan]Memory:[/]      Qdrant ({agent.config.QDRANT_MODE})\n"
+        f"[cyan]Memory:[/]      Qdrant ({agent.config.QDRANT_MODE}, {__import__('memory').count()} points)\n"
         f"[cyan]Database:[/]    {agent.config.DB_PATH}",
         title="[bold]📊 Session Stats[/]",
         border_style="cyan",
