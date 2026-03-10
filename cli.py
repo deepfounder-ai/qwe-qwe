@@ -44,8 +44,6 @@ def show_banner():
     cols = "  ".join(f"[bold cyan]{k}[/][dim] {v}[/]" for k, v in COMMANDS.items())
     console.print(f"  {cols}\n")
 
-    console.print(f"  [dim]{_soul_bar_text()}[/]\n")
-
 
 def show_stats():
     s_prompt = db.kv_get("session_prompt_tokens") or "0"
@@ -90,7 +88,6 @@ def handle_soul_command(args: str):
                 pass
             result = soul.save(key, value)
             console.print(f"  [magenta]{result}[/]")
-        console.print(f"  [dim]{_soul_bar_text()}[/]")
         return
 
     # Interactive mode
@@ -158,7 +155,6 @@ def handle_soul_command(args: str):
                     border_style="magenta",
                     padding=(0, 2),
                 ))
-                console.print(f"  [dim]{_soul_bar_text()}[/]")
                 return
 
     # Show final result
@@ -169,7 +165,6 @@ def handle_soul_command(args: str):
         border_style="magenta",
         padding=(0, 2),
     ))
-    console.print(f"  [dim]{_soul_bar_text()}[/]")
 
 
 def handle_skills_command(args: str):
