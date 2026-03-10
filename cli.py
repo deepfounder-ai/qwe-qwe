@@ -245,10 +245,6 @@ def main():
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
             continue
 
-        # User message
-        console.print()
-        console.print(f"  [bold green]▸[/] {user_input}")
-
         with console.status("[yellow]  ...[/]", spinner="dots"):
             try:
                 result = agent.run(user_input)
@@ -256,9 +252,7 @@ def main():
                 console.print(f"  [red]✗ {e}[/]")
                 continue
 
-        # Agent reply
         console.print()
-        console.print(f"  [bold yellow]▸[/] ", end="")
         console.print(Markdown(result.reply))
         console.print()
 
