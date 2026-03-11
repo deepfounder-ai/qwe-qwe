@@ -46,12 +46,29 @@ def _status_line() -> str:
 
 def show_banner():
     console.print(LOGO)
-    console.print(
-        "[dim]  lightweight offline AI agent • runs on your hardware[/]",
-        justify="center",
-    )
-    console.print(
-        "  [dim]/soul  /skills  /memory  /cron  /tasks  /stats  /clear  /quit[/]\n"
+    s = soul.load()
+    user_name = db.kv_get("user_name") or "Boss"
+    city = db.kv_get("timezone_city") or "somewhere"
+    mem_count = 0
+    try:
+        import memory
+        mem_count = memory.count()
+    except Exception:
+        pass
+    active = skills.get_active()
+
+    console.print(f"""
+  [dim]🦆 qwe-qwe — your fully offline AI agent[/]
+  [dim]No cloud. No API keys. No subscriptions. Just your GPU.[/]
+  
+  [dim]🧠 Model:[/]  {config.LLM_MODEL} @ {config.LLM_BASE_URL}
+  [dim]👤 User:[/]   {user_name} [dim]({city}, UTC{config.TZ_OFFSET:+d})[/]
+  [dim]🤖 Agent:[/]  {s['name']} [dim]| {s['language']}[/]
+  [dim]💾 Memory:[/] {mem_count} memories [dim]| SQLite + Qdrant[/]
+  [dim]⚙️  Skills:[/] {', '.join(sorted(active)) if active else 'none'} [dim]| /skills to manage[/]
+  
+  [dim]Commands: /soul  /skills  /memory  /cron  /tasks  /stats  /clear  /quit[/]
+"""
     )
 
 
