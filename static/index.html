@@ -1039,7 +1039,7 @@ async function loadThreadStats(tid) {
       <span class="ts-item">💬 <span class="ts-val">${s.user_messages}</span> you</span>
       <span class="ts-item">🤖 <span class="ts-val">${s.assistant_messages}</span> agent</span>
       <span class="ts-item">🔧 <span class="ts-val">${s.tool_calls}</span> tools</span>
-      <span class="ts-item">📅 ${age}</span>
+      <span class="ts-item">🪙 <span class="ts-val">${s.est_tokens > 1000 ? (s.est_tokens/1000).toFixed(1)+'k' : s.est_tokens}</span> tokens</span>
       <span class="ts-item">⏱ ${lastAct}</span>
     `;
   } catch(e) { console.error(e); }

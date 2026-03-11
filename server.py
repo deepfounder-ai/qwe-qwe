@@ -288,10 +288,15 @@ async def thread_stats(thread_id: str):
     # First and last message time
     first = conn.execute("SELECT ts FROM messages WHERE thread_id=? ORDER BY id ASC LIMIT 1", (thread_id,)).fetchone()
     last = conn.execute("SELECT ts FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT 1", (thread_id,)).fetchone()
+    # Estimate tokens from content length (rough: 1 token ≈ 4 chars)
+    row = conn.execute("SELECT COALESCE(SUM(LENGTH(content)),0) FROM messages WHERE thread_id=?", (thread_id,)).fetchone()
+    est_tokens = row[0] // 4 if row else 0
+
     return {
         "thread_id": thread_id, "name": t["name"],
         "user_messages": user_msgs, "assistant_messages": asst_msgs,
         "tool_calls": tool_msgs, "total_messages": t["messages"],
+        "est_tokens": est_tokens,
         "created_at": t["created_at"],
         "first_message": first[0] if first else None,
         "last_message": last[0] if last else None,
