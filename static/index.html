@@ -141,6 +141,12 @@ body {
 #input::placeholder { color: var(--text-dim); }
 #send { background: var(--accent); color: #000; border: none; border-radius: 10px; padding: 12px 20px; font-weight: 600; cursor: pointer; font-size: 14px; }
 #send:hover { opacity: 0.85; } #send:disabled { opacity: 0.4; cursor: not-allowed; }
+.thread-stats {
+  display: flex; gap: 16px; padding: 6px 4px 0; font-size: 11px;
+  color: var(--text-dim); font-family: var(--mono);
+}
+.thread-stats .ts-item { display: flex; align-items: center; gap: 4px; }
+.thread-stats .ts-val { color: var(--text); }
 .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-dim); gap: 8px; }
 .empty-logo { font-size: 48px; font-weight: 700; color: var(--accent); font-family: var(--mono); opacity: 0.3; }
 
@@ -373,6 +379,7 @@ body {
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
     </div>
+    <div class="thread-stats" id="threadStats"></div>
   </div>
 </div>
 
@@ -862,7 +869,7 @@ function connect() {
     removeStatus();
     if (data.type === 'reply') {
       addMessage('assistant', data.text, data);
-      sendBtn.disabled = false; input.focus(); loadThreads();
+      sendBtn.disabled = false; input.focus(); loadThreads(); loadThreadStats();
     } else if (data.type === 'error') {
       addMessage('error', data.text); sendBtn.disabled = false;
     } else if (data.type === 'status') {
@@ -963,14 +970,41 @@ function send() {
 input.addEventListener('keydown', (e) => { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); send(); } });
 input.addEventListener('input', () => { input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,120)+'px'; });
 
+// ── Thread stats ──
+async function loadThreadStats(tid) {
+  try {
+    const res = await fetch(`/api/threads/${tid || activeThreadId || 'default'}/stats`);
+    const s = await res.json();
+    const el = document.getElementById('threadStats');
+    const age = s.first_message ? timeAgo(s.first_message) : '—';
+    const lastAct = s.last_message ? timeAgo(s.last_message) : '—';
+    el.innerHTML = `
+      <span class="ts-item">💬 <span class="ts-val">${s.user_messages}</span> you</span>
+      <span class="ts-item">🤖 <span class="ts-val">${s.assistant_messages}</span> agent</span>
+      <span class="ts-item">🔧 <span class="ts-val">${s.tool_calls}</span> tools</span>
+      <span class="ts-item">📅 ${age}</span>
+      <span class="ts-item">⏱ ${lastAct}</span>
+    `;
+  } catch(e) { console.error(e); }
+}
+function timeAgo(ts) {
+  const diff = Date.now()/1000 - ts;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
 // ── History ──
 async function loadHistory(tid) {
-  const res = await fetch(`/api/history?limit=30&thread_id=${tid||activeThreadId||'default'}`);
+  const t = tid||activeThreadId||'default';
+  const res = await fetch(`/api/history?limit=30&thread_id=${t}`);
   const msgs = await res.json();
   chat.innerHTML = '';
   if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo">⚡</div><div class="empty-text">start chatting</div></div>'; return; }
   msgs.forEach(m => addMessage(m.role, m.content));
   chat.scrollTop = chat.scrollHeight;
+  loadThreadStats(t);
 }
 
 // ── Status ──

@@ -261,6 +261,30 @@ async def create_thread(data: dict):
     return t
 
 
+@app.get("/api/threads/{thread_id}/stats")
+async def thread_stats(thread_id: str):
+    """Get stats for a specific thread."""
+    t = threads.get(thread_id)
+    if not t:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    conn = db._get_conn()
+    # Count user/assistant messages
+    user_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='user'", (thread_id,)).fetchone()[0]
+    asst_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='assistant'", (thread_id,)).fetchone()[0]
+    tool_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='tool'", (thread_id,)).fetchone()[0]
+    # First and last message time
+    first = conn.execute("SELECT ts FROM messages WHERE thread_id=? ORDER BY id ASC LIMIT 1", (thread_id,)).fetchone()
+    last = conn.execute("SELECT ts FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT 1", (thread_id,)).fetchone()
+    return {
+        "thread_id": thread_id, "name": t["name"],
+        "user_messages": user_msgs, "assistant_messages": asst_msgs,
+        "tool_calls": tool_msgs, "total_messages": t["messages"],
+        "created_at": t["created_at"],
+        "first_message": first[0] if first else None,
+        "last_message": last[0] if last else None,
+    }
+
+
 @app.get("/api/threads/active")
 async def active_thread():
     """Get the active thread."""
