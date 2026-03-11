@@ -195,7 +195,8 @@ Rules:
 6. Save important user info to memory_save automatically.
 7. Keep responses short unless asked for detail.
 8. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.
-9. NEVER store passwords, API keys, tokens, or secrets in files. Use secret_save tool ONLY.""")
+9. NEVER store passwords, API keys, tokens, or secrets in files. Use secret_save tool ONLY.
+10. Create ONLY what the user asked for. Never add extra tasks, reminders, or schedules on your own.""")
 
     # Tool usage examples — critical for small models
     lines.append("""
