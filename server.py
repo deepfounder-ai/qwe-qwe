@@ -123,6 +123,18 @@ async def logs(file: str = "qwe-qwe.log", lines: int = 50):
     return {"lines": all_lines[-lines:]}
 
 
+@app.get("/api/thinking")
+async def get_thinking():
+    return {"enabled": db.kv_get("thinking_enabled") == "true"}
+
+
+@app.post("/api/thinking")
+async def set_thinking(data: dict):
+    val = bool(data.get("enabled", False))
+    db.kv_set("thinking_enabled", str(val).lower())
+    return {"enabled": val}
+
+
 @app.get("/api/soul")
 async def get_soul():
     """Get soul config with trait descriptions."""

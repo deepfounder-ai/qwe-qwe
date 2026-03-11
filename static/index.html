@@ -319,6 +319,13 @@ body {
 }
 .nav-btn:hover { color: var(--text); background: var(--surface2); }
 .nav-btn.active { color: var(--accent); background: var(--accent-bg); }
+.thinking-toggle {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; cursor: pointer; font-size: 14px; opacity: 0.4;
+  transition: all 0.15s;
+}
+.thinking-toggle:hover { opacity: 0.7; }
+.thinking-toggle.on { opacity: 1; background: var(--accent-bg); border-color: var(--accent); }
 
 /* Cron page */
 .cron-content { padding: 24px 32px; overflow-y: auto; flex: 1; }
@@ -385,6 +392,7 @@ body {
   <div class="header-right">
     <span class="stat" id="statTokens"></span>
     <span class="stat" id="statMemory"></span>
+    <button class="thinking-toggle" id="thinkingToggle" onclick="toggleThinking()" title="Toggle model thinking">💭</button>
   </div>
 </div>
 
@@ -806,6 +814,21 @@ async function loadLogs(file) {
   viewer.scrollTop = viewer.scrollHeight;
 }
 
+// ── Thinking toggle ──
+async function loadThinkingState() {
+  try {
+    const r = await fetch('/api/thinking');
+    const d = await r.json();
+    document.getElementById('thinkingToggle').classList.toggle('on', d.enabled);
+  } catch(e) {}
+}
+async function toggleThinking() {
+  const btn = document.getElementById('thinkingToggle');
+  const isOn = btn.classList.contains('on');
+  await fetch('/api/thinking', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:!isOn})});
+  btn.classList.toggle('on', !isOn);
+}
+
 // ── Cron ──
 async function loadCron() {
   try {
@@ -1078,7 +1101,7 @@ function cycleThread(dir) {
 }
 
 // ── Init ──
-connect(); input.focus();
+connect(); input.focus(); loadThinkingState();
 </script>
 </body>
 </html>

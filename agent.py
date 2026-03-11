@@ -172,6 +172,12 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
         all_tools = tools.get_all_tools()
 
         # Stream the response
+        # Check thinking toggle
+        extra = {}
+        thinking_on = db.kv_get("thinking_enabled")
+        if thinking_on == "true":
+            extra["extra_body"] = {"enable_thinking": True}
+
         stream = client.chat.completions.create(
             model=providers.get_model(),
             messages=messages,
@@ -180,6 +186,7 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
             temperature=0.7,
             max_tokens=2048,
             stream=True,
+            **extra,
         )
 
         # Collect streamed response

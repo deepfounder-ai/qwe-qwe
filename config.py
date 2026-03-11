@@ -29,3 +29,4 @@ MAX_HISTORY_MESSAGES = 4   # last N messages in context (keep small for 32k mode
 MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
 MAX_TOOL_ROUNDS = 10       # max consecutive tool calls per turn
 COMPACTION_THRESHOLD = 20  # auto-compact after N messages in DB
+THINKING_ENABLED = False   # send enable_thinking to model (toggle via /thinking or settings)

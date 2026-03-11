@@ -640,6 +640,12 @@ def main():
         if user_input.startswith("/provider"):
             handle_provider(user_input[9:].strip())
             continue
+        if user_input == "/thinking":
+            current = db.kv_get("thinking_enabled") == "true"
+            new_val = not current
+            db.kv_set("thinking_enabled", str(new_val).lower())
+            console.print(f"  [yellow]💭 thinking: {'ON' if new_val else 'OFF'}[/]")
+            continue
         if user_input.startswith("/"):
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
             continue
