@@ -279,43 +279,86 @@ def _on_cron_complete(name, task, result):
     print(f"  {result[:200]}\n")
     sys.stdout.flush()
 
-def main():
-    # Load timezone from DB
-    tz_val = db.kv_get("timezone")
-    if tz_val is not None:
-        config.TZ_OFFSET = int(tz_val)
-    else:
-        # First run — ask city, map to offset
-        _CITY_TZ = {
-            "moscow": 3, "london": 0, "berlin": 1, "paris": 1,
-            "new york": -5, "los angeles": -8, "chicago": -6,
-            "tokyo": 9, "sydney": 11, "dubai": 4, "mumbai": 5,
-            "beijing": 8, "singapore": 8, "istanbul": 3,
-            "buenos aires": -3, "são paulo": -3, "sao paulo": -3,
-            "mexico city": -6, "bogota": -5, "lima": -5,
-            "bangkok": 7, "seoul": 9, "jakarta": 7,
-            "cairo": 2, "nairobi": 3, "lagos": 1,
-            "amsterdam": 1, "madrid": 1, "rome": 1,
-            "warsaw": 1, "kyiv": 2, "tbilisi": 4,
-        }
-        console.print("  [yellow]🌍 What city are you in?[/]")
+_CITY_TZ = {
+    "moscow": 3, "london": 0, "berlin": 1, "paris": 1,
+    "new york": -5, "los angeles": -8, "chicago": -6,
+    "tokyo": 9, "sydney": 11, "dubai": 4, "mumbai": 5,
+    "beijing": 8, "singapore": 8, "istanbul": 3,
+    "buenos aires": -3, "são paulo": -3, "sao paulo": -3,
+    "mexico city": -6, "bogota": -5, "lima": -5,
+    "bangkok": 7, "seoul": 9, "jakarta": 7,
+    "cairo": 2, "nairobi": 3, "lagos": 1,
+    "amsterdam": 1, "madrid": 1, "rome": 1,
+    "warsaw": 1, "kyiv": 2, "tbilisi": 4,
+}
+
+
+def _first_run_setup():
+    """Interactive setup on first launch — city, name, language, soul."""
+    console.print("\n  [bold yellow]⚡ Welcome to qwe-qwe! Let's set up.[/]\n")
+
+    # 1. City / timezone
+    console.print("  [yellow]🌍 What city are you in?[/]")
+    try:
+        city = input("  City: ").strip().lower()
+        offset = _CITY_TZ.get(city)
+        if offset is None:
+            for c, o in _CITY_TZ.items():
+                if city in c or c in city:
+                    offset = o
+                    break
+        if offset is None:
+            console.print(f"  [dim]Don't know '{city}', defaulting to UTC.[/]")
+            offset = 0
+        config.TZ_OFFSET = offset
+        db.kv_set("timezone", str(offset))
+        db.kv_set("timezone_city", city)
+    except (ValueError, EOFError):
+        config.TZ_OFFSET = 0
+
+    # 2. Agent name
+    console.print("\n  [yellow]🤖 What should your agent be called?[/] [dim](default: Agent)[/]")
+    name = input("  Name: ").strip()
+    if name:
+        db.kv_set("soul:name", name)
+
+    # 3. Language
+    console.print("\n  [yellow]🗣 What language should it speak?[/] [dim](default: English)[/]")
+    lang = input("  Language: ").strip()
+    if lang:
+        db.kv_set("soul:language", lang)
+
+    # 4. Quick personality
+    console.print("\n  [yellow]✨ Quick personality setup (0-10, Enter to skip):[/]")
+    quick_traits = [
+        ("humor", "Humor", "serious ↔ funny"),
+        ("honesty", "Honesty", "diplomatic ↔ brutally direct"),
+        ("brevity", "Brevity", "verbose ↔ concise"),
+        ("formality", "Formality", "casual ↔ formal"),
+        ("creativity", "Creativity", "practical ↔ unconventional"),
+    ]
+    for key, label, desc in quick_traits:
         try:
-            city = input("  City: ").strip().lower()
-            offset = _CITY_TZ.get(city)
-            if offset is None:
-                # Fuzzy match
-                for c, o in _CITY_TZ.items():
-                    if city in c or c in city:
-                        offset = o
-                        break
-            if offset is None:
-                console.print(f"  [dim]Don't know '{city}', defaulting to UTC. Use /soul to change later.[/]")
-                offset = 0
-            config.TZ_OFFSET = offset
-            db.kv_set("timezone", str(offset))
-            db.kv_set("timezone_city", city)
-        except (ValueError, EOFError):
-            config.TZ_OFFSET = 0
+            val = input(f"  {label} ({desc}): ").strip()
+            if val and val.isdigit():
+                v = max(0, min(10, int(val)))
+                db.kv_set(f"soul:{key}", str(v))
+        except EOFError:
+            break
+
+    db.kv_set("setup_complete", "1")
+    console.print("\n  [green]✓ Setup complete! Use /soul to tweak later.[/]\n")
+
+
+def main():
+    # Check first run
+    if not db.kv_get("setup_complete"):
+        _first_run_setup()
+    else:
+        # Load timezone from DB
+        tz_val = db.kv_get("timezone")
+        if tz_val is not None:
+            config.TZ_OFFSET = int(tz_val)
 
     # Start scheduler
     scheduler.on_complete(_on_cron_complete)
