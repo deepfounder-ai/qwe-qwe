@@ -6,6 +6,9 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 import agent, config, db, soul, skills, tasks, scheduler
+import logger
+
+_log = logger.get("cli")
 
 console = Console()
 
@@ -67,7 +70,7 @@ def show_banner():
   [dim]💾 Memory:[/] {mem_count} memories [dim]| SQLite + Qdrant[/]
   [dim]⚙️  Skills:[/] {', '.join(sorted(active)) if active else 'none'} [dim]| /skills to manage[/]
   
-  [dim]Commands: /soul  /skills  /memory  /cron  /tasks  /stats  /clear  /quit[/]
+  [dim]Commands: /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
 """
     )
 
@@ -270,6 +273,33 @@ def _check_background_tasks():
         console.print(f"  [dim]{r['result'][:200]}[/]\n")
 
 
+def show_logs(args: str):
+    """Show recent logs. Usage: /logs [errors] [N]"""
+    parts = args.split()
+    log_file = "errors.log" if "errors" in parts else "qwe-qwe.log"
+    n = 20
+    for p in parts:
+        if p.isdigit():
+            n = int(p)
+
+    log_path = Path(__file__).parent / "logs" / log_file
+    if not log_path.exists():
+        console.print("  [dim]No logs yet.[/]")
+        return
+
+    lines = log_path.read_text().splitlines()
+    tail = lines[-n:]
+    console.print(f"  [bold]📋 {log_file}[/] [dim](last {len(tail)} lines)[/]\n")
+    for line in tail:
+        if "| ERROR" in line or "| WARNING" in line:
+            console.print(f"  [red]{line}[/]")
+        elif "| EVENT" in line:
+            console.print(f"  [cyan]{line}[/]")
+        else:
+            console.print(f"  [dim]{line}[/]")
+    console.print()
+
+
 def search_memory():
     query = console.input("[cyan]  search query >[/] ").strip()
     if not query:
@@ -388,6 +418,7 @@ def main():
     console.print(f"  [dim]⏰ Scheduler running (UTC{config.TZ_OFFSET:+d})[/]")
 
     show_banner()
+    _log.info("session started | model=%s | user=%s", config.LLM_MODEL, db.kv_get("user_name") or "Boss")
 
     while True:
         try:
@@ -402,6 +433,7 @@ def main():
             console.print("  [dim]" + "─" * (console.width - 4) + "[/]")
             user_input = input("  ⚡ > ").strip()
         except (EOFError, KeyboardInterrupt):
+            _log.info("session ended (user exit)")
             console.print("\n  [dim]👋[/]")
             break
 
@@ -432,6 +464,9 @@ def main():
         if user_input == "/memory":
             search_memory()
             continue
+        if user_input.startswith("/logs"):
+            show_logs(user_input[5:].strip())
+            continue
         if user_input.startswith("/"):
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
             continue
@@ -439,6 +474,7 @@ def main():
         try:
             result = agent.run(user_input)
         except Exception as e:
+            _log.error(f"agent.run crashed: {e}", exc_info=True)
             console.print(f"  [red]✗ {str(e).replace('[', '(').replace(']', ')')}[/]")
             continue
 
@@ -448,5 +484,21 @@ def main():
         console.print()
 
 
+def main_entry():
+    """Unified entry point: `qwe-qwe` for CLI, `qwe-qwe --web` for web server."""
+    import argparse
+    parser = argparse.ArgumentParser(description="qwe-qwe — offline AI agent")
+    parser.add_argument("--web", action="store_true", help="Start web server instead of CLI")
+    parser.add_argument("--host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=7860, help="Web server port (default: 7860)")
+    args = parser.parse_args()
+
+    if args.web:
+        import server
+        server.start(host=args.host, port=args.port)
+    else:
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    main_entry()

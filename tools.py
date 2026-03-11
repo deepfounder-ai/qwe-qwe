@@ -3,6 +3,9 @@
 import json, subprocess, os
 from pathlib import Path
 import memory
+import logger
+
+_log = logger.get("tools")
 
 # ── Tool definitions — SHORT descriptions, small models need clarity ──
 
@@ -195,10 +198,12 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "shell":
             cmd = args["command"]
+            _log.info(f"shell: {cmd[:200]}")
             # Block dangerous commands
             blocked = ["sudo ", "rm -rf /", "mkfs", "> /dev/"]
             for b in blocked:
                 if b in cmd:
+                    _log.warning(f"shell blocked: {cmd}")
                     return f"Blocked: '{b}' not allowed. Use pip (venv) instead of sudo apt."
             t = min(args.get("timeout", 120), 300)
             env = os.environ.copy()
@@ -256,8 +261,10 @@ def execute(name: str, args: dict) -> str:
             return f"Unknown tool: {name}"
 
     except subprocess.TimeoutExpired:
+        _log.error(f"shell timeout: {args.get('command', '?')[:100]}")
         return f"Error: command timed out after {args.get('timeout', 120)}s"
     except Exception as e:
+        _log.error(f"tool {name} exception: {e}", exc_info=True)
         return f"Error: {type(e).__name__}: {e}"
 
 

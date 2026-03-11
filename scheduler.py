@@ -3,6 +3,9 @@
 import threading, time, json, re
 from datetime import datetime, timezone, timedelta
 import db, config
+import logger
+
+_log = logger.get("scheduler")
 
 
 def _tz():
@@ -144,7 +147,7 @@ def _loop():
         try:
             _check_and_run()
         except Exception:
-            pass
+            _log.error("scheduler loop error", exc_info=True)
         time.sleep(30)
 
 
@@ -161,14 +164,16 @@ def _check_and_run():
 
     for id_, name, task, schedule, repeat in rows:
         # Execute task
+        _log.info(f"cron firing: #{id_} '{name}' → {task[:80]}")
         result = _execute_task(task)
+        _log.info(f"cron done: #{id_} '{name}' → {result[:200]}")
 
         # Notify callbacks
         for fn in _callbacks:
             try:
                 fn(name, task, result)
             except Exception:
-                pass
+                _log.warning(f"cron callback error for #{id_}", exc_info=True)
 
         if repeat:
             # Reschedule
@@ -210,6 +215,7 @@ def _execute_task(task_desc: str) -> str:
                 max_tokens=1024,
             )
         except Exception as e:
+            _log.error(f"cron LLM call failed: {e}", exc_info=True)
             return f"Error: {e}"
 
         msg = resp.choices[0].message

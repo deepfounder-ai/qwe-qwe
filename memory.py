@@ -8,6 +8,9 @@ from qdrant_client.models import (
     FieldCondition, MatchValue,
 )
 import config
+import logger
+
+_log = logger.get("memory")
 
 _qclient: QdrantClient | None = None
 _embed_client: OpenAI | None = None

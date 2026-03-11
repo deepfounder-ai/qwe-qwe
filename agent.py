@@ -1,9 +1,12 @@
 """Core agent loop — the brain of qwe-qwe."""
 
-import json, re, sys
+import json, re, sys, time
 from openai import OpenAI
 from rich.console import Console
 import config, db, tools, memory, soul
+import logger
+
+_log = logger.get("agent")
 
 _client: OpenAI | None = None
 _console = Console()
@@ -37,10 +40,14 @@ def _auto_context(user_input: str) -> str:
         for r in results:
             if r["score"] > 0.3:  # only include if somewhat relevant
                 lines.append(f"- [{r['tag']}] {r['text']}")
+        hits = len(lines) - 1
+        if hits > 0:
+            _log.info(f"auto_context: {hits} memories injected")
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
     except Exception:
+        _log.warning("auto_context failed", exc_info=True)
         return ""
 
 
@@ -108,6 +115,7 @@ def _maybe_compact():
     # Summarize via LLM
     client = _get_client()
     try:
+        _log.info(f"compaction: summarizing {len(to_compact)} messages")
         resp = client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[
@@ -120,6 +128,9 @@ def _maybe_compact():
         summary = _strip_thinking(resp.choices[0].message.content or "")
         if summary and summary.strip().upper() != "SKIP":
             memory.save(summary, tag="session")
+            _log.info(f"compaction: saved summary ({len(summary)} chars)")
+        else:
+            _log.info("compaction: nothing important, skipped")
 
         # Cleanup old session summaries (>7 days)
         memory.cleanup(max_age_days=7, tag="session")
@@ -127,14 +138,18 @@ def _maybe_compact():
         # Delete compacted messages
         ids = [m["id"] for m in to_compact]
         db.delete_messages_by_ids(ids)
+        _log.info(f"compaction: deleted {len(ids)} old messages")
     except Exception:
-        pass  # don't break the flow if compaction fails
+        _log.error("compaction failed", exc_info=True)
 
 
 def run(user_input: str) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response."""
     client = _get_client()
     result = TurnResult()
+    turn_start = time.time()
+
+    _log.info(f"turn started | input: {user_input[:100]}")
 
     # Sanitize surrogates (WSL terminal issue)
     user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
@@ -243,10 +258,15 @@ def run(user_input: str) -> TurnResult:
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
 
+                tool_start = time.time()
                 tool_result = tools.execute(tc["name"], args)
+                tool_ms = int((time.time() - tool_start) * 1000)
+                logger.event("tool_call", tool=tc["name"], args_preview=args_short,
+                             result_len=len(tool_result), duration_ms=tool_ms)
 
                 # Detect repeated failures
                 if tool_result.startswith("Error"):
+                    _log.warning(f"tool error: {tc['name']} → {tool_result[:200]}")
                     if tc["name"] == last_failed_tool:
                         fail_count += 1
                     else:
@@ -254,6 +274,7 @@ def run(user_input: str) -> TurnResult:
                         fail_count = 1
 
                     if fail_count >= 2:
+                        _log.error(f"tool {tc['name']} failed 2x, stopping retries")
                         tool_result += "\n\nSTOP: This tool failed twice. Do NOT retry. Answer with what you have or try a different approach."
                 else:
                     last_failed_tool = None
@@ -304,8 +325,14 @@ def run(user_input: str) -> TurnResult:
         prev = int(db.kv_get("session_turns") or "0")
         db.kv_set("session_turns", str(prev + 1))
 
+        turn_ms = int((time.time() - turn_start) * 1000)
+        logger.event("turn_complete", duration_ms=turn_ms, rounds=rounds,
+                     tools_used=result.tool_calls_made, reply_len=len(result.reply),
+                     est_tokens=est_tokens, context_hits=result.auto_context_hits)
+
         return result
 
+    _log.warning(f"max tool rounds ({config.MAX_TOOL_ROUNDS}) exhausted")
     result.reply = "I've used all my tool rounds for this turn."
     db.save_message("assistant", result.reply)
     return result

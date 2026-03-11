@@ -3,6 +3,9 @@
 import sqlite3, json, time
 from pathlib import Path
 import config
+import logger
+
+_log = logger.get("db")
 
 _conn: sqlite3.Connection | None = None
 
@@ -14,6 +17,7 @@ def _get_conn() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA foreign_keys=ON")
         _migrate(_conn)
+        _log.info(f"database connected: {config.DB_PATH}")
     return _conn
 
 

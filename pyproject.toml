@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwe-qwe"
+version = "0.2.0"
+description = "Lightweight offline AI agent for local models"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.0.0",
+    "qdrant-client>=1.7.0",
+    "rich>=13.0.0",
+    "readchar>=4.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[project.scripts]
+qwe-qwe = "cli:main_entry"
+
+[tool.setuptools]
+packages = ["skills"]
+py-modules = ["cli", "agent", "config", "db", "logger", "memory", "scheduler", "server", "soul", "tasks", "tools"]
+
+[tool.setuptools.package-data]
+"*" = ["static/**/*"]
