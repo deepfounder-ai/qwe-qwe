@@ -94,7 +94,8 @@ def to_prompt(soul: dict) -> str:
     lines = []
 
     # Identity + personality as levels
-    lines.append(f"You are {soul['name']}. Reply in {soul['language']}.")
+    user_name = db.kv_get("user_name") or "Boss"
+    lines.append(f"You are {soul['name']}. The user's name is {user_name}. Reply in {soul['language']}.")
     lines.append("Personality (0=min, 10=max):")
     for trait, value in soul.items():
         if trait in ("name", "language"):

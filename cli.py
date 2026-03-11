@@ -316,7 +316,12 @@ def _first_run_setup():
     except (ValueError, EOFError):
         config.TZ_OFFSET = 0
 
-    # 2. Agent name
+    # 2. User's name
+    console.print("\n  [yellow]👤 What should I call you?[/] [dim](default: Boss)[/]")
+    user_name = input("  Your name: ").strip()
+    db.kv_set("user_name", user_name or "Boss")
+
+    # 3. Agent name
     console.print("\n  [yellow]🤖 What should your agent be called?[/] [dim](default: Agent)[/]")
     name = input("  Name: ").strip()
     if name:
