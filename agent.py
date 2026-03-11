@@ -76,11 +76,12 @@ def _build_messages(user_input: str, thread_id: str | None = None) -> list[dict]
 
 class TurnResult:
     """Result of one agent turn with debug info."""
-    __slots__ = ("reply", "prompt_tokens", "completion_tokens", "total_tokens",
+    __slots__ = ("reply", "thinking", "prompt_tokens", "completion_tokens", "total_tokens",
                  "tool_calls_made", "model", "auto_context_hits")
 
     def __init__(self):
         self.reply = ""
+        self.thinking = ""
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
@@ -298,6 +299,7 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
             continue
 
         # No tool calls — final response
+        result.thinking = _extract_thinking(full_content) or ""
         raw_reply = _strip_thinking(full_content)
 
         # Retry: if model hedges instead of acting

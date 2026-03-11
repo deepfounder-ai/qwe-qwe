@@ -32,6 +32,7 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None) -> dict:
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
+        "thinking": result.thinking,
         "tools": result.tool_calls_made,
         "duration_ms": elapsed,
         "context_hits": result.auto_context_hits,
@@ -353,6 +354,7 @@ async def websocket_chat(ws: WebSocket):
                 await ws.send_json({
                     "type": "reply",
                     "text": result["reply"],
+                    "thinking": result.get("thinking", ""),
                     "tools": result["tools"],
                     "duration_ms": result["duration_ms"],
                     "context_hits": result["context_hits"],
