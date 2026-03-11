@@ -329,21 +329,21 @@ def execute(name: str, args: dict) -> str:
             return f"Task #{task_id} queued: {args['task'][:60]}"
 
         elif name == "secret_save":
-            import secrets as vault
+            import vault
             return vault.save(args["key"], args["value"])
 
         elif name == "secret_get":
-            import secrets as vault
+            import vault
             val = vault.get(args["key"])
             return val if val else f"Secret '{args['key']}' not found"
 
         elif name == "secret_list":
-            import secrets as vault
+            import vault
             keys = vault.list_keys()
             return ", ".join(keys) if keys else "No secrets stored"
 
         elif name == "secret_delete":
-            import secrets as vault
+            import vault
             return vault.delete(args["key"])
 
         else:

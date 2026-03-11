@@ -132,14 +132,14 @@ async def logs(file: str = "qwe-qwe.log", lines: int = 50):
 @app.get("/api/secrets")
 async def list_secrets():
     """List secret keys (no values!)."""
-    import secrets as vault
+    import vault
     return vault.list_keys()
 
 
 @app.delete("/api/secrets/{key}")
 async def delete_secret(key: str):
     """Delete a secret."""
-    import secrets as vault
+    import vault
     return {"result": vault.delete(key)}
 
 
