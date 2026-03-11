@@ -188,7 +188,8 @@ Rules:
 5. One step at a time. Run a command, read output, then decide next step.
 6. Save important user info to memory_save automatically.
 7. Keep responses short unless asked for detail.
-8. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.""")
+8. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.
+9. NEVER store passwords, API keys, tokens, or secrets in files. Use secret_save tool ONLY.""")
 
     # Tool usage examples — critical for small models
     lines.append("""

@@ -164,6 +164,57 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "secret_save",
+            "description": "Securely store a secret (password, API key, token). Encrypted in vault.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Secret name (e.g. 'github_token')"},
+                    "value": {"type": "string", "description": "Secret value"},
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "secret_get",
+            "description": "Retrieve a stored secret by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Secret name"},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "secret_list",
+            "description": "List all stored secret names (not values).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "secret_delete",
+            "description": "Delete a stored secret.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Secret name to delete"},
+                },
+                "required": ["key"],
+            },
+        },
+    },
 ]
 
 # NOTE: web_fetch removed from core — small models handle 5 tools better than 6.
@@ -276,6 +327,24 @@ def execute(name: str, args: dict) -> str:
             import tasks
             task_id = tasks.spawn(args["task"])
             return f"Task #{task_id} queued: {args['task'][:60]}"
+
+        elif name == "secret_save":
+            import secrets as vault
+            return vault.save(args["key"], args["value"])
+
+        elif name == "secret_get":
+            import secrets as vault
+            val = vault.get(args["key"])
+            return val if val else f"Secret '{args['key']}' not found"
+
+        elif name == "secret_list":
+            import secrets as vault
+            keys = vault.list_keys()
+            return ", ".join(keys) if keys else "No secrets stored"
+
+        elif name == "secret_delete":
+            import secrets as vault
+            return vault.delete(args["key"])
 
         else:
             # Try skills
