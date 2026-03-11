@@ -99,6 +99,28 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_cron",
+            "description": "List all scheduled/cron tasks.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_cron",
+            "description": "Remove a scheduled task by its ID number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "integer", "description": "Task ID to remove"},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "spawn_task",
             "description": "Run a task in background while you handle other tasks. MUST use when user gives 2+ separate tasks in one message. Each task gets its own worker.",
             "parameters": {
@@ -181,6 +203,21 @@ def execute(name: str, args: dict) -> str:
                 return result["error"]
             repeat_str = " (repeating)" if result["repeat"] else " (one-time)"
             return f"✓ Scheduled '{result['name']}' → next run: {result['next_run']}{repeat_str}"
+
+        elif name == "list_cron":
+            import scheduler
+            tasks_list = scheduler.list_tasks()
+            if not tasks_list:
+                return "No scheduled tasks."
+            lines = []
+            for t in tasks_list:
+                repeat = "🔄" if t["repeat"] else "⏱"
+                lines.append(f"#{t['id']} {repeat} {t['name']} → {t['next_run']} ({t['schedule']}) | {t['task'][:60]}")
+            return "\n".join(lines)
+
+        elif name == "remove_cron":
+            import scheduler
+            return scheduler.remove(args["task_id"])
 
         elif name == "spawn_task":
             import tasks
