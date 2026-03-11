@@ -1,20 +1,20 @@
-"""Finance tracking skill with live exchange rates from API."""
+"""Finance tracking skill — income/expense tracker with live exchange rates."""
 
-DESCRIPTION = "Finance tracking skill with tools: add_transaction, get_balance, get_report, list_transactions, delete_transaction"
+DESCRIPTION = "Track income, expenses, balance, and generate reports"
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "add_transaction",
-            "description": "Adds a new transaction to SQLite DB with current timestamp",
+            "description": "Add income or expense. Example: add_transaction(name='Lunch', amount=5000, currency='ARS', category='Food')",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Transaction name"},
-                    "amount": {"type": "number", "description": "Transaction amount"},
-                    "currency": {"type": "string", "description": "Currency code (USD, EUR, GBP, RUB)"},
-                    "category": {"type": "string", "description": "Transaction category"}
+                    "name": {"type": "string", "description": "Transaction description"},
+                    "amount": {"type": "number", "description": "Amount in original currency"},
+                    "currency": {"type": "string", "description": "Currency code: USD, ARS, EUR, etc."},
+                    "category": {"type": "string", "description": "Category: Food, Transport, Salary, etc."},
                 },
                 "required": ["name", "amount", "currency", "category"],
             },
@@ -24,26 +24,20 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_balance",
-            "description": "Returns total USD balance (converts all currencies to USD)",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
+            "description": "Show total balance in USD.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
         "type": "function",
         "function": {
             "name": "get_report",
-            "description": "Returns formatted report of transactions in date range",
+            "description": "Financial report by category for a period.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "date_range": {"type": "string", "description": "Date range (default: last_30_days)"},
-                    "category": {"type": "string", "description": "Optional category filter"}
+                    "period": {"type": "string", "description": "day, week, month, year, or all (default: month)"},
                 },
-                "required": [],
             },
         },
     },
@@ -51,11 +45,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_transactions",
-            "description": "Lists all transactions with amount in original currency and USD equivalent",
+            "description": "List recent transactions.",
             "parameters": {
                 "type": "object",
-                "properties": {},
-                "required": [],
+                "properties": {
+                    "limit": {"type": "integer", "description": "How many to show (default 10)"},
+                },
             },
         },
     },
@@ -63,46 +58,51 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_transaction",
-            "description": "Removes a transaction by ID",
+            "description": "Delete a transaction by ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "transaction_id": {"type": "integer", "description": "Transaction ID to delete"}
+                    "id": {"type": "integer", "description": "Transaction ID"},
                 },
-                "required": ["transaction_id"],
+                "required": ["id"],
             },
         },
     },
 ]
 
-BASE_URL = "https://api.exchangerate-api.com/v4/latest/USD"
+# Exchange rates cache (loaded once per session)
+_rates = None
+
+_FALLBACK_RATES = {
+    "USD": 1.0, "EUR": 0.92, "GBP": 0.78, "ARS": 1200.0,
+    "RUB": 91.5, "BRL": 5.17, "MXN": 17.5,
+}
 
 
-def fetch_exchange_rates():
-    """Подгружает актуальные курсы валют из API."""
+def _get_rates() -> dict:
+    global _rates
+    if _rates is not None:
+        return _rates
     try:
         import requests
-        response = requests.get(BASE_URL, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            rates = data.get("rates", {})
-            # Keep all rates from API
-            result = {"USD": 1.0}
-            for code in ["EUR", "GBP", "RUB", "ARS", "BRL", "MXN", "CLP", "COP"]:
-                if code in rates:
-                    result[code] = rates[code]
-            return result
-        else:
-            print(f"API error: {response.status_code}")
-            return {"USD": 1.0, "EUR": 0.92, "GBP": 0.78, "RUB": 91.5}
-    except Exception as e:
-        print(f"Failed to fetch rates: {e}")
-        return {"USD": 1.0, "EUR": 0.92, "GBP": 0.78, "RUB": 91.5}
+        resp = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=5)
+        if resp.status_code == 200:
+            _rates = resp.json().get("rates", {})
+            _rates["USD"] = 1.0
+            return _rates
+    except Exception:
+        pass
+    _rates = dict(_FALLBACK_RATES)
+    return _rates
 
 
-EXCHANGE_RATES = fetch_exchange_rates()
-
-print(f"Loaded exchange rates: {EXCHANGE_RATES}")
+def _to_usd(amount: float, currency: str) -> float:
+    """Convert amount in any currency to USD."""
+    rates = _get_rates()
+    rate = rates.get(currency.upper(), 1.0)
+    if rate == 0:
+        return amount
+    return amount / rate
 
 
 def _ensure_table():
@@ -114,108 +114,88 @@ def _ensure_table():
             name TEXT NOT NULL,
             amount REAL NOT NULL,
             currency TEXT NOT NULL DEFAULT 'USD',
+            amount_usd REAL NOT NULL,
             category TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL
         )
     """)
     conn.commit()
 
 
 def execute(name: str, args: dict) -> str:
+    import db
+    from datetime import datetime, timedelta
     _ensure_table()
+    conn = db._get_conn()
+
     if name == "add_transaction":
-        try:
-            import db
-            cursor = db._get_conn().cursor()
-            from datetime import datetime
-            timestamp = datetime.now().isoformat()
-            cursor.execute(
-                "INSERT INTO transactions (name, amount, currency, category, created_at) VALUES (?, ?, ?, ?, ?)",
-                (args.get("name"), args.get("amount"), args.get("currency"), args.get("category"), timestamp)
-            )
-            db._get_conn().commit()
-            rate = EXCHANGE_RATES.get(args.get("currency", "USD"), 1.0)
-            return f"Transaction added: {args.get('name')} ({args.get('currency')}) - ${float(args.get('amount')) / rate} USD"
-        except Exception as e:
-            return f"Error adding transaction: {str(e)}"
+        amount = float(args["amount"])
+        currency = args.get("currency", "USD").upper()
+        usd = _to_usd(amount, currency)
+        conn.execute(
+            "INSERT INTO transactions (name, amount, currency, amount_usd, category, created_at) VALUES (?,?,?,?,?,?)",
+            (args["name"], amount, currency, round(usd, 2), args["category"], datetime.now().isoformat())
+        )
+        conn.commit()
+        return f"✓ {args['category']}: {amount:,.0f} {currency} (${usd:,.2f} USD) — {args['name']}"
 
     elif name == "get_balance":
-        try:
-            import db
-            cursor = db._get_conn().cursor()
-            cursor.execute("SELECT amount, currency FROM transactions")
-            rows = cursor.fetchall()
-            total_usd = 0.0
-            for amount, currency in rows:
-                rate = EXCHANGE_RATES.get(currency, 1.0)
-                total_usd += float(amount) / rate
-            return f"Total Balance: ${total_usd:.2f} USD"
-        except Exception as e:
-            return f"Error getting balance: {str(e)}"
+        row = conn.execute("SELECT COALESCE(SUM(amount_usd), 0) FROM transactions").fetchone()
+        total = row[0]
+        inc = conn.execute("SELECT COALESCE(SUM(amount_usd), 0) FROM transactions WHERE category IN ('Salary','Income','Freelance','Investments')").fetchone()[0]
+        exp = total - inc
+        return f"💰 Income: ${inc:,.2f}\n💸 Expenses: ${exp:,.2f}\n{'─'*25}\n💵 Balance: ${inc - exp:,.2f}"
 
     elif name == "get_report":
-        try:
-            import db
-            cursor = db._get_conn().cursor()
-            date_range = args.get("date_range", "last_30_days")
+        period = args.get("period", "month")
+        now = datetime.now()
+        if period == "day":
+            start = now.replace(hour=0, minute=0, second=0)
+        elif period == "week":
+            start = now - timedelta(days=now.weekday())
+            start = start.replace(hour=0, minute=0, second=0)
+        elif period == "month":
+            start = now.replace(day=1, hour=0, minute=0, second=0)
+        elif period == "year":
+            start = now.replace(month=1, day=1, hour=0, minute=0, second=0)
+        else:
+            start = datetime(1970, 1, 1)
 
-            if date_range == "last_30_days":
-                cursor.execute("""
-                    SELECT name, amount, currency, category, created_at 
-                    FROM transactions 
-                    WHERE strftime('%Y-%m-%d', created_at) >= datetime('now', '-30 days')
-                """)
-            else:
-                cursor.execute("""
-                    SELECT name, amount, currency, category, created_at 
-                    FROM transactions 
-                    WHERE strftime('%Y-%m-%d', created_at) >= ?
-                """, (date_range,))
+        rows = conn.execute(
+            "SELECT category, SUM(amount_usd) FROM transactions WHERE created_at >= ? GROUP BY category ORDER BY SUM(amount_usd) DESC",
+            (start.isoformat(),)
+        ).fetchall()
 
-            rows = cursor.fetchall()
-            if not rows:
-                return "No transactions found in the specified range."
+        if not rows:
+            return f"📊 No transactions for period: {period}"
 
-            lines = ["=== Transaction Report ==="]
-            for row in rows:
-                name, amount, currency, category, created_at = row
-                usd_amount = float(amount) / EXCHANGE_RATES.get(currency, 1.0)
-                lines.append(f"{name} | {amount} {currency} | ${usd_amount:.2f} USD")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error getting report: {str(e)}"
+        total = sum(r[1] for r in rows)
+        lines = [f"📊 Report ({period})", f"📅 {start.strftime('%Y-%m-%d')} → {now.strftime('%Y-%m-%d')}", ""]
+        for cat, amt in rows:
+            pct = (amt / total * 100) if total else 0
+            lines.append(f"  • {cat}: ${amt:,.2f} ({pct:.0f}%)")
+        lines.append(f"\n💵 Total: ${total:,.2f}")
+        return "\n".join(lines)
 
     elif name == "list_transactions":
-        try:
-            import db
-            cursor = db._get_conn().cursor()
-            cursor.execute("SELECT id, name, amount, currency, category, created_at FROM transactions")
-            rows = cursor.fetchall()
-
-            if not rows:
-                return "No transactions found."
-
-            lines = ["=== All Transactions ==="]
-            for row in rows:
-                tid, name, amount, currency, category, created_at = row
-                usd_amount = float(amount) / EXCHANGE_RATES.get(currency, 1.0)
-                lines.append(f"ID:{tid} | {name} | {amount} {currency} | ${usd_amount:.2f} USD")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error listing transactions: {str(e)}"
+        limit = args.get("limit", 10)
+        rows = conn.execute(
+            "SELECT id, name, amount, currency, amount_usd, category, created_at FROM transactions ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        if not rows:
+            return "No transactions yet."
+        lines = []
+        for tid, tname, amt, cur, usd, cat, ts in rows:
+            date = ts[:10]
+            lines.append(f"#{tid} [{date}] {cat}: {amt:,.0f} {cur} (${usd:,.2f}) — {tname}")
+        return "\n".join(lines)
 
     elif name == "delete_transaction":
-        try:
-            import db
-            cursor = db._get_conn().cursor()
-            transaction_id = args.get("transaction_id")
-            cursor.execute("SELECT id FROM transactions WHERE id = ?", (transaction_id,))
-            if not cursor.fetchone():
-                return f"Transaction with ID {transaction_id} not found."
-            cursor.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
-            db._get_conn().commit()
-            return f"Transaction ID {transaction_id} deleted successfully."
-        except Exception as e:
-            return f"Error deleting transaction: {str(e)}"
+        r = conn.execute("DELETE FROM transactions WHERE id=?", (args["id"],))
+        conn.commit()
+        if r.rowcount:
+            return f"✓ Transaction #{args['id']} deleted"
+        return f"Transaction #{args['id']} not found."
 
     return f"Unknown tool: {name}"
