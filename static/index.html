@@ -319,13 +319,15 @@ body {
 }
 .nav-btn:hover { color: var(--text); background: var(--surface2); }
 .nav-btn.active { color: var(--accent); background: var(--accent-bg); }
-.thinking-toggle {
-  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
-  padding: 4px 8px; cursor: pointer; font-size: 14px; opacity: 0.4;
-  transition: all 0.15s;
+.input-footer { display: flex; justify-content: space-between; align-items: center; padding: 4px 4px 0; }
+.thinking-text {
+  font-size: 11px; font-family: var(--mono); color: var(--text-dim);
+  cursor: pointer; opacity: 0.4; transition: all 0.15s; user-select: none;
 }
-.thinking-toggle:hover { opacity: 0.7; }
-.thinking-toggle.on { opacity: 1; background: var(--accent-bg); border-color: var(--accent); }
+.thinking-text:hover { opacity: 0.7; }
+.thinking-text.on { color: var(--accent); opacity: 1; }
+.thinking-text.on::before { content: '💭 '; }
+.thinking-text::before { content: '○ '; }
 
 /* Cron page */
 .cron-content { padding: 24px 32px; overflow-y: auto; flex: 1; }
@@ -405,11 +407,13 @@ body {
   <div class="chat" id="chat"></div>
   <div class="input-area">
     <div class="input-row">
-      <button class="thinking-toggle" id="thinkingToggleChat" onclick="toggleThinking()" title="Toggle thinking">💭</button>
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
     </div>
-    <div class="thread-stats" id="threadStats"></div>
+    <div class="input-footer">
+      <div class="thread-stats" id="threadStats"></div>
+      <span class="thinking-text" id="thinkingToggleChat" onclick="toggleThinking()">thinking</span>
+    </div>
   </div>
 </div>
 
