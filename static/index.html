@@ -494,9 +494,10 @@ async function loadAllSettings() {
 
 // Soul
 async function loadSettingsSoul() {
+  try {
   const res = await fetch('/api/soul');
   const data = await res.json();
-  const s = data.values;
+  const s = data.values || data;  // fallback if old format
   const traits = data.traits || {};
   document.getElementById('soulName').value = s.name || '';
   document.getElementById('soulLang').value = s.language || '';
@@ -519,6 +520,7 @@ async function loadSettingsSoul() {
     `;
     container.appendChild(row);
   }
+  } catch(e) { console.error('loadSettingsSoul error:', e); document.getElementById('soulTraits').innerHTML = `<span class="s-row-label">Error: ${e.message}</span>`; }
 }
 async function saveSoulField(key, value) {
   await fetch('/api/soul', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({[key]:value}) });
