@@ -39,6 +39,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "memory_delete",
+            "description": "Delete a memory by search query. Finds closest match and removes it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search to find memory to delete"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "shell",
             "description": "Run any shell command. Use for: installs, file operations, git, system tasks. Returns stdout+stderr.",
             "parameters": {
@@ -150,6 +164,15 @@ def execute(name: str, args: dict) -> str:
             return "\n".join(
                 f"[{r['tag']}] (score:{r['score']}) {r['text']}" for r in results
             )
+
+        elif name == "memory_delete":
+            results = memory.search(args["query"], limit=1)
+            if not results:
+                return "No matching memory found."
+            point_id = results[0]["id"]
+            text_preview = results[0]["text"][:60]
+            memory.delete(point_id)
+            return f"✓ Deleted memory: {text_preview}..."
 
         elif name == "memory_save":
             pid = memory.save(args["text"], tag=args.get("tag", "general"))

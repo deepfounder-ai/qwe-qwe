@@ -40,6 +40,35 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_note",
+            "description": "Delete a note by title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Note title to delete"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_note",
+            "description": "Update an existing note's content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Note title to edit"},
+                    "content": {"type": "string", "description": "New content"},
+                },
+                "required": ["title", "content"],
+            },
+        },
+    },
 ]
 
 
@@ -84,5 +113,20 @@ def execute(name: str, args: dict) -> str:
         if not row:
             return f"Note '{args['title']}' not found."
         return row[0]
+
+    elif name == "delete_note":
+        r = conn.execute("DELETE FROM notes WHERE title=?", (args["title"],))
+        conn.commit()
+        if r.rowcount:
+            return f"✓ Note '{args['title']}' deleted"
+        return f"Note '{args['title']}' not found."
+
+    elif name == "edit_note":
+        r = conn.execute("UPDATE notes SET content=?, ts=? WHERE title=?",
+                         (args["content"], time.time(), args["title"]))
+        conn.commit()
+        if r.rowcount:
+            return f"✓ Note '{args['title']}' updated"
+        return f"Note '{args['title']}' not found."
 
     return f"Unknown tool: {name}"

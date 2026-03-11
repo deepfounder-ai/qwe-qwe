@@ -66,6 +66,7 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
     )
     return [
         {
+            "id": r.id,
             "text": r.payload.get("text", ""),
             "tag": r.payload.get("tag", ""),
             "score": round(r.score, 3),
@@ -112,6 +113,16 @@ def save(text: str, tag: str = "general", dedup: bool = True) -> str:
         ],
     )
     return point_id
+
+
+def delete(point_id: str) -> bool:
+    """Delete a single memory by its point ID."""
+    try:
+        qc = _get_qdrant()
+        qc.delete(config.QDRANT_COLLECTION, points_selector=[point_id])
+        return True
+    except Exception:
+        return False
 
 
 def cleanup(max_age_days: int = 7, tag: str = "session"):
