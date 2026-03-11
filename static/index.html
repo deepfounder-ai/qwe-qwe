@@ -321,11 +321,12 @@ body {
 .nav-btn.active { color: var(--accent); background: var(--accent-bg); }
 .input-footer { display: flex; justify-content: space-between; align-items: center; padding: 4px 4px 0; }
 .thinking-text {
-  font-size: 11px; font-family: var(--mono); color: var(--text-dim);
-  cursor: pointer; opacity: 0.4; transition: all 0.15s; user-select: none;
+  font-size: 12px; font-family: var(--mono); color: var(--text-dim);
+  cursor: pointer; opacity: 0.6; transition: all 0.15s; user-select: none;
+  padding: 2px 8px; border-radius: 4px; border: 1px solid transparent;
 }
-.thinking-text:hover { opacity: 0.7; }
-.thinking-text.on { color: var(--accent); opacity: 1; }
+.thinking-text:hover { opacity: 0.9; background: var(--surface2); }
+.thinking-text.on { color: var(--accent); opacity: 1; border-color: var(--accent); background: var(--accent-bg); }
 .thinking-text.on::before { content: '💭 '; }
 .thinking-text::before { content: '○ '; }
 
