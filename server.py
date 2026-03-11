@@ -177,6 +177,25 @@ async def add_provider(data: dict):
     return {"result": providers.add(name, url, key, models)}
 
 
+# ── Skills endpoints ──
+
+@app.get("/api/skills")
+async def list_skills():
+    """List all skills with status."""
+    import skills
+    return skills.list_all()
+
+
+@app.post("/api/skills/{name}")
+async def toggle_skill(name: str, data: dict):
+    """Enable or disable a skill."""
+    import skills
+    if data.get("active"):
+        return {"result": skills.enable(name)}
+    else:
+        return {"result": skills.disable(name)}
+
+
 # ── Thread endpoints ──
 
 @app.get("/api/threads")
