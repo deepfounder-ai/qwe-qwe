@@ -1,6 +1,6 @@
 """Qdrant-backed semantic memory — search & store."""
 
-import uuid, time
+import atexit, uuid, time
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -11,6 +11,18 @@ import config
 
 _qclient: QdrantClient | None = None
 _embed_client: OpenAI | None = None
+
+
+def _close_qdrant():
+    global _qclient
+    if _qclient:
+        try:
+            _qclient.close()
+        except Exception:
+            pass
+        _qclient = None
+
+atexit.register(_close_qdrant)
 
 
 def _get_qdrant() -> QdrantClient:

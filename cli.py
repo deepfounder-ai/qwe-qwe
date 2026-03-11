@@ -5,7 +5,7 @@ import sys, time, readline
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-import agent, db, soul, skills, tasks, scheduler
+import agent, config, db, soul, skills, tasks, scheduler
 
 console = Console()
 
