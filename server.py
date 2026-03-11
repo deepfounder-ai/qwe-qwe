@@ -69,7 +69,7 @@ async def index():
     """Serve the chat UI."""
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
-        return FileResponse(index_path)
+        return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
     return JSONResponse({"error": "static/index.html not found"}, status_code=404)
 
 

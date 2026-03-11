@@ -625,9 +625,14 @@ async function addProvider() {
 
 // Skills
 async function loadSettingsSkills() {
-  const res = await fetch('/api/skills');
-  if (!res.ok) { document.getElementById('skillList').innerHTML = '<span class="s-row-label">Skills API not available</span>'; return; }
-  const skills = await res.json();
+  let skills;
+  try {
+    const res = await fetch('/api/skills');
+    skills = await res.json();
+  } catch (e) {
+    document.getElementById('skillList').innerHTML = `<span class="s-row-label">Failed to load skills: ${e.message}</span>`;
+    return;
+  }
   const container = document.getElementById('skillList');
   container.innerHTML = '';
   if (!skills.length) { container.innerHTML = '<span class="s-row-label">No skills found in skills/ folder</span>'; return; }
