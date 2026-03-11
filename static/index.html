@@ -392,7 +392,6 @@ body {
   <div class="header-right">
     <span class="stat" id="statTokens"></span>
     <span class="stat" id="statMemory"></span>
-    <button class="thinking-toggle" id="thinkingToggle" onclick="toggleThinking()" title="Toggle model thinking">💭</button>
   </div>
 </div>
 
@@ -406,6 +405,7 @@ body {
   <div class="chat" id="chat"></div>
   <div class="input-area">
     <div class="input-row">
+      <button class="thinking-toggle" id="thinkingToggleChat" onclick="toggleThinking()" title="Toggle thinking">💭</button>
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
     </div>
@@ -819,11 +819,11 @@ async function loadThinkingState() {
   try {
     const r = await fetch('/api/thinking');
     const d = await r.json();
-    document.getElementById('thinkingToggle').classList.toggle('on', d.enabled);
+    document.getElementById('thinkingToggleChat').classList.toggle('on', d.enabled);
   } catch(e) {}
 }
 async function toggleThinking() {
-  const btn = document.getElementById('thinkingToggle');
+  const btn = document.getElementById('thinkingToggleChat');
   const isOn = btn.classList.contains('on');
   await fetch('/api/thinking', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:!isOn})});
   btn.classList.toggle('on', !isOn);
