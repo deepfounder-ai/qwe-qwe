@@ -195,6 +195,37 @@ async def add_provider(data: dict):
     return {"result": providers.add(name, url, key, models)}
 
 
+# ── Cron/Tasks endpoints ──
+
+@app.get("/api/cron")
+async def list_cron():
+    """List scheduled tasks."""
+    import scheduler
+    return scheduler.list_tasks()
+
+
+@app.post("/api/cron")
+async def add_cron(data: dict):
+    """Add a scheduled task."""
+    import scheduler
+    result = scheduler.add(data.get("name",""), data.get("task",""), data.get("schedule",""))
+    return result
+
+
+@app.delete("/api/cron/{task_id}")
+async def remove_cron(task_id: int):
+    """Remove a scheduled task."""
+    import scheduler
+    return {"result": scheduler.remove(task_id)}
+
+
+@app.get("/api/tasks")
+async def list_tasks():
+    """Get background task results."""
+    import tasks as t
+    return {"pending": t.pending_count(), "results": t.get_results(clear=False)}
+
+
 # ── Skills endpoints ──
 
 @app.get("/api/skills")
