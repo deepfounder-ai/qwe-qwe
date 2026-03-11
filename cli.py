@@ -280,10 +280,25 @@ def _on_cron_complete(name, task, result):
     sys.stdout.flush()
 
 def main():
+    # Load timezone from DB
+    tz_val = db.kv_get("timezone")
+    if tz_val is not None:
+        config.TZ_OFFSET = int(tz_val)
+    else:
+        # First run — ask user
+        console.print("  [yellow]⏰ What's your UTC offset? (e.g. -3 for Buenos Aires, +1 for Berlin)[/]")
+        try:
+            tz_input = input("  UTC offset: ").strip()
+            offset = int(tz_input.replace("+", ""))
+            config.TZ_OFFSET = offset
+            db.kv_set("timezone", str(offset))
+        except (ValueError, EOFError):
+            config.TZ_OFFSET = 0
+
     # Start scheduler
     scheduler.on_complete(_on_cron_complete)
     scheduler.start()
-    console.print("  [dim]⏰ Scheduler running[/]")
+    console.print(f"  [dim]⏰ Scheduler running (UTC{config.TZ_OFFSET:+d})[/]")
 
     show_banner()
 

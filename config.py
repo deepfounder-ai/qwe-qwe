@@ -20,8 +20,9 @@ QDRANT_COLLECTION = "qwe_qwe"
 # SQLite
 DB_PATH = "qwe_qwe.db"
 
-# Timezone offset from UTC in hours (e.g. -3 for Buenos Aires)
-TZ_OFFSET = -3
+# Timezone offset from UTC (hours). Stored in DB, set via /soul or ask user.
+# Default: 0 (UTC). Agent should ask user on first run and save to kv "timezone".
+TZ_OFFSET = 0  # overridden at runtime from DB
 
 # Agent
 MAX_HISTORY_MESSAGES = 4   # last N messages in context (keep small for 32k models)
