@@ -929,6 +929,9 @@ function connect() {
       setGenerating(false); loadThreads(); loadThreadStats();
     } else if (data.type === 'error') {
       addMessage('error', data.text); setGenerating(false);
+    } else if (data.type === 'cron') {
+      addMessage('assistant', `⏰ **${data.name}**\n${data.text}`, {});
+      chat.scrollTop = chat.scrollHeight;
     } else if (data.type === 'status') {
       showStatus(data.text);
     }

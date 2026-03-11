@@ -12,6 +12,10 @@ from contextlib import asynccontextmanager
 # Global abort flag
 _abort_event = threading.Event()
 
+# Connected WebSocket clients for broadcast
+_ws_clients: set = set()
+_ws_loop: asyncio.AbstractEventLoop | None = None
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -365,8 +369,11 @@ async def delete_thread(thread_id: str):
 
 @app.websocket("/ws")
 async def websocket_chat(ws: WebSocket):
+    global _ws_loop
     await ws.accept()
-    _log.info("websocket client connected")
+    _ws_clients.add(ws)
+    _ws_loop = asyncio.get_event_loop()
+    _log.info(f"websocket client connected ({len(_ws_clients)} total)")
 
     try:
         while True:
@@ -410,9 +417,42 @@ async def websocket_chat(ws: WebSocket):
                 await ws.send_json({"type": "error", "text": str(e)})
 
     except WebSocketDisconnect:
-        _log.info("websocket client disconnected")
+        _ws_clients.discard(ws)
+        _log.info(f"websocket client disconnected ({len(_ws_clients)} left)")
     except Exception as e:
+        _ws_clients.discard(ws)
         _log.error(f"websocket error: {e}", exc_info=True)
+
+
+# ── Broadcast to WS clients ──
+
+async def _broadcast(msg: dict):
+    """Send JSON to all connected WebSocket clients."""
+    dead = set()
+    for ws in _ws_clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            dead.add(ws)
+    _ws_clients -= dead
+
+
+def _cron_callback(name: str, task: str, result: str):
+    """Called from scheduler thread when a cron task completes."""
+    if not _ws_loop or not _ws_clients:
+        return
+    msg = {
+        "type": "cron",
+        "name": name,
+        "task": task,
+        "text": result,
+    }
+    asyncio.run_coroutine_threadsafe(_broadcast(msg), _ws_loop)
+
+
+# Register cron callback
+import scheduler
+scheduler.on_complete(_cron_callback)
 
 
 # ── Run ──
