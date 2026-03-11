@@ -5,8 +5,12 @@ import json
 import re
 import time
 import os
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
+
+# Global abort flag
+_abort_event = threading.Event()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +31,8 @@ _log = logger.get("server")
 def _run_agent_sync(user_input: str, thread_id: str | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
+    _abort_event.clear()
+    agent._abort_event = _abort_event  # share abort flag with agent
     t0 = time.time()
     result = agent.run(user_input, thread_id=thread_id)
     elapsed = int((time.time() - t0) * 1000)
@@ -121,6 +127,13 @@ async def logs(file: str = "qwe-qwe.log", lines: int = 50):
         return {"lines": []}
     all_lines = log_path.read_text().splitlines()
     return {"lines": all_lines[-lines:]}
+
+
+@app.post("/api/abort")
+async def abort_generation():
+    """Abort current agent generation."""
+    _abort_event.set()
+    return {"ok": True}
 
 
 @app.get("/api/thinking")

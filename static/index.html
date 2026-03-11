@@ -163,6 +163,12 @@ body {
 #input::placeholder { color: var(--text-dim); }
 #send { background: var(--accent); color: #000; border: none; border-radius: 10px; padding: 12px 20px; font-weight: 600; cursor: pointer; font-size: 14px; }
 #send:hover { opacity: 0.85; } #send:disabled { opacity: 0.4; cursor: not-allowed; }
+.stop-btn {
+  background: var(--error); color: #fff; border: none; border-radius: 10px;
+  padding: 12px 16px; font-size: 16px; cursor: pointer; font-weight: bold;
+  transition: opacity 0.15s;
+}
+.stop-btn:hover { opacity: 0.8; }
 .thread-stats {
   display: flex; gap: 16px; padding: 6px 4px 0; font-size: 11px;
   color: var(--text-dim); font-family: var(--mono);
@@ -410,6 +416,7 @@ body {
     <div class="input-row">
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
+      <button id="stop" class="stop-btn" onclick="stopGeneration()" style="display:none" title="Stop generation">■</button>
     </div>
     <div class="input-footer">
       <span class="thinking-text" id="thinkingToggleChat" onclick="toggleThinking()">thinking</span>
@@ -919,9 +926,9 @@ function connect() {
     removeStatus();
     if (data.type === 'reply') {
       addMessage('assistant', data.text, data);
-      sendBtn.disabled = false; input.focus(); loadThreads(); loadThreadStats();
+      setGenerating(false); loadThreads(); loadThreadStats();
     } else if (data.type === 'error') {
-      addMessage('error', data.text); sendBtn.disabled = false;
+      addMessage('error', data.text); setGenerating(false);
     } else if (data.type === 'status') {
       showStatus(data.text);
     }
@@ -1022,7 +1029,20 @@ function send() {
   if (!text || !ws || ws.readyState !== 1) return;
   addMessage('user', text);
   ws.send(JSON.stringify({ text, thread_id: activeThreadId }));
-  input.value = ''; input.style.height = 'auto'; sendBtn.disabled = true;
+  input.value = ''; input.style.height = 'auto';
+  setGenerating(true);
+}
+function setGenerating(on) {
+  sendBtn.disabled = on;
+  input.disabled = on;
+  document.getElementById('stop').style.display = on ? 'inline-block' : 'none';
+  sendBtn.style.display = on ? 'none' : 'inline-block';
+  if (!on) input.focus();
+}
+async function stopGeneration() {
+  await fetch('/api/abort', {method:'POST'});
+  setGenerating(false);
+  addMessage('status', '⏹ Stopped');
 }
 input.addEventListener('keydown', (e) => { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); send(); } });
 input.addEventListener('input', () => { input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,120)+'px'; });

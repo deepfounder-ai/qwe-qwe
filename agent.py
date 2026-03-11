@@ -1,14 +1,14 @@
 """Core agent loop — the brain of qwe-qwe."""
 
-import json, re, sys, time
+import json, re, sys, time, threading
 from openai import OpenAI
 from rich.console import Console
 import config, db, tools, memory, soul, providers, threads
 import logger
 
 _log = logger.get("agent")
-
 _console = Console()
+_abort_event = threading.Event()  # can be replaced by server
 
 
 def _strip_thinking(text: str) -> str:
@@ -169,6 +169,11 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
     fail_count = 0
 
     while rounds < config.MAX_TOOL_ROUNDS:
+        # Check abort
+        if hasattr(sys.modules[__name__], '_abort_event') and _abort_event.is_set():
+            result.reply = "⏹ Stopped."
+            break
+
         all_tools = tools.get_all_tools()
 
         # Stream the response
