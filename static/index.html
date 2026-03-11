@@ -32,18 +32,103 @@ body {
   overflow: hidden;
 }
 
+/* ── Tab bar (Chrome-style) ── */
+.tab-bar {
+  display: flex;
+  align-items: flex-end;
+  background: #0e0e0e;
+  padding: 0 8px;
+  gap: 0;
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+  min-height: 38px;
+}
+.tab-bar::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 180px;
+  min-width: 0;
+  position: relative;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+  user-select: none;
+}
+.tab:hover { background: var(--surface2); color: var(--text); }
+.tab.active {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border);
+}
+.tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--sans);
+}
+.tab-msgs {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  flex-shrink: 0;
+}
+.tab-close {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s, background 0.1s;
+}
+.tab:hover .tab-close { opacity: 1; }
+.tab-close:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+
+.tab-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 0 4px;
+  border-radius: 6px;
+  font-size: 16px;
+  color: var(--text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  align-self: center;
+}
+.tab-new:hover { background: var(--surface2); color: var(--accent); }
+
 /* Header */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: 8px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
-.logo { font-size: 20px; font-weight: 700; color: var(--accent); font-family: var(--mono); }
+.logo { font-size: 18px; font-weight: 700; color: var(--accent); font-family: var(--mono); }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--error);
@@ -158,7 +243,7 @@ body {
 
 /* Input */
 .input-area {
-  padding: 16px 20px;
+  padding: 12px 20px;
   border-top: 1px solid var(--border);
   background: var(--surface);
   flex-shrink: 0;
@@ -261,15 +346,36 @@ body {
 .empty-logo { font-size: 48px; font-weight: 700; color: var(--accent); font-family: var(--mono); opacity: 0.3; }
 .empty-text { font-size: 14px; }
 
+/* Tab rename inline edit */
+.tab-rename {
+  background: var(--surface2);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--sans);
+  padding: 2px 6px;
+  border-radius: 3px;
+  outline: none;
+  width: 100px;
+}
+
 /* Mobile */
 @media (max-width: 640px) {
   .msg { max-width: 95%; }
   .header-right .stat { display: none; }
-  #input { font-size: 16px; } /* prevent iOS zoom */
+  #input { font-size: 16px; }
+  .tab { max-width: 120px; padding: 6px 10px; }
+  .tab-msgs { display: none; }
 }
 </style>
 </head>
 <body>
+
+<!-- Tab bar -->
+<div class="tab-bar" id="tabBar">
+  <!-- tabs rendered dynamically -->
+  <div class="tab-new" onclick="createThread()" title="New thread">+</div>
+</div>
 
 <div class="header">
   <div class="header-left">
@@ -321,9 +427,13 @@ body {
 // ── State ──
 let ws = null;
 let reconnectTimer = null;
+let activeThreadId = null;
+let threadsList = [];
+
 const chat = document.getElementById('chat');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const tabBar = document.getElementById('tabBar');
 
 // ── WebSocket ──
 function connect() {
@@ -333,7 +443,7 @@ function connect() {
   ws.onopen = () => {
     document.getElementById('statusDot').classList.add('connected');
     clearTimeout(reconnectTimer);
-    loadHistory();
+    loadThreads();
     loadStatus();
   };
 
@@ -352,6 +462,8 @@ function connect() {
       addMessage('assistant', data.text, data);
       sendBtn.disabled = false;
       input.focus();
+      // Update tab message count
+      loadThreads();
     } else if (data.type === 'error') {
       addMessage('error', data.text);
       sendBtn.disabled = false;
@@ -361,9 +473,169 @@ function connect() {
   };
 }
 
+// ── Threads / Tabs ──
+async function loadThreads() {
+  try {
+    const res = await fetch('/api/threads');
+    threadsList = await res.json();
+
+    // Find active
+    const active = threadsList.find(t => t.active);
+    if (active && !activeThreadId) {
+      activeThreadId = active.id;
+    }
+
+    renderTabs();
+
+    // Load history for active thread
+    if (activeThreadId) {
+      loadHistory(activeThreadId);
+    }
+  } catch (e) {
+    console.error('Failed to load threads:', e);
+  }
+}
+
+function renderTabs() {
+  // Remove existing tabs (keep the + button)
+  const newBtn = tabBar.querySelector('.tab-new');
+  tabBar.innerHTML = '';
+
+  for (const t of threadsList) {
+    const tab = document.createElement('div');
+    tab.className = `tab${t.id === activeThreadId ? ' active' : ''}`;
+    tab.dataset.id = t.id;
+
+    const name = document.createElement('span');
+    name.className = 'tab-name';
+    name.textContent = t.name;
+    tab.appendChild(name);
+
+    if (t.messages > 0) {
+      const msgs = document.createElement('span');
+      msgs.className = 'tab-msgs';
+      msgs.textContent = t.messages;
+      tab.appendChild(msgs);
+    }
+
+    // Close button (not for default if it's the only one)
+    if (t.id !== 'default' || threadsList.length > 1) {
+      const close = document.createElement('span');
+      close.className = 'tab-close';
+      close.textContent = '×';
+      close.onclick = (e) => { e.stopPropagation(); closeThread(t.id, t.name); };
+      tab.appendChild(close);
+    }
+
+    // Click to switch
+    tab.onclick = () => switchThread(t.id);
+
+    // Double-click to rename
+    tab.ondblclick = (e) => {
+      e.preventDefault();
+      startRename(tab, t.id, t.name);
+    };
+
+    tabBar.appendChild(tab);
+  }
+
+  tabBar.appendChild(newBtn);
+}
+
+async function switchThread(tid) {
+  if (tid === activeThreadId) return;
+
+  try {
+    await fetch(`/api/threads/${tid}/switch`, { method: 'POST' });
+    activeThreadId = tid;
+    renderTabs();
+    loadHistory(tid);
+  } catch (e) {
+    console.error('Failed to switch thread:', e);
+  }
+}
+
+async function createThread() {
+  // Prompt for name
+  const name = prompt('Thread name:', `Thread ${threadsList.length + 1}`);
+  if (!name) return;
+
+  try {
+    const res = await fetch('/api/threads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const t = await res.json();
+
+    // Switch to new thread
+    await fetch(`/api/threads/${t.id}/switch`, { method: 'POST' });
+    activeThreadId = t.id;
+    await loadThreads();
+    input.focus();
+  } catch (e) {
+    console.error('Failed to create thread:', e);
+  }
+}
+
+async function closeThread(tid, name) {
+  if (!confirm(`Close "${name}"?\nThis will archive the thread.`)) return;
+
+  try {
+    // Archive (not delete — safer)
+    await fetch(`/api/threads/${tid}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived: true }),
+    });
+
+    // If closing active, switch to first available
+    if (tid === activeThreadId) {
+      activeThreadId = null;
+    }
+    await loadThreads();
+
+    // Auto-switch to first thread
+    if (!activeThreadId && threadsList.length > 0) {
+      await switchThread(threadsList[0].id);
+    }
+  } catch (e) {
+    console.error('Failed to close thread:', e);
+  }
+}
+
+function startRename(tabEl, tid, currentName) {
+  const nameEl = tabEl.querySelector('.tab-name');
+  const inp = document.createElement('input');
+  inp.className = 'tab-rename';
+  inp.value = currentName;
+  nameEl.replaceWith(inp);
+  inp.focus();
+  inp.select();
+
+  const finish = async () => {
+    const newName = inp.value.trim() || currentName;
+    if (newName !== currentName) {
+      try {
+        await fetch(`/api/threads/${tid}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName }),
+        });
+      } catch (e) { console.error(e); }
+    }
+    await loadThreads();
+  };
+
+  inp.onblur = finish;
+  inp.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    if (e.key === 'Escape') { inp.value = currentName; inp.blur(); }
+  };
+}
+
 // ── Messages ──
 function addMessage(role, text, meta) {
-  // Remove empty state
   const empty = chat.querySelector('.empty');
   if (empty) empty.remove();
 
@@ -403,13 +675,13 @@ function removeStatus() {
   if (el) el.remove();
 }
 
-// ── Send ──
+// ── Send (with thread_id) ──
 function send() {
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== 1) return;
 
   addMessage('user', text);
-  ws.send(JSON.stringify({ text }));
+  ws.send(JSON.stringify({ text, thread_id: activeThreadId }));
   input.value = '';
   input.style.height = 'auto';
   sendBtn.disabled = true;
@@ -428,10 +700,11 @@ input.addEventListener('input', () => {
   input.style.height = Math.min(input.scrollHeight, 120) + 'px';
 });
 
-// ── Load history ──
-async function loadHistory() {
+// ── Load history for a thread ──
+async function loadHistory(threadId) {
   try {
-    const res = await fetch('/api/history?limit=30');
+    const tid = threadId || activeThreadId || 'default';
+    const res = await fetch(`/api/history?limit=30&thread_id=${tid}`);
     const msgs = await res.json();
     chat.innerHTML = '';
     if (msgs.length === 0) {
@@ -494,7 +767,6 @@ function toggleSidebar() {
   document.getElementById('sidebar').classList.toggle('open');
 }
 
-// Close sidebar on outside click
 document.addEventListener('click', (e) => {
   const sidebar = document.getElementById('sidebar');
   const btn = document.querySelector('.btn-settings');
@@ -520,31 +792,19 @@ async function showLogs(type) {
 function renderMarkdown(text) {
   if (!text) return '';
   let html = escapeHtml(text);
-
-  // Code blocks
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
-  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Italic
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  // Headers
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
   html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-  // Blockquotes
   html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-  // Unordered lists
   html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
   html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-  // Paragraphs (double newline)
   html = html.replace(/\n\n/g, '</p><p>');
-  // Single newlines (outside pre)
   html = html.replace(/([^>])\n([^<])/g, '$1<br>$2');
-
   return `<p>${html}</p>`;
 }
 
@@ -552,6 +812,33 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// ── Keyboard shortcuts ──
+document.addEventListener('keydown', (e) => {
+  // Ctrl+T — new thread
+  if ((e.ctrlKey || e.metaKey) && e.key === 't') {
+    // Don't hijack if browser handles it, but try
+    // e.preventDefault(); // commented out — let browser handle
+    // createThread();
+  }
+  // Ctrl+Tab / Ctrl+Shift+Tab — switch threads
+  // (browsers intercept these, so we use Alt instead)
+  if (e.altKey && e.key === 'ArrowRight') {
+    e.preventDefault();
+    switchToNextThread(1);
+  }
+  if (e.altKey && e.key === 'ArrowLeft') {
+    e.preventDefault();
+    switchToNextThread(-1);
+  }
+});
+
+function switchToNextThread(direction) {
+  const idx = threadsList.findIndex(t => t.id === activeThreadId);
+  if (idx === -1) return;
+  const next = (idx + direction + threadsList.length) % threadsList.length;
+  switchThread(threadsList[next].id);
 }
 
 // ── Init ──
