@@ -285,13 +285,35 @@ def main():
     if tz_val is not None:
         config.TZ_OFFSET = int(tz_val)
     else:
-        # First run — ask user
-        console.print("  [yellow]⏰ What's your UTC offset? (e.g. -3 for Buenos Aires, +1 for Berlin)[/]")
+        # First run — ask city, map to offset
+        _CITY_TZ = {
+            "moscow": 3, "london": 0, "berlin": 1, "paris": 1,
+            "new york": -5, "los angeles": -8, "chicago": -6,
+            "tokyo": 9, "sydney": 11, "dubai": 4, "mumbai": 5,
+            "beijing": 8, "singapore": 8, "istanbul": 3,
+            "buenos aires": -3, "são paulo": -3, "sao paulo": -3,
+            "mexico city": -6, "bogota": -5, "lima": -5,
+            "bangkok": 7, "seoul": 9, "jakarta": 7,
+            "cairo": 2, "nairobi": 3, "lagos": 1,
+            "amsterdam": 1, "madrid": 1, "rome": 1,
+            "warsaw": 1, "kyiv": 2, "tbilisi": 4,
+        }
+        console.print("  [yellow]🌍 What city are you in?[/]")
         try:
-            tz_input = input("  UTC offset: ").strip()
-            offset = int(tz_input.replace("+", ""))
+            city = input("  City: ").strip().lower()
+            offset = _CITY_TZ.get(city)
+            if offset is None:
+                # Fuzzy match
+                for c, o in _CITY_TZ.items():
+                    if city in c or c in city:
+                        offset = o
+                        break
+            if offset is None:
+                console.print(f"  [dim]Don't know '{city}', defaulting to UTC. Use /soul to change later.[/]")
+                offset = 0
             config.TZ_OFFSET = offset
             db.kv_set("timezone", str(offset))
+            db.kv_set("timezone_city", city)
         except (ValueError, EOFError):
             config.TZ_OFFSET = 0
 
