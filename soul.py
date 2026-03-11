@@ -58,10 +58,80 @@ def _load_custom_traits():
 
 
 def save(key: str, value) -> str:
+    """Save a soul field. Works for both built-in and custom traits."""
+    if key in ("name", "language"):
+        db.kv_set(f"soul:{key}", str(value))
+        return f"✓ {key} = {value}"
     if key not in DEFAULTS:
-        return f"Unknown trait: {key}. Available: {', '.join(DEFAULTS.keys())}"
+        return f"Unknown trait: {key}. Use add_trait() to create new ones."
     db.kv_set(f"soul:{key}", str(value))
     return f"✓ {key} = {value}"
+
+
+def add_trait(name: str, low: str = "low", high: str = "high", value: int = 5) -> str:
+    """Add a custom personality trait."""
+    import json
+    name = name.lower().strip()
+    if not name or not name.isalpha():
+        return "✗ Trait name must be alphabetic"
+    if name in ("name", "language"):
+        return "✗ Reserved field name"
+
+    # Load existing custom traits
+    raw = db.kv_get("soul:_custom_traits")
+    custom = json.loads(raw) if raw else {}
+
+    # Add/update
+    custom[name] = {"low": low, "high": high}
+    db.kv_set("soul:_custom_traits", json.dumps(custom))
+    db.kv_set(f"soul:{name}", str(value))
+
+    # Update runtime
+    DEFAULTS[name] = value
+    TRAIT_DESCRIPTIONS[name] = (low, high)
+
+    return f"✓ Added trait '{name}' ({low} ↔ {high}) = {value}"
+
+
+def remove_trait(name: str) -> str:
+    """Remove a custom trait. Built-in traits cannot be removed."""
+    import json
+    name = name.lower().strip()
+
+    # Check if it's custom
+    raw = db.kv_get("soul:_custom_traits")
+    custom = json.loads(raw) if raw else {}
+
+    if name not in custom:
+        return f"✗ '{name}' is a built-in trait and can't be removed"
+
+    del custom[name]
+    db.kv_set("soul:_custom_traits", json.dumps(custom))
+
+    # Remove from DB and runtime
+    conn = db._get_conn()
+    conn.execute("DELETE FROM kv WHERE key=?", (f"soul:{name}",))
+    conn.commit()
+
+    DEFAULTS.pop(name, None)
+    TRAIT_DESCRIPTIONS.pop(name, None)
+
+    return f"✓ Removed trait '{name}'"
+
+
+def get_trait_descriptions() -> dict:
+    """Get all trait descriptions {name: {low, high, builtin}}."""
+    _load_custom_traits()
+    raw = db.kv_get("soul:_custom_traits")
+    custom_names = set(json.loads(raw).keys()) if raw else set()
+
+    result = {}
+    for name, (low, high) in TRAIT_DESCRIPTIONS.items():
+        result[name] = {"low": low, "high": high, "builtin": name not in custom_names}
+    return result
+
+
+import json  # ensure available at module level
 
 
 def _system_info() -> str:

@@ -124,8 +124,10 @@ async def logs(file: str = "qwe-qwe.log", lines: int = 50):
 
 @app.get("/api/soul")
 async def get_soul():
-    """Get soul config."""
-    return soul.load()
+    """Get soul config with trait descriptions."""
+    s = soul.load()
+    descs = soul.get_trait_descriptions()
+    return {"values": s, "traits": descs}
 
 
 @app.post("/api/soul")
@@ -135,6 +137,22 @@ async def set_soul(data: dict):
     for key, value in data.items():
         results[key] = soul.save(key, value)
     return results
+
+
+@app.post("/api/soul/traits")
+async def add_soul_trait(data: dict):
+    """Add a custom trait."""
+    name = data.get("name", "")
+    low = data.get("low", "low")
+    high = data.get("high", "high")
+    value = data.get("value", 5)
+    return {"result": soul.add_trait(name, low, high, value)}
+
+
+@app.delete("/api/soul/traits/{name}")
+async def remove_soul_trait(name: str):
+    """Remove a custom trait."""
+    return {"result": soul.remove_trait(name)}
 
 
 # ── Provider/Model endpoints ──

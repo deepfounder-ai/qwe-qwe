@@ -358,6 +358,15 @@ body {
           <div class="s-card-title">Personality Traits</div>
           <div id="soulTraits"></div>
         </div>
+        <div class="s-card">
+          <div class="s-card-title">Add Custom Trait</div>
+          <div class="s-input-row">
+            <input class="s-input" id="newTraitName" placeholder="trait name (e.g. sarcasm)">
+            <input class="s-input" id="newTraitLow" placeholder="low label (e.g. sincere)" style="width:150px">
+            <input class="s-input" id="newTraitHigh" placeholder="high label (e.g. savage)" style="width:150px">
+            <button class="s-btn primary" onclick="addTrait()">Add</button>
+          </div>
+        </div>
       </div>
 
       <!-- Model -->
@@ -486,36 +495,51 @@ async function loadAllSettings() {
 // Soul
 async function loadSettingsSoul() {
   const res = await fetch('/api/soul');
-  const s = await res.json();
+  const data = await res.json();
+  const s = data.values;
+  const traits = data.traits || {};
   document.getElementById('soulName').value = s.name || '';
   document.getElementById('soulLang').value = s.language || '';
   const container = document.getElementById('soulTraits');
   container.innerHTML = '';
-  const descs = {
-    humor:['serious','funny'], honesty:['diplomatic','brutally direct'],
-    curiosity:['answers','digs deeper'], brevity:['verbose','concise'],
-    formality:['casual','formal'], proactivity:['waits','acts on own'],
-    empathy:['rational','caring'], creativity:['practical','unconventional']
-  };
   for (const [k,v] of Object.entries(s)) {
     if (k === 'name' || k === 'language') continue;
-    const d = descs[k] || ['low','high'];
+    const t = traits[k] || {low:'low', high:'high', builtin:true};
     const row = document.createElement('div');
     row.className = 's-slider';
     row.innerHTML = `
       <span class="s-slider-label">${k}</span>
-      <span class="s-slider-desc">${d[0]}</span>
+      <span class="s-slider-desc">${t.low}</span>
       <input type="range" min="0" max="10" value="${v}"
              oninput="this.nextElementSibling.textContent=this.value"
              onchange="saveSoulField('${k}', parseInt(this.value))">
       <span class="s-slider-val">${v}</span>
-      <span class="s-slider-desc">${d[1]}</span>
+      <span class="s-slider-desc">${t.high}</span>
+      ${!t.builtin ? `<span class="s-slider-del" onclick="removeTrait('${k}')" title="Remove trait" style="cursor:pointer;color:var(--error);font-size:14px;margin-left:4px;opacity:0.5;transition:opacity 0.15s" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0.5">✕</span>` : ''}
     `;
     container.appendChild(row);
   }
 }
 async function saveSoulField(key, value) {
   await fetch('/api/soul', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({[key]:value}) });
+}
+async function addTrait() {
+  const name = document.getElementById('newTraitName').value.trim();
+  const low = document.getElementById('newTraitLow').value.trim() || 'low';
+  const high = document.getElementById('newTraitHigh').value.trim() || 'high';
+  if (!name) return alert('Trait name required');
+  const res = await fetch('/api/soul/traits', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, low, high, value:5}) });
+  const data = await res.json();
+  if (data.result?.startsWith('✗')) { alert(data.result); return; }
+  document.getElementById('newTraitName').value = '';
+  document.getElementById('newTraitLow').value = '';
+  document.getElementById('newTraitHigh').value = '';
+  loadSettingsSoul();
+}
+async function removeTrait(name) {
+  if (!confirm(`Remove trait "${name}"?`)) return;
+  await fetch(`/api/soul/traits/${name}`, {method:'DELETE'});
+  loadSettingsSoul();
 }
 
 // Providers & Models
