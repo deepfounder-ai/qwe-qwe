@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import db
+import config
 
 # Default personality template
 DEFAULTS = {
@@ -176,6 +177,11 @@ def to_prompt(soul: dict) -> str:
 
     # System info (1 line)
     lines.append(f"System: {_get_sysinfo()}")
+    # Current time in user's timezone
+    from datetime import datetime, timezone, timedelta
+    tz = timezone(timedelta(hours=config.TZ_OFFSET))
+    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M") + f" (UTC{config.TZ_OFFSET:+d})"
+    lines.append(f"Current time: {now}")
 
     # Core rules
     lang = soul['language']

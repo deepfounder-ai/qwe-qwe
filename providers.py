@@ -296,5 +296,10 @@ def _init():
     if saved_model:
         config.LLM_MODEL = saved_model
 
+    # Timezone
+    tz = db.kv_get("tz_offset")
+    if tz:
+        config.TZ_OFFSET = int(tz)
+
 
 _init()
