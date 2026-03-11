@@ -888,7 +888,7 @@ function renderTabs() {
   for (const t of threadsList) {
     const tab = document.createElement('div');
     tab.className = `tab${t.id === activeThreadId ? ' active' : ''}`;
-    tab.innerHTML = `<span class="tab-name">${t.name}</span>${t.messages?`<span class="tab-msgs">${t.messages}</span>`:''}${t.id!=='default'||threadsList.length>1?'<span class="tab-close" onclick="event.stopPropagation();closeThread(\''+t.id+'\',\''+t.name.replace(/'/g,"\\'")+'\')">×</span>':''}`;
+    tab.innerHTML = `<span class="tab-name">${t.name}</span>${t.messages?`<span class="tab-msgs">${t.messages}</span>`:''}${t.id!=='default'?'<span class="tab-close" onclick="event.stopPropagation();closeThread(\''+t.id+'\',\''+t.name.replace(/'/g,"\\'")+'\')">×</span>':''}`;
     tab.onclick = () => { switchThread(t.id); showPage('chat'); };
     tab.ondblclick = (e) => { e.preventDefault(); startRename(tab, t.id, t.name); };
     tabBar.appendChild(tab);

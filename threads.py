@@ -105,7 +105,7 @@ def list_all(include_archived: bool = False) -> list[dict]:
     q = "SELECT id, name, created_at, updated_at, archived FROM threads"
     if not include_archived:
         q += " WHERE archived=0"
-    q += " ORDER BY updated_at DESC"
+    q += " ORDER BY CASE WHEN id='default' THEN 0 ELSE 1 END, updated_at DESC"
     rows = conn.execute(q).fetchall()
 
     result = []
