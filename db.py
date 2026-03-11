@@ -42,27 +42,41 @@ def _migrate(conn: sqlite3.Connection):
     conn.commit()
 
 
-# --- Messages ---
+# --- Thread-aware helpers ---
+
+def _tid(thread_id: str | None = None) -> str:
+    """Resolve thread_id: explicit > active > default."""
+    if thread_id:
+        return thread_id
+    # Lazy import to avoid circular dep at module load
+    import threads
+    return threads.get_active_id()
+
+
+# --- Messages (all thread-scoped) ---
 
 def save_message(role: str, content: str | None = None,
                  tool_calls: list | None = None,
                  tool_call_id: str | None = None,
-                 name: str | None = None):
+                 name: str | None = None,
+                 thread_id: str | None = None):
     conn = _get_conn()
+    tid = _tid(thread_id)
     conn.execute(
-        "INSERT INTO messages (role, content, tool_calls, tool_call_id, name, ts) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO messages (role, content, tool_calls, tool_call_id, name, ts, thread_id) VALUES (?,?,?,?,?,?,?)",
         (role, content,
          json.dumps(tool_calls) if tool_calls else None,
-         tool_call_id, name, time.time())
+         tool_call_id, name, time.time(), tid)
     )
     conn.commit()
 
 
-def get_recent_messages(limit: int = config.MAX_HISTORY_MESSAGES) -> list[dict]:
+def get_recent_messages(limit: int = config.MAX_HISTORY_MESSAGES, thread_id: str | None = None) -> list[dict]:
     conn = _get_conn()
+    tid = _tid(thread_id)
     rows = conn.execute(
-        "SELECT role, content, tool_calls, tool_call_id, name FROM messages ORDER BY id DESC LIMIT ?",
-        (limit,)
+        "SELECT role, content, tool_calls, tool_call_id, name FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT ?",
+        (tid, limit)
     ).fetchall()
     messages = []
     for role, content, tc, tc_id, name in reversed(rows):
@@ -79,24 +93,27 @@ def get_recent_messages(limit: int = config.MAX_HISTORY_MESSAGES) -> list[dict]:
     return messages
 
 
-def clear_history():
+def clear_history(thread_id: str | None = None):
     conn = _get_conn()
-    conn.execute("DELETE FROM messages")
+    tid = _tid(thread_id)
+    conn.execute("DELETE FROM messages WHERE thread_id=?", (tid,))
     conn.commit()
 
 
-def count_messages() -> int:
+def count_messages(thread_id: str | None = None) -> int:
     conn = _get_conn()
-    row = conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+    tid = _tid(thread_id)
+    row = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=?", (tid,)).fetchone()
     return row[0]
 
 
-def get_oldest_messages(limit: int) -> list[dict]:
+def get_oldest_messages(limit: int, thread_id: str | None = None) -> list[dict]:
     """Get oldest messages for compaction."""
     conn = _get_conn()
+    tid = _tid(thread_id)
     rows = conn.execute(
-        "SELECT id, role, content FROM messages ORDER BY id ASC LIMIT ?",
-        (limit,)
+        "SELECT id, role, content FROM messages WHERE thread_id=? ORDER BY id ASC LIMIT ?",
+        (tid, limit)
     ).fetchall()
     return [{"id": r[0], "role": r[1], "content": r[2] or ""} for r in rows]
 

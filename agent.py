@@ -3,7 +3,7 @@
 import json, re, sys, time
 from openai import OpenAI
 from rich.console import Console
-import config, db, tools, memory, soul, providers
+import config, db, tools, memory, soul, providers, threads
 import logger
 
 _log = logger.get("agent")
@@ -43,7 +43,7 @@ def _auto_context(user_input: str) -> str:
         return ""
 
 
-def _build_messages(user_input: str) -> list[dict]:
+def _build_messages(user_input: str, thread_id: str | None = None) -> list[dict]:
     """Build minimal context: soul + auto-context + recent history + user message."""
     # Soul → compact system prompt
     agent_soul = soul.load()
@@ -57,7 +57,7 @@ def _build_messages(user_input: str) -> list[dict]:
     msgs = [{"role": "system", "content": system_text}]
 
     # Recent history from SQLite (skip if it would create invalid sequences)
-    history = db.get_recent_messages()
+    history = db.get_recent_messages(thread_id=thread_id)
 
     # Ensure history starts with user (not assistant) after system
     while history and history[0]["role"] != "user":
@@ -89,15 +89,15 @@ class TurnResult:
         self.auto_context_hits = 0
 
 
-def _maybe_compact():
+def _maybe_compact(thread_id: str | None = None):
     """Auto-compact: summarize old messages into memory when history gets long."""
-    count = db.count_messages()
+    count = db.count_messages(thread_id=thread_id)
     if count < config.COMPACTION_THRESHOLD:
         return
 
     # Get oldest messages (keep recent ones)
     keep_recent = config.MAX_HISTORY_MESSAGES
-    to_compact = db.get_oldest_messages(count - keep_recent)
+    to_compact = db.get_oldest_messages(count - keep_recent, thread_id=thread_id)
     if len(to_compact) < 4:
         return
 
@@ -135,24 +135,28 @@ def _maybe_compact():
         _log.error("compaction failed", exc_info=True)
 
 
-def run(user_input: str) -> TurnResult:
+def run(user_input: str, thread_id: str | None = None) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response."""
     client = providers.get_client()
     result = TurnResult()
     turn_start = time.time()
+    tid = thread_id  # None = uses active thread via db._tid()
 
-    _log.info(f"turn started | input: {user_input[:100]}")
+    _log.info(f"turn started | thread={tid or 'active'} | input: {user_input[:100]}")
 
     # Sanitize surrogates (WSL terminal issue)
     user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
 
     # Auto-compact if history is too long
-    _maybe_compact()
+    _maybe_compact(thread_id=tid)
 
     # Save user message
-    db.save_message("user", user_input)
+    db.save_message("user", user_input, thread_id=tid)
 
-    messages = _build_messages(user_input)
+    messages = _build_messages(user_input, thread_id=tid)
+
+    # Touch thread timestamp
+    threads.touch(tid)
 
     # Count auto-context hits (memories injected into system prompt)
     system_content = messages[0]["content"]
@@ -308,7 +312,7 @@ def run(user_input: str) -> TurnResult:
             continue
 
         result.reply = raw_reply
-        db.save_message("assistant", result.reply)
+        db.save_message("assistant", result.reply, thread_id=tid)
 
         # Track session tokens (estimate from content length since streaming doesn't give usage)
         est_tokens = len(full_content) // 4
@@ -320,11 +324,12 @@ def run(user_input: str) -> TurnResult:
         turn_ms = int((time.time() - turn_start) * 1000)
         logger.event("turn_complete", duration_ms=turn_ms, rounds=rounds,
                      tools_used=result.tool_calls_made, reply_len=len(result.reply),
-                     est_tokens=est_tokens, context_hits=result.auto_context_hits)
+                     est_tokens=est_tokens, context_hits=result.auto_context_hits,
+                     thread=tid or "active")
 
         return result
 
     _log.warning(f"max tool rounds ({config.MAX_TOOL_ROUNDS}) exhausted")
     result.reply = "I've used all my tool rounds for this turn."
-    db.save_message("assistant", result.reply)
+    db.save_message("assistant", result.reply, thread_id=tid)
     return result

@@ -18,22 +18,24 @@ import soul
 import logger
 import memory as mem
 import providers
+import threads
 
 _log = logger.get("server")
 
 # ── Agent runner in thread pool (agent.run is sync/blocking) ──
 
-def _run_agent_sync(user_input: str) -> dict:
+def _run_agent_sync(user_input: str, thread_id: str | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
     t0 = time.time()
-    result = agent.run(user_input)
+    result = agent.run(user_input, thread_id=thread_id)
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
         "tools": result.tool_calls_made,
         "duration_ms": elapsed,
         "context_hits": result.auto_context_hits,
+        "thread_id": thread_id or threads.get_active_id(),
     }
 
 
@@ -86,10 +88,13 @@ async def status():
     import skills
     active_skills = sorted(skills.get_active())
 
+    active_thread = threads.get(threads.get_active_id())
+
     return {
         "agent": s["name"],
         "model": providers.get_model(),
         "provider": providers.get_active_name(),
+        "thread": active_thread,
         "language": s["language"],
         "soul": {k: v for k, v in s.items() if k not in ("name", "language")},
         "tokens": s_compl,
@@ -100,9 +105,9 @@ async def status():
 
 
 @app.get("/api/history")
-async def history(limit: int = 20):
-    """Recent conversation history."""
-    msgs = db.get_recent_messages(limit=limit)
+async def history(limit: int = 20, thread_id: str | None = None):
+    """Recent conversation history for a thread."""
+    msgs = db.get_recent_messages(limit=limit, thread_id=thread_id)
     return [{"role": m["role"], "content": m.get("content", "")} for m in msgs
             if m["role"] in ("user", "assistant") and m.get("content")]
 
@@ -172,6 +177,53 @@ async def add_provider(data: dict):
     return {"result": providers.add(name, url, key, models)}
 
 
+# ── Thread endpoints ──
+
+@app.get("/api/threads")
+async def list_threads(include_archived: bool = False):
+    """List all threads."""
+    return threads.list_all(include_archived=include_archived)
+
+
+@app.post("/api/threads")
+async def create_thread(data: dict):
+    """Create a new thread."""
+    name = data.get("name", "New Thread")
+    t = threads.create(name, meta=data.get("meta"))
+    return t
+
+
+@app.get("/api/threads/active")
+async def active_thread():
+    """Get the active thread."""
+    tid = threads.get_active_id()
+    return threads.get(tid) or {"id": tid, "name": "Unknown"}
+
+
+@app.post("/api/threads/{thread_id}/switch")
+async def switch_thread(thread_id: str):
+    """Switch active thread."""
+    result = threads.switch(thread_id)
+    return {"result": result, "active": threads.get_active_id()}
+
+
+@app.put("/api/threads/{thread_id}")
+async def update_thread(thread_id: str, data: dict):
+    """Rename or update a thread."""
+    results = {}
+    if "name" in data:
+        results["rename"] = threads.rename(thread_id, data["name"])
+    if data.get("archived"):
+        results["archive"] = threads.archive(thread_id)
+    return results
+
+
+@app.delete("/api/threads/{thread_id}")
+async def delete_thread(thread_id: str):
+    """Delete a thread and its messages."""
+    return {"result": threads.delete(thread_id)}
+
+
 # ── WebSocket chat ──
 
 @app.websocket("/ws")
@@ -185,13 +237,15 @@ async def websocket_chat(ws: WebSocket):
             try:
                 msg = json.loads(data)
                 user_input = msg.get("text", "").strip()
+                thread_id = msg.get("thread_id")  # optional — None uses active
             except json.JSONDecodeError:
                 user_input = data.strip()
+                thread_id = None
 
             if not user_input:
                 continue
 
-            _log.info(f"ws message: {user_input[:100]}")
+            _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}")
 
             # Send "thinking" status
             await ws.send_json({"type": "status", "text": "thinking..."})
@@ -199,7 +253,9 @@ async def websocket_chat(ws: WebSocket):
             try:
                 # Run agent in thread pool (it's blocking)
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, _run_agent_sync, user_input)
+                result = await loop.run_in_executor(
+                    None, _run_agent_sync, user_input, thread_id
+                )
 
                 # Send reply
                 await ws.send_json({
@@ -208,6 +264,7 @@ async def websocket_chat(ws: WebSocket):
                     "tools": result["tools"],
                     "duration_ms": result["duration_ms"],
                     "context_hits": result["context_hits"],
+                    "thread_id": result["thread_id"],
                 })
 
             except Exception as e:

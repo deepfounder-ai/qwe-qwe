@@ -5,7 +5,7 @@ import sys, time, readline
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-import agent, config, db, soul, skills, tasks, scheduler, providers
+import agent, config, db, soul, skills, tasks, scheduler, providers, threads
 import logger
 
 _log = logger.get("cli")
@@ -43,9 +43,12 @@ def _status_line() -> str:
     sk = f" | skills: {','.join(sorted(active_skills))}" if active_skills else ""
     prov = providers.get_active_name()
     model = providers.get_model()
+    tid = threads.get_active_id()
+    t = threads.get(tid)
+    thread_name = t["name"] if t else tid
     return (
         f"agent {s['name']} | {model} @ {prov} | "
-        f"tokens {s_total:,} ({s_turns} turns){sk}"
+        f"💬 {thread_name} | tokens {s_total:,} ({s_turns} turns){sk}"
     )
 
 
@@ -72,7 +75,7 @@ def show_banner():
   [dim]💾 Memory:[/] {mem_count} memories [dim]| SQLite + Qdrant[/]
   [dim]⚙️  Skills:[/] {', '.join(sorted(active)) if active else 'none'} [dim]| /skills to manage[/]
   
-  [dim]Commands: /model  /provider  /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
+  [dim]Commands: /thread  /model  /provider  /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
 """
     )
 
@@ -273,6 +276,82 @@ def _check_background_tasks():
         icon = "✅" if r["status"] == "done" else "❌"
         console.print(f"\n  [bold]{icon} Task #{r['id']}:[/] {r['task'][:60]}")
         console.print(f"  [dim]{r['result'][:200]}[/]\n")
+
+
+def handle_thread(args: str):
+    """Thread management.
+    /thread              — list all threads
+    /thread new <name>   — create new thread and switch to it
+    /thread <id>         — switch to thread
+    /thread rename <name> — rename current thread
+    /thread archive      — archive current thread
+    /thread delete <id>  — delete a thread
+    """
+    if not args:
+        # List threads
+        all_t = threads.list_all()
+        if not all_t:
+            console.print("  [dim]No threads yet.[/]")
+            return
+
+        console.print(f"\n  [bold]💬 Threads:[/]\n")
+        for t in all_t:
+            marker = "[green]●[/]" if t["active"] else "[dim]○[/]"
+            msgs = f"[dim]({t['messages']} msgs)[/]"
+            preview = f" [dim]— {t['preview']}[/]" if t["preview"] else ""
+            console.print(f"    {marker} [bold]{t['id']}[/] {t['name']} {msgs}{preview}")
+        console.print(f"\n  [dim]/thread new <name>  /thread <id>  /thread rename <name>  /thread archive[/]\n")
+        return
+
+    parts = args.split(maxsplit=1)
+    cmd = parts[0]
+
+    # /thread new <name>
+    if cmd == "new":
+        name = parts[1] if len(parts) > 1 else f"Thread {len(threads.list_all()) + 1}"
+        t = threads.create(name)
+        threads.switch(t["id"])
+        console.print(f"  [green]✓ Created & switched to '{name}' ({t['id']})[/]")
+        return
+
+    # /thread rename <name>
+    if cmd == "rename":
+        if len(parts) < 2:
+            console.print("  [dim]Usage: /thread rename <new name>[/]")
+            return
+        result = threads.rename(threads.get_active_id(), parts[1])
+        console.print(f"  [green]{result}[/]")
+        return
+
+    # /thread archive
+    if cmd == "archive":
+        tid = parts[1] if len(parts) > 1 else threads.get_active_id()
+        result = threads.archive(tid)
+        console.print(f"  [yellow]{result}[/]")
+        return
+
+    # /thread delete <id>
+    if cmd == "delete":
+        if len(parts) < 2:
+            console.print("  [dim]Usage: /thread delete <id>[/]")
+            return
+        tid = parts[1]
+        console.print(f"  [yellow]Delete thread {tid} and all messages? (y/n)[/]")
+        try:
+            confirm = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if confirm == "y":
+            result = threads.delete(tid)
+            console.print(f"  [red]{result}[/]")
+        return
+
+    # /thread <id> — switch
+    result = threads.switch(cmd)
+    if result.startswith("✓"):
+        console.print(f"  [green]{result}[/]")
+    else:
+        console.print(f"  [red]{result}[/]")
 
 
 def handle_model(args: str):
@@ -551,6 +630,9 @@ def main():
             continue
         if user_input.startswith("/logs"):
             show_logs(user_input[5:].strip())
+            continue
+        if user_input.startswith("/thread"):
+            handle_thread(user_input[7:].strip())
             continue
         if user_input.startswith("/model"):
             handle_model(user_input[6:].strip())
