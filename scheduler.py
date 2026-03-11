@@ -1,8 +1,10 @@
 """Scheduler — cron-like task runner with SQLite storage."""
 
 import threading, time, json, re
-from datetime import datetime
-import db
+from datetime import datetime, timezone, timedelta
+import db, config
+
+_tz = timezone(timedelta(hours=config.TZ_OFFSET))
 
 _thread_started = False
 _callbacks = []  # [(fn, args)] — called when task completes
@@ -49,7 +51,7 @@ def add(name: str, task: str, schedule: str) -> dict:
     )
     conn.commit()
 
-    dt = datetime.fromtimestamp(next_run).strftime("%H:%M:%S")
+    dt = datetime.fromtimestamp(next_run, _tz).strftime("%H:%M:%S")
     return {"ok": True, "name": name, "next_run": dt, "repeat": bool(repeat)}
 
 
@@ -76,7 +78,7 @@ def _parse_schedule(schedule: str) -> tuple:
     m = re.match(r"daily\s+(\d{1,2}):(\d{2})", s)
     if m:
         h, mi = int(m.group(1)), int(m.group(2))
-        today = datetime.now().replace(hour=h, minute=mi, second=0, microsecond=0)
+        today = datetime.now(_tz).replace(hour=h, minute=mi, second=0, microsecond=0)
         ts = today.timestamp()
         if ts <= now:
             ts += 86400
@@ -86,7 +88,7 @@ def _parse_schedule(schedule: str) -> tuple:
     m = re.match(r"(\d{1,2}):(\d{2})$", s)
     if m:
         h, mi = int(m.group(1)), int(m.group(2))
-        today = datetime.now().replace(hour=h, minute=mi, second=0, microsecond=0)
+        today = datetime.now(_tz).replace(hour=h, minute=mi, second=0, microsecond=0)
         ts = today.timestamp()
         if ts <= now:
             ts += 86400
@@ -103,7 +105,7 @@ def list_tasks() -> list[dict]:
     ).fetchall()
     tasks = []
     for id_, name, task, schedule, next_run, repeat, enabled in rows:
-        dt = datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M")
+        dt = datetime.fromtimestamp(next_run, _tz).strftime("%Y-%m-%d %H:%M")
         tasks.append({
             "id": id_, "name": name, "task": task, "schedule": schedule,
             "next_run": dt, "repeat": bool(repeat), "enabled": bool(enabled),

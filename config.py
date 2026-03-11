@@ -20,6 +20,9 @@ QDRANT_COLLECTION = "qwe_qwe"
 # SQLite
 DB_PATH = "qwe_qwe.db"
 
+# Timezone offset from UTC in hours (e.g. -3 for Buenos Aires)
+TZ_OFFSET = -3
+
 # Agent
 MAX_HISTORY_MESSAGES = 4   # last N messages in context (keep small for 32k models)
 MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
