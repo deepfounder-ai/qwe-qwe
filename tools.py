@@ -138,6 +138,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "switch_model",
+            "description": "Switch to a different LLM model or provider. Use when user asks to change model.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Model name to switch to"},
+                    "provider": {"type": "string", "description": "Provider name (lmstudio/openai/groq/etc). Optional."},
+                },
+                "required": ["model"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "spawn_task",
             "description": "Run a task in background while you handle other tasks. MUST use when user gives 2+ separate tasks in one message. Each task gets its own worker.",
             "parameters": {
@@ -246,6 +261,16 @@ def execute(name: str, args: dict) -> str:
         elif name == "remove_cron":
             import scheduler
             return scheduler.remove(args["task_id"])
+
+        elif name == "switch_model":
+            import providers as prov
+            result_parts = []
+            if args.get("provider"):
+                r = prov.switch(args["provider"])
+                result_parts.append(r)
+            r = prov.set_model(args["model"])
+            result_parts.append(r)
+            return " | ".join(result_parts)
 
         elif name == "spawn_task":
             import tasks

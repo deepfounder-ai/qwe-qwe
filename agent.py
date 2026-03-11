@@ -3,12 +3,11 @@
 import json, re, sys, time
 from openai import OpenAI
 from rich.console import Console
-import config, db, tools, memory, soul
+import config, db, tools, memory, soul, providers
 import logger
 
 _log = logger.get("agent")
 
-_client: OpenAI | None = None
 _console = Console()
 
 
@@ -21,13 +20,6 @@ def _extract_thinking(text: str) -> str | None:
     """Extract thinking content."""
     m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
     return m.group(1).strip() if m else None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
-    return _client
 
 
 def _auto_context(user_input: str) -> str:
@@ -93,7 +85,7 @@ class TurnResult:
         self.completion_tokens = 0
         self.total_tokens = 0
         self.tool_calls_made: list[str] = []
-        self.model = config.LLM_MODEL
+        self.model = providers.get_model()
         self.auto_context_hits = 0
 
 
@@ -113,11 +105,11 @@ def _maybe_compact():
     convo = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in to_compact if m['content'])
 
     # Summarize via LLM
-    client = _get_client()
+    client = providers.get_client()
     try:
         _log.info(f"compaction: summarizing {len(to_compact)} messages")
         resp = client.chat.completions.create(
-            model=config.LLM_MODEL,
+            model=providers.get_model(),
             messages=[
                 {"role": "system", "content": "Extract ONLY important facts from this conversation: user preferences, decisions, names, tasks, technical info. If nothing important — reply with just 'SKIP'. No greetings or chitchat. Be very concise."},
                 {"role": "user", "content": convo},
@@ -145,7 +137,7 @@ def _maybe_compact():
 
 def run(user_input: str) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response."""
-    client = _get_client()
+    client = providers.get_client()
     result = TurnResult()
     turn_start = time.time()
 
@@ -176,7 +168,7 @@ def run(user_input: str) -> TurnResult:
 
         # Stream the response
         stream = client.chat.completions.create(
-            model=config.LLM_MODEL,
+            model=providers.get_model(),
             messages=messages,
             tools=all_tools,
             tool_choice="auto",

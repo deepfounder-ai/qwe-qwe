@@ -5,7 +5,7 @@ import sys, time, readline
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-import agent, config, db, soul, skills, tasks, scheduler
+import agent, config, db, soul, skills, tasks, scheduler, providers
 import logger
 
 _log = logger.get("cli")
@@ -41,8 +41,10 @@ def _status_line() -> str:
     s_turns = db.kv_get("session_turns") or "0"
     active_skills = skills.get_active()
     sk = f" | skills: {','.join(sorted(active_skills))}" if active_skills else ""
+    prov = providers.get_active_name()
+    model = providers.get_model()
     return (
-        f"agent {s['name']} | {agent.config.LLM_MODEL} | "
+        f"agent {s['name']} | {model} @ {prov} | "
         f"tokens {s_total:,} ({s_turns} turns){sk}"
     )
 
@@ -64,13 +66,13 @@ def show_banner():
   [dim]🦆 qwe-qwe — your fully offline AI agent[/]
   [dim]No cloud. No API keys. No subscriptions. Just your GPU.[/]
   
-  [dim]🧠 Model:[/]  {config.LLM_MODEL} @ {config.LLM_BASE_URL}
+  [dim]🧠 Model:[/]  {providers.get_model()} @ {providers.get_active_name()}
   [dim]👤 User:[/]   {user_name} [dim]({city}, UTC{config.TZ_OFFSET:+d})[/]
   [dim]🤖 Agent:[/]  {s['name']} [dim]| {s['language']}[/]
   [dim]💾 Memory:[/] {mem_count} memories [dim]| SQLite + Qdrant[/]
   [dim]⚙️  Skills:[/] {', '.join(sorted(active)) if active else 'none'} [dim]| /skills to manage[/]
   
-  [dim]Commands: /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
+  [dim]Commands: /model  /provider  /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
 """
     )
 
@@ -85,7 +87,7 @@ def show_stats():
         f"[cyan]Agent:[/]       {s['name']}\n"
         f"[cyan]Turns:[/]       {s_turns}\n"
         f"[cyan]Tokens:[/]      ↑{s_prompt} prompt  ↓{s_compl} completion  Σ{s_total} total\n"
-        f"[cyan]Model:[/]       {agent.config.LLM_MODEL}\n"
+        f"[cyan]Model:[/]       {providers.get_model()} ({providers.get_active_name()})\n"
         f"[cyan]Memory:[/]      Qdrant ({agent.config.QDRANT_MODE}, {__import__('memory').count()} points)\n"
         f"[cyan]Database:[/]    {agent.config.DB_PATH}",
         title="[bold]📊 Session Stats[/]",
@@ -271,6 +273,89 @@ def _check_background_tasks():
         icon = "✅" if r["status"] == "done" else "❌"
         console.print(f"\n  [bold]{icon} Task #{r['id']}:[/] {r['task'][:60]}")
         console.print(f"  [dim]{r['result'][:200]}[/]\n")
+
+
+def handle_model(args: str):
+    """Switch model or list available. Usage: /model [name] or /model list"""
+    if not args or args == "list":
+        # Show current + fetch available
+        current = providers.get_model()
+        prov_name = providers.get_active_name()
+        console.print(f"\n  [bold]🧠 Current model:[/] [cyan]{current}[/] [dim]({prov_name})[/]\n")
+
+        console.print(f"  [dim]Fetching models from {prov_name}...[/]")
+        models = providers.fetch_models()
+        if models:
+            console.print(f"  [bold]Available ({len(models)}):[/]")
+            for m in models:
+                marker = "[green]●[/]" if m == current else "[dim]○[/]"
+                console.print(f"    {marker} {m}")
+        else:
+            # Show preset models
+            p = providers.get_provider()
+            if p.get("models"):
+                console.print(f"  [bold]Preset models:[/]")
+                for m in p["models"]:
+                    marker = "[green]●[/]" if m == current else "[dim]○[/]"
+                    console.print(f"    {marker} {m}")
+            else:
+                console.print(f"  [dim]No models found. Is the server running?[/]")
+        console.print(f"\n  [dim]Usage: /model <name>[/]\n")
+        return
+
+    result = providers.set_model(args)
+    console.print(f"  [green]{result}[/]")
+
+
+def handle_provider(args: str):
+    """Manage providers. Usage: /provider [name] [key <key>] [url <url>]"""
+    if not args or args == "list":
+        # List all providers
+        all_p = providers.list_all()
+        console.print(f"\n  [bold]🔌 Providers:[/]\n")
+        for p in all_p:
+            marker = "[green]●[/]" if p["active"] else "[dim]○[/]"
+            key_status = "[green]🔑[/]" if p["has_key"] else "[dim]🔒[/]"
+            model_count = f"[dim]({len(p['models'])} models)[/]" if p["models"] else ""
+            console.print(f"    {marker} [bold]{p['name']}[/] {key_status} {model_count}")
+            console.print(f"      [dim]{p['url']}[/]")
+        console.print(f"\n  [dim]Usage:[/]")
+        console.print(f"    [dim]/provider <name>              — switch to provider[/]")
+        console.print(f"    [dim]/provider <name> key <key>    — set API key[/]")
+        console.print(f"    [dim]/provider add <name> <url>    — add custom provider[/]")
+        console.print()
+        return
+
+    parts = args.split()
+
+    # /provider add <name> <url> [key]
+    if parts[0] == "add" and len(parts) >= 3:
+        name = parts[1]
+        url = parts[2]
+        key = parts[3] if len(parts) > 3 else ""
+        result = providers.add(name, url, key)
+        console.print(f"  [green]{result}[/]")
+        return
+
+    # /provider <name> key <key>
+    if len(parts) >= 3 and parts[1] == "key":
+        name = parts[0]
+        key = parts[2]
+        result = providers.set_key(name, key)
+        console.print(f"  [green]{result}[/]")
+        return
+
+    # /provider <name> — switch
+    name = parts[0]
+    result = providers.switch(name)
+    if result.startswith("✓"):
+        console.print(f"  [green]{result}[/]")
+        # Show available models
+        models = providers.fetch_models(name)
+        if models:
+            console.print(f"  [dim]Models: {', '.join(models[:8])}{'...' if len(models) > 8 else ''}[/]")
+    else:
+        console.print(f"  [red]{result}[/]")
 
 
 def show_logs(args: str):
@@ -466,6 +551,12 @@ def main():
             continue
         if user_input.startswith("/logs"):
             show_logs(user_input[5:].strip())
+            continue
+        if user_input.startswith("/model"):
+            handle_model(user_input[6:].strip())
+            continue
+        if user_input.startswith("/provider"):
+            handle_provider(user_input[9:].strip())
             continue
         if user_input.startswith("/"):
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")

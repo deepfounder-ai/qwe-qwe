@@ -2,7 +2,7 @@
 
 import threading, queue, time, json, re
 from openai import OpenAI
-import config, db, memory, tools
+import config, db, memory, tools, providers
 
 _task_queue: queue.Queue = queue.Queue()
 _results: list[dict] = []  # [{id, task, status, result, ts}]
@@ -17,7 +17,7 @@ def _strip_thinking(text: str) -> str:
 
 def _run_task(task_id: int, task_desc: str):
     """Run a single task through the LLM with tools."""
-    client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+    client = providers.get_client()
 
     messages = [
         {"role": "system", "content": (
@@ -35,7 +35,7 @@ def _run_task(task_id: int, task_desc: str):
     while rounds < max_rounds:
         try:
             resp = client.chat.completions.create(
-                model=config.LLM_MODEL,
+                model=providers.get_model(),
                 messages=messages,
                 tools=all_tools,
                 tool_choice="auto",

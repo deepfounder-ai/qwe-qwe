@@ -17,6 +17,7 @@ import db
 import soul
 import logger
 import memory as mem
+import providers
 
 _log = logger.get("server")
 
@@ -87,7 +88,8 @@ async def status():
 
     return {
         "agent": s["name"],
-        "model": config.LLM_MODEL,
+        "model": providers.get_model(),
+        "provider": providers.get_active_name(),
         "language": s["language"],
         "soul": {k: v for k, v in s.items() if k not in ("name", "language")},
         "tokens": s_compl,
@@ -128,6 +130,46 @@ async def set_soul(data: dict):
     for key, value in data.items():
         results[key] = soul.save(key, value)
     return results
+
+
+# ── Provider/Model endpoints ──
+
+@app.get("/api/providers")
+async def get_providers():
+    """List all providers with status."""
+    return providers.list_all()
+
+
+@app.get("/api/models")
+async def get_models(provider: str | None = None):
+    """Fetch available models from a provider."""
+    return {"models": providers.fetch_models(provider), "provider": provider or providers.get_active_name()}
+
+
+@app.post("/api/model")
+async def set_model(data: dict):
+    """Switch model and/or provider."""
+    results = []
+    if "provider" in data:
+        results.append(providers.switch(data["provider"]))
+    if "model" in data:
+        results.append(providers.set_model(data["model"]))
+    return {"results": results, "model": providers.get_model(), "provider": providers.get_active_name()}
+
+
+@app.post("/api/provider")
+async def add_provider(data: dict):
+    """Add or update a provider."""
+    name = data.get("name", "")
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    if "key" in data and "url" not in data:
+        # Just setting a key
+        return {"result": providers.set_key(name, data["key"])}
+    url = data.get("url", "")
+    key = data.get("key", "")
+    models = data.get("models", [])
+    return {"result": providers.add(name, url, key, models)}
 
 
 # ── WebSocket chat ──

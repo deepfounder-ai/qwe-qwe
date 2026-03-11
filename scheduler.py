@@ -2,7 +2,7 @@
 
 import threading, time, json, re
 from datetime import datetime, timezone, timedelta
-import db, config
+import db, config, providers
 import logger
 
 _log = logger.get("scheduler")
@@ -192,10 +192,9 @@ def _check_and_run():
 
 def _execute_task(task_desc: str) -> str:
     """Run a task through the LLM."""
-    from openai import OpenAI
     import config, tools
 
-    client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+    client = providers.get_client()
     messages = [
         {"role": "system", "content": "You are a background scheduler worker. Complete the task. Use tools. Be concise."},
         {"role": "user", "content": task_desc},
@@ -207,7 +206,7 @@ def _execute_task(task_desc: str) -> str:
     while rounds < 5:
         try:
             resp = client.chat.completions.create(
-                model=config.LLM_MODEL,
+                model=providers.get_model(),
                 messages=messages,
                 tools=all_tools,
                 tool_choice="auto",
