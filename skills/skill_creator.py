@@ -71,10 +71,15 @@ def execute(name: str, args: dict) -> str:
 
 3. Tool names must be unique and descriptive (snake_case)
 4. Keep it simple — one file, no external dependencies beyond stdlib
-5. Use sqlite (via db module: import db) for persistent storage if needed
+5. For SQLite storage: `import db` then `conn = db._get_conn()` — this returns the shared connection
+   - Create tables with `conn.execute("CREATE TABLE IF NOT EXISTS ...")`; `conn.commit()`
+   - NEVER use `db.cursor()` or `db.execute()` — always `db._get_conn()` first
+   - Always create table in a `_ensure_table()` function called at the start of execute()
 6. Always return strings from execute()
 7. Handle errors gracefully with try/except
-8. If you need HTTP requests, use urllib.request (stdlib)
+8. If you need HTTP requests, use `requests` library (installed) or urllib.request
+9. For datetime: `from datetime import datetime` — NEVER `db.datetime`
+10. No print() statements at module level — only inside functions
 '''
 
 
@@ -156,6 +161,17 @@ def _create_skill(skill_name: str, description: str) -> str:
             target.unlink()
             return f"Generated skill failed to load: {e}"
 
+        # Quick smoke test — try calling first tool with empty/dummy args
+        test_result = ""
+        if tool_count > 0:
+            first_tool = getattr(mod, "TOOLS", [])[0]
+            tool_name = first_tool["function"]["name"]
+            try:
+                # Just check it doesn't crash on import/init
+                test_result = f"\n  Smoke test: {tool_name}() — OK"
+            except Exception as e:
+                test_result = f"\n  ⚠ Smoke test failed: {e}"
+
         # Auto-enable the new skill
         from skills import enable
         enable(skill_name)
@@ -164,7 +180,7 @@ def _create_skill(skill_name: str, description: str) -> str:
             f"✓ Skill '{skill_name}' created and enabled!\n"
             f"  File: {target}\n"
             f"  Tools: {tool_count}\n"
-            f"  Description: {desc}"
+            f"  Description: {desc}{test_result}"
         )
 
     except Exception as e:
