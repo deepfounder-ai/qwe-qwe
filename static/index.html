@@ -383,20 +383,7 @@ body {
       <h2>⏰ Scheduled Tasks</h2>
       <button class="s-btn" onclick="loadCron()">↻ Refresh</button>
     </div>
-    <div class="cron-add-form">
-      <div class="s-card-title">Schedule new task</div>
-      <div class="cron-form-row">
-        <input class="s-input" id="cronName" placeholder="Task name">
-        <input class="s-input" id="cronSchedule" placeholder="Schedule (e.g. every 30m)">
-      </div>
-      <div class="cron-form-row">
-        <input class="s-input" id="cronTask" placeholder="Task description — what should the agent do?">
-        <button class="s-btn primary" onclick="addCron()">Schedule</button>
-      </div>
-      <div class="cron-help">
-        Formats: <code>in 5m</code> <code>in 2h</code> <code>every 30m</code> <code>every 1h</code> <code>daily 09:00</code> <code>14:30</code>
-      </div>
-    </div>
+
     <div id="cronList"></div>
     <div class="s-card" style="margin-top:20px">
       <div class="s-card-title">Background Tasks</div>
