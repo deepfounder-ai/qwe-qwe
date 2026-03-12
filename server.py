@@ -127,32 +127,12 @@ async def setup_save(req: dict = {}):
     from fastapi import Request
     import json as _json
 
-    if req.get("city"):
-        city = req["city"].strip().lower()
-        # Timezone lookup (same as CLI)
-        _CITY_TZ = {
-            "moscow": 3, "london": 0, "berlin": 1, "paris": 1, "tokyo": 9,
-            "new york": -5, "los angeles": -8, "chicago": -6, "dubai": 4,
-            "singapore": 8, "sydney": 10, "hong kong": 8, "mumbai": 5,
-            "istanbul": 3, "buenos aires": -3, "são paulo": -3, "sao paulo": -3,
-            "toronto": -5, "vancouver": -8, "amsterdam": 1, "zurich": 1,
-            "seoul": 9, "beijing": 8, "bangkok": 7, "jakarta": 7, "taipei": 8,
-            "lisbon": 0, "madrid": 1, "rome": 1, "vienna": 1, "prague": 1,
-            "warsaw": 1, "stockholm": 1, "oslo": 1, "helsinki": 2, "athens": 2,
-            "cairo": 2, "nairobi": 3, "lagos": 1, "johannesburg": 2,
-            "mexico city": -6, "bogota": -5, "lima": -5, "santiago": -4,
-            "denver": -7, "phoenix": -7, "dallas": -6, "miami": -5,
-            "seattle": -8, "san francisco": -8, "boston": -5, "atlanta": -5,
-        }
-        offset = _CITY_TZ.get(city)
-        if offset is None:
-            for c, o in _CITY_TZ.items():
-                if city in c or c in city:
-                    offset = o
-                    break
-        config.TZ_OFFSET = offset or 0
-        db.kv_set("timezone", str(offset or 0))
-        db.kv_set("timezone_city", city)
+    if "tz_offset" in req:
+        offset = int(req["tz_offset"])
+        config.TZ_OFFSET = offset
+        db.kv_set("timezone", str(offset))
+    if req.get("tz_name"):
+        db.kv_set("timezone_name", req["tz_name"])
 
     if req.get("user_name"):
         db.kv_set("user_name", req["user_name"].strip())

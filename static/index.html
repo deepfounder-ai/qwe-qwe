@@ -573,8 +573,6 @@ body {
       <p style="margin:8px 0 0; color:var(--text-dim); font-size:13px;">Let's get you set up in 30 seconds</p>
     </div>
     <div id="onboardStep1" class="ob-step">
-      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🌍 Your city</label>
-      <input id="obCity" placeholder="e.g. Buenos Aires" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
       <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">👤 Your name</label>
       <input id="obName" placeholder="e.g. Kir" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
       <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🤖 Agent name</label>
@@ -628,7 +626,7 @@ function showOnboarding() {
       </div>
     </div>
   `).join('');
-  document.getElementById('obCity').focus();
+  document.getElementById('obName').focus();
 }
 
 function obNext() {
@@ -641,8 +639,11 @@ async function obFinish() {
   OB_TRAITS.forEach(t => {
     traits[t.key] = parseInt(document.getElementById('obSlider_' + t.key).value);
   });
+  const tzOffset = -(new Date().getTimezoneOffset() / 60);  // browser timezone as UTC offset
+  const tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
   const body = {
-    city: document.getElementById('obCity').value,
+    tz_offset: tzOffset,
+    tz_name: tzName,
     user_name: document.getElementById('obName').value,
     agent_name: document.getElementById('obAgent').value,
     language: document.getElementById('obLang').value,
