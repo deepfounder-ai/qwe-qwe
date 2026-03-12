@@ -118,7 +118,8 @@ async def status():
 @app.get("/api/setup")
 async def setup_status():
     """Check if first-run setup is complete."""
-    return {"complete": bool(db.kv_get("setup_complete"))}
+    val = db.kv_get("setup_complete")
+    return {"complete": val is not None and val != ""}
 
 
 @app.post("/api/setup")
