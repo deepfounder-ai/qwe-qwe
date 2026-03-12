@@ -86,7 +86,8 @@ body {
   background: var(--surface); flex-shrink: 0;
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
-.logo { font-size: 18px; font-weight: 700; color: var(--accent); font-family: var(--mono); cursor: pointer; }
+.logo { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; color: var(--accent); font-family: var(--mono); cursor: pointer; }
+.logo img { height: 28px; width: auto; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--error); transition: background 0.3s; }
 .status-dot.connected { background: var(--green); }
 .header-right { display: flex; align-items: center; gap: 12px; }
@@ -176,7 +177,8 @@ body {
 .thread-stats .ts-item { display: flex; align-items: center; gap: 4px; }
 .thread-stats .ts-val { color: var(--text); }
 .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-dim); gap: 8px; }
-.empty-logo { font-size: 48px; font-weight: 700; color: var(--accent); font-family: var(--mono); opacity: 0.3; }
+.empty-logo { opacity: 0.3; }
+.empty-logo img { height: 80px; width: auto; }
 
 /* ── Settings page ── */
 .settings {
@@ -391,7 +393,7 @@ body {
 <div class="header">
   <div class="header-left">
     <div class="status-dot" id="statusDot"></div>
-    <div class="logo">qwe-qwe</div>
+    <div class="logo"><img src="/static/logo.png" alt="qwe-qwe">qwe-qwe</div>
     <div class="header-nav">
       <button class="nav-btn active" data-page="chat" onclick="showPage('chat')">💬 Chat</button>
       <button class="nav-btn" data-page="cron" onclick="showPage('cron')">⏰ Cron</button>
@@ -1081,7 +1083,7 @@ async function loadHistory(tid) {
   const res = await fetch(`/api/history?limit=30&thread_id=${t}`);
   const msgs = await res.json();
   chat.innerHTML = '';
-  if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo">⚡</div><div class="empty-text">start chatting</div></div>'; return; }
+  if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo"><img src="/static/logo.png" alt="qwe-qwe"></div><div class="empty-text">start chatting</div></div>'; return; }
   msgs.forEach(m => addMessage(m.role, m.content));
   chat.scrollTop = chat.scrollHeight;
   loadThreadStats(t);
