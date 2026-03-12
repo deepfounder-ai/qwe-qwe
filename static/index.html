@@ -730,8 +730,11 @@ async function obFinish() {
     traits
   };
   try {
-    await fetch('/api/setup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  } catch(e) {}
+    const res = await fetch('/api/setup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const data = await res.json();
+    console.log('Setup saved:', data);
+    if (!data.ok) { console.error('Setup failed:', data); }
+  } catch(e) { console.error('Setup error:', e); }
   document.getElementById('onboardingOverlay').style.display = 'none';
   loadStatus();
 }

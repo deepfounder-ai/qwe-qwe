@@ -126,7 +126,11 @@ async def setup_status():
 async def setup_save(request: Request):
     """Save first-run onboarding data."""
     import json as _json
-    req = await request.json()
+    try:
+        req = await request.json()
+    except Exception as e:
+        logger.event("setup_error", error=str(e))
+        return JSONResponse({"error": str(e)}, status_code=400)
 
     if "tz_offset" in req:
         offset = int(req["tz_offset"])
@@ -163,6 +167,7 @@ async def setup_save(request: Request):
             db.kv_set(f"soul:{key}", str(max(0, min(10, int(val)))))
 
     db.kv_set("setup_complete", "1")
+    logger.event("setup_complete", user=req.get("user_name"), provider=req.get("provider"))
     return {"ok": True}
 
 
