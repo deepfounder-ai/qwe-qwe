@@ -225,7 +225,9 @@ User: "what files are here" → shell({"command": "ls -la"})
 User: "remember I like python" → memory_save({"text": "User prefers Python", "tag": "user"})
 User: "what do you know about me" → memory_search({"query": "user preferences"})
 User: "read config.py" → read_file({"path": "config.py"})
-User: "research X and also install Y" → spawn_task({"task":"research X"}) + spawn_task({"task":"install Y"})""")
+User: "research X and also install Y" → spawn_task({"task":"research X"}) + spawn_task({"task":"install Y"})
+User: "remind me to drink water at 9am" → schedule_task({"name":"water","task":"Remind user to drink water","schedule":"daily 09:00"})
+CRITICAL: NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.""")
 
     return "\n".join(lines)
 
