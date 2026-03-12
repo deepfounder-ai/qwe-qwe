@@ -568,7 +568,7 @@ body {
 <div id="onboardingOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:9999; display:none; align-items:center; justify-content:center;">
   <div style="background:var(--bg); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:420px; width:90%; font-family:var(--sans);">
     <div style="text-align:center; margin-bottom:24px;">
-      <img src="/static/logo.png" alt="qwe-qwe" style="height:60px; margin-bottom:12px;">
+      <img src="/static/logo.png" alt="qwe-qwe" style="height:120px; margin-bottom:16px;">
       <h2 style="margin:0; color:var(--accent); font-family:var(--mono);">Welcome to qwe-qwe</h2>
       <p style="margin:8px 0 0; color:var(--text-dim); font-size:13px;">Let's get you set up in 30 seconds</p>
     </div>
@@ -577,8 +577,25 @@ body {
       <input id="obName" placeholder="e.g. Kir" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
       <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🤖 Agent name</label>
       <input id="obAgent" placeholder="e.g. Jarvis" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
-      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🗣 Language</label>
-      <input id="obLang" placeholder="e.g. English, Русский" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🗣 Agent speaks in</label>
+      <select id="obLang" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box; appearance:auto;">
+        <option value="English">🇬🇧 English</option>
+        <option value="Русский">🇷🇺 Русский</option>
+        <option value="Español">🇪🇸 Español</option>
+        <option value="中文">🇨🇳 中文</option>
+        <option value="日本語">🇯🇵 日本語</option>
+        <option value="한국어">🇰🇷 한국어</option>
+        <option value="Deutsch">🇩🇪 Deutsch</option>
+        <option value="Français">🇫🇷 Français</option>
+        <option value="Português">🇧🇷 Português</option>
+        <option value="Italiano">🇮🇹 Italiano</option>
+        <option value="Türkçe">🇹🇷 Türkçe</option>
+        <option value="العربية">🇸🇦 العربية</option>
+        <option value="हिन्दी">🇮🇳 हिन्दी</option>
+        <option value="Polski">🇵🇱 Polski</option>
+        <option value="Nederlands">🇳🇱 Nederlands</option>
+        <option value="Українська">🇺🇦 Українська</option>
+      </select>
       <button onclick="obNext()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);">Next →</button>
     </div>
     <div id="onboardStep2" class="ob-step" style="display:none;">
