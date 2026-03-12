@@ -585,6 +585,10 @@ body {
             <span class="s-row-value" id="tgStatus" style="font-size:12px;">—</span>
           </div>
           <div class="s-row">
+            <span class="s-row-label">Owner</span>
+            <span class="s-row-value" id="tgOwner" style="font-size:12px;">—</span>
+          </div>
+          <div class="s-row">
             <span class="s-row-label">Enable</span>
             <label class="toggle-switch">
               <input type="checkbox" id="tgToggle" onchange="toggleTelegram(this.checked)">
@@ -592,13 +596,51 @@ body {
               <span class="toggle-thumb"></span>
             </label>
           </div>
-          <div style="margin-top:8px;">
+          <!-- Token -->
+          <div style="margin-top:12px;">
             <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-key"></i> Bot Token</label>
             <div class="s-input-row" style="margin-top:6px;">
               <input class="s-input" id="tgToken" type="password" placeholder="123456:ABC-DEF...">
               <button class="s-btn primary" onclick="saveTgToken()">Save</button>
             </div>
-            <p style="color:var(--text-dim); font-size:11px; margin:6px 0 0;"><i class="ph ph-lightbulb"></i> Create a bot via <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent);">@BotFather</a> and paste the token here</p>
+            <p style="color:var(--text-dim); font-size:11px; margin:6px 0 0;"><i class="ph ph-lightbulb"></i> Create a bot via <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent);">@BotFather</a></p>
+          </div>
+          <!-- Verification -->
+          <div id="tgVerifySection" style="display:none; margin-top:12px; padding:12px; background:var(--surface); border-radius:8px;">
+            <p style="color:var(--accent); font-size:13px; margin:0 0 8px;"><i class="ph ph-shield-check"></i> Verification Required</p>
+            <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">Send any message to your bot. It will reply with a code. Enter it below:</p>
+            <div class="s-input-row">
+              <input class="s-input" id="tgVerifyCode" placeholder="CODE" style="text-transform:uppercase; letter-spacing:3px; text-align:center; max-width:150px;">
+              <button class="s-btn primary" onclick="verifyTelegram()">Verify</button>
+            </div>
+          </div>
+        </div>
+        <!-- Group settings -->
+        <div class="s-card" id="tgGroupCard" style="display:none;">
+          <div class="s-card-title"><i class="ph ph-users-three"></i> Group Settings</div>
+          <div class="s-row">
+            <span class="s-row-label">Respond in groups</span>
+            <select id="tgGroupMode" onchange="saveTgGroupMode()" style="padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text); font-size:13px;">
+              <option value="mention">Only when @mentioned</option>
+              <option value="all">Every message</option>
+            </select>
+          </div>
+          <div class="s-row">
+            <span class="s-row-label">Map topics → threads</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="tgTopics" onchange="saveTgTopics(this.checked)">
+              <span class="toggle-track"></span>
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+          <p style="color:var(--text-dim); font-size:11px; margin:8px 0 0;"><i class="ph ph-lightbulb"></i> In supergroups, each Telegram topic maps to a separate qwe-qwe thread with its own context</p>
+          <div style="margin-top:8px;">
+            <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-plus"></i> Add group by ID</label>
+            <div class="s-input-row" style="margin-top:6px;">
+              <input class="s-input" id="tgGroupId" placeholder="-100123456789">
+              <button class="s-btn" onclick="addTgGroup()">Add</button>
+            </div>
+            <div id="tgGroupList" style="margin-top:8px;"></div>
           </div>
         </div>
         <div class="s-card">
@@ -1134,15 +1176,44 @@ async function loadTelegramStatus() {
     const res = await fetch('/api/telegram/status');
     const s = await res.json();
     document.getElementById('tgToggle').checked = s.enabled;
+
+    // Status
     const statusEl = document.getElementById('tgStatus');
     if (s.running) {
       statusEl.innerHTML = `<span style="color:#4ade80;"><i class="ph ph-check-circle"></i> Running as @${s.username}</span>`;
     } else if (s.has_token) {
       statusEl.innerHTML = '<span style="color:var(--text-dim);"><i class="ph ph-pause-circle"></i> Stopped</span>';
     } else {
-      statusEl.innerHTML = '<span style="color:var(--text-dim);"><i class="ph ph-warning-circle"></i> No token configured</span>';
+      statusEl.innerHTML = '<span style="color:var(--text-dim);"><i class="ph ph-warning-circle"></i> No token</span>';
     }
-  } catch(e) {}
+
+    // Owner
+    const ownerEl = document.getElementById('tgOwner');
+    if (s.verified) {
+      ownerEl.innerHTML = `<span style="color:#4ade80;">@${s.owner_username || s.owner_id}</span> <a href="#" onclick="event.preventDefault();resetTgOwner()" style="color:var(--text-dim);font-size:11px;margin-left:6px;">reset</a>`;
+    } else {
+      ownerEl.innerHTML = '<span style="color:var(--text-dim);">Not verified</span>';
+    }
+
+    // Verify section
+    const verifySection = document.getElementById('tgVerifySection');
+    verifySection.style.display = (s.has_token && !s.verified) ? 'block' : 'none';
+    if (s.pending_code) {
+      document.getElementById('tgVerifyCode').placeholder = 'Enter code from bot';
+    }
+
+    // Group settings (show only if verified)
+    document.getElementById('tgGroupCard').style.display = s.verified ? 'block' : 'none';
+    if (s.verified) {
+      document.getElementById('tgGroupMode').value = s.group_mode;
+      document.getElementById('tgTopics').checked = s.topics_enabled;
+      // Render allowed groups
+      const groupList = document.getElementById('tgGroupList');
+      groupList.innerHTML = (s.allowed_groups || []).map(g =>
+        `<span style="display:inline-block;padding:2px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;font-size:12px;margin:2px;">${g} <a href="#" onclick="event.preventDefault();removeTgGroup(${g})" style="color:var(--text-dim);">×</a></span>`
+      ).join('') || '<span style="color:var(--text-dim);font-size:12px;">No groups added (bot will respond in any group it\'s in)</span>';
+    }
+  } catch(e) { console.error('tg status err:', e); }
 }
 
 async function saveTgToken() {
@@ -1154,13 +1225,60 @@ async function saveTgToken() {
     alert('Invalid token: ' + data.error);
   } else {
     document.getElementById('tgToken').value = '';
-    alert('✓ Bot token saved — @' + data.username);
     loadTelegramStatus();
   }
 }
 
 async function toggleTelegram(enabled) {
   await fetch('/api/telegram/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+  setTimeout(loadTelegramStatus, 500);
+}
+
+async function verifyTelegram() {
+  const code = document.getElementById('tgVerifyCode').value.trim();
+  if (!code) return;
+  const res = await fetch('/api/telegram/verify', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code})});
+  const data = await res.json();
+  if (data.error) {
+    alert('Wrong code. Try again.');
+  } else {
+    document.getElementById('tgVerifyCode').value = '';
+    loadTelegramStatus();
+  }
+}
+
+async function resetTgOwner() {
+  if (!confirm('Reset owner? You will need to verify again.')) return;
+  await fetch('/api/telegram/reset', {method:'POST'});
+  loadTelegramStatus();
+}
+
+async function saveTgGroupMode() {
+  const mode = document.getElementById('tgGroupMode').value;
+  await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({group_mode: mode})});
+}
+
+async function saveTgTopics(enabled) {
+  await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({topics_enabled: enabled})});
+}
+
+async function addTgGroup() {
+  const id = parseInt(document.getElementById('tgGroupId').value.trim());
+  if (isNaN(id)) return alert('Enter a valid group ID (negative number)');
+  const res = await fetch('/api/telegram/status');
+  const s = await res.json();
+  const groups = s.allowed_groups || [];
+  if (!groups.includes(id)) groups.push(id);
+  await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({allowed_groups: groups})});
+  document.getElementById('tgGroupId').value = '';
+  loadTelegramStatus();
+}
+
+async function removeTgGroup(id) {
+  const res = await fetch('/api/telegram/status');
+  const s = await res.json();
+  const groups = (s.allowed_groups || []).filter(g => g !== id);
+  await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({allowed_groups: groups})});
   loadTelegramStatus();
 }
 

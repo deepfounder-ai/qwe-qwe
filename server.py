@@ -574,12 +574,11 @@ scheduler.on_complete(_cron_callback)
 import telegram_bot
 
 
-def _telegram_handler(chat_id: int, text: str, user_id: int, username: str) -> str:
+def _telegram_handler(chat_id: int, text: str, user_id: int, username: str, thread_id: str | None = None) -> str:
     """Handle incoming Telegram message → agent → response."""
     import agent
-    # Use a dedicated thread for Telegram or default
-    tid = db.kv_get("telegram:thread_id")
-    result = agent.run(text, thread_id=tid or None)
+    tid = thread_id or db.kv_get("telegram:thread_id") or None
+    result = agent.run(text, thread_id=tid)
 
     # Also broadcast to WebSocket
     if _ws_loop and _ws_clients:
@@ -604,11 +603,16 @@ async def telegram_config(request: Request):
     req = await request.json()
     if "token" in req:
         telegram_bot.set_token(req["token"])
-        # Verify token
         me = telegram_bot.get_me(req["token"])
         if not me:
             return JSONResponse({"error": "Invalid token"}, status_code=400)
         return {"ok": True, "username": me.get("username")}
+    if "group_mode" in req:
+        telegram_bot.set_group_mode(req["group_mode"])
+    if "topics_enabled" in req:
+        telegram_bot.set_topics_enabled(bool(req["topics_enabled"]))
+    if "allowed_groups" in req:
+        telegram_bot.set_allowed_groups(req["allowed_groups"])
     return {"ok": True}
 
 
@@ -622,6 +626,26 @@ async def telegram_toggle(request: Request):
     else:
         telegram_bot.stop()
     return {"enabled": enabled, "running": telegram_bot._running}
+
+
+@app.post("/api/telegram/verify")
+async def telegram_verify(request: Request):
+    """Verify ownership with the code shown in Telegram."""
+    req = await request.json()
+    code = req.get("code", "")
+    if telegram_bot.verify_code(code):
+        # Need to get the user who sent the code — they already verified via bot
+        return {"ok": True, "verified": True}
+    return JSONResponse({"error": "Invalid code"}, status_code=400)
+
+
+@app.post("/api/telegram/reset")
+async def telegram_reset():
+    """Reset verification — disconnect owner."""
+    db.kv_set("telegram:owner_id", "")
+    db.kv_set("telegram:owner_username", "")
+    telegram_bot.clear_verification()
+    return {"ok": True}
 
 
 # ── Run ──

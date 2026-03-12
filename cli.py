@@ -75,7 +75,7 @@ def show_banner():
   [dim]💾 Memory:[/] {mem_count} memories [dim]| SQLite + Qdrant[/]
   [dim]⚙️  Skills:[/] {', '.join(sorted(active)) if active else 'none'} [dim]| /skills to manage[/]
   
-  [dim]Commands: /thread  /model  /provider  /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
+  [dim]Commands: /thread  /model  /provider  /telegram  /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
 """
     )
 
@@ -630,6 +630,9 @@ def main():
         if user_input.startswith("/model"):
             handle_model(user_input[6:].strip())
             continue
+        if user_input.startswith("/telegram"):
+            handle_telegram(user_input[9:].strip())
+            continue
         if user_input.startswith("/provider"):
             handle_provider(user_input[9:].strip())
             continue
@@ -654,6 +657,84 @@ def main():
         console.print(f"  🦆 ", end="")
         console.print(Markdown(result.reply))
         console.print()
+
+
+def handle_telegram(args: str):
+    """Handle /telegram commands."""
+    import telegram_bot
+
+    parts = args.split(maxsplit=1)
+    cmd = parts[0] if parts else ""
+    val = parts[1] if len(parts) > 1 else ""
+
+    if not cmd or cmd == "status":
+        s = telegram_bot.status()
+        console.print(f"\n  [bold yellow]Telegram Bot[/]")
+        console.print(f"  Token:    {'✓ set' if s['has_token'] else '✗ not set'}")
+        console.print(f"  Enabled:  {'✓' if s['enabled'] else '✗'}")
+        console.print(f"  Running:  {'✓' if s['running'] else '✗'}")
+        console.print(f"  Bot:      @{s['username'] or '—'}")
+        console.print(f"  Owner:    {'@' + s['owner_username'] if s['verified'] else 'not verified'}")
+        console.print(f"  Groups:   {s['allowed_groups'] or 'any'}")
+        console.print(f"  Mode:     {s['group_mode']}")
+        console.print(f"  Topics:   {'on' if s['topics_enabled'] else 'off'}")
+        if s.get('pending_code'):
+            console.print(f"\n  [yellow]Pending code: {s['pending_code']}[/]")
+        console.print(f"\n  [dim]Commands: /telegram token <TOKEN> | start | stop | verify <CODE> | reset[/]\n")
+        return
+
+    if cmd == "token":
+        if not val:
+            console.print("  [red]Usage: /telegram token <BOT_TOKEN>[/]")
+            return
+        telegram_bot.set_token(val)
+        me = telegram_bot.get_me(val)
+        if me:
+            console.print(f"  [green]✓ Token saved — @{me.get('username')}[/]")
+            console.print(f"  [dim]Now send a message to your bot. It will reply with a verification code.[/]")
+            console.print(f"  [dim]Then run: /telegram start[/]")
+        else:
+            console.print(f"  [red]✗ Invalid token[/]")
+        return
+
+    if cmd == "start":
+        telegram_bot.set_enabled(True)
+        from server import _telegram_handler
+        telegram_bot.start(on_message=_telegram_handler)
+        console.print(f"  [green]✓ Bot started[/]")
+        if not telegram_bot.is_verified():
+            console.print(f"  [yellow]Send a message to your bot to get verification code[/]")
+        return
+
+    if cmd == "stop":
+        telegram_bot.stop()
+        telegram_bot.set_enabled(False)
+        console.print(f"  [yellow]✓ Bot stopped[/]")
+        return
+
+    if cmd == "verify":
+        if not val:
+            code = telegram_bot.get_pending_code()
+            if code:
+                console.print(f"  [yellow]Pending code: {code}[/]")
+                console.print(f"  [dim]Enter it in Telegram chat with the bot[/]")
+            else:
+                console.print(f"  [dim]No pending code. Send a message to the bot first.[/]")
+            return
+        if telegram_bot.verify_code(val):
+            console.print(f"  [green]✓ Verified![/]")
+        else:
+            console.print(f"  [red]✗ Wrong code[/]")
+        return
+
+    if cmd == "reset":
+        db.kv_set("telegram:owner_id", "")
+        db.kv_set("telegram:owner_username", "")
+        telegram_bot.clear_verification()
+        console.print(f"  [yellow]✓ Owner reset. Re-verify needed.[/]")
+        return
+
+    console.print(f"  [dim]Unknown: /telegram {cmd}[/]")
 
 
 def main_entry():

@@ -4,17 +4,21 @@ Uses long polling (no webhook needed). Works behind NAT, WSL, etc.
 
 Setup:
 1. Create bot via @BotFather → get token
-2. Save token in Settings → System → Telegram Bot
-3. Toggle on → bot starts polling
+2. Set token via CLI (`/telegram token <TOKEN>`) or Settings → System
+3. Bot sends verification code → enter it to confirm ownership
+4. Only verified owner can chat; others are ignored
 
-Architecture:
-    Telegram ←→ Long Poll ←→ agent.run() ←→ LLM + Tools
+Features:
+- Private chat with owner
+- Group support: bot responds in allowed groups
+- Supergroup topics: Telegram topic_id ↔ qwe-qwe thread
 """
 
 import threading
 import time
 import json
-import re
+import random
+import string
 import requests
 from typing import Callable
 
@@ -26,7 +30,8 @@ _log = logger.get("telegram")
 
 _thread: threading.Thread | None = None
 _running = False
-_on_message: Callable | None = None  # callback(chat_id, text) → response
+_on_message: Callable | None = None
+_pending_code: str | None = None  # verification code awaiting confirmation
 
 
 # ── Config ──
@@ -47,9 +52,27 @@ def set_enabled(enabled: bool):
     db.kv_set("telegram:enabled", "1" if enabled else "0")
 
 
-def get_allowed_users() -> list[int]:
-    """Get list of allowed Telegram user IDs. Empty = allow all."""
-    raw = db.kv_get("telegram:allowed_users")
+def get_owner_id() -> int | None:
+    """Get verified owner's Telegram user ID."""
+    raw = db.kv_get("telegram:owner_id")
+    return int(raw) if raw else None
+
+
+def set_owner_id(user_id: int):
+    db.kv_set("telegram:owner_id", str(user_id))
+
+
+def get_owner_username() -> str:
+    return db.kv_get("telegram:owner_username") or ""
+
+
+def is_verified() -> bool:
+    return get_owner_id() is not None
+
+
+def get_allowed_groups() -> list[int]:
+    """Get list of allowed group chat IDs."""
+    raw = db.kv_get("telegram:allowed_groups")
     if not raw:
         return []
     try:
@@ -58,8 +81,88 @@ def get_allowed_users() -> list[int]:
         return []
 
 
-def set_allowed_users(user_ids: list[int]):
-    db.kv_set("telegram:allowed_users", json.dumps(user_ids))
+def set_allowed_groups(group_ids: list[int]):
+    db.kv_set("telegram:allowed_groups", json.dumps(group_ids))
+
+
+def get_group_mode() -> str:
+    """How bot responds in groups: 'mention' (only when mentioned) or 'all' (every message)."""
+    return db.kv_get("telegram:group_mode") or "mention"
+
+
+def set_group_mode(mode: str):
+    db.kv_set("telegram:group_mode", mode)
+
+
+def is_topics_enabled() -> bool:
+    """Whether to map Telegram topics to qwe-qwe threads."""
+    return db.kv_get("telegram:topics_enabled") != "0"  # default on
+
+
+def set_topics_enabled(enabled: bool):
+    db.kv_set("telegram:topics_enabled", "1" if enabled else "0")
+
+
+# ── Verification ──
+
+def generate_verification_code() -> str:
+    """Generate a 6-char verification code and send it to the bot chat."""
+    global _pending_code
+    _pending_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    db.kv_set("telegram:pending_code", _pending_code)
+    _log.info(f"verification code generated: {_pending_code}")
+    return _pending_code
+
+
+def get_pending_code() -> str | None:
+    global _pending_code
+    if _pending_code:
+        return _pending_code
+    return db.kv_get("telegram:pending_code")
+
+
+def clear_verification():
+    global _pending_code
+    _pending_code = None
+    db.kv_set("telegram:pending_code", "")
+
+
+def verify_code(code: str) -> bool:
+    """Check if the provided code matches."""
+    pending = get_pending_code()
+    return pending and code.strip().upper() == pending.upper()
+
+
+# ── Topic ↔ Thread mapping ──
+
+def _topic_thread_key(chat_id: int, topic_id: int) -> str:
+    return f"telegram:topic_thread:{chat_id}:{topic_id}"
+
+
+def get_thread_for_topic(chat_id: int, topic_id: int) -> str | None:
+    """Get qwe-qwe thread_id for a Telegram topic."""
+    return db.kv_get(_topic_thread_key(chat_id, topic_id))
+
+
+def set_thread_for_topic(chat_id: int, topic_id: int, thread_id: str):
+    """Map a Telegram topic to a qwe-qwe thread."""
+    db.kv_set(_topic_thread_key(chat_id, topic_id), thread_id)
+
+
+def _get_or_create_thread_for_topic(chat_id: int, topic_id: int, topic_name: str = "") -> str:
+    """Get existing thread or create new one for a Telegram topic."""
+    import threads
+    tid = get_thread_for_topic(chat_id, topic_id)
+    if tid:
+        t = threads.get(tid)
+        if t:
+            return tid
+    # Create new thread
+    name = topic_name or f"TG Topic #{topic_id}"
+    t = threads.create(name, meta={"telegram_chat_id": chat_id, "telegram_topic_id": topic_id})
+    set_thread_for_topic(chat_id, topic_id, t["id"])
+    _log.info(f"created thread '{name}' ({t['id']}) for topic {topic_id} in chat {chat_id}")
+    return t["id"]
 
 
 # ── API calls ──
@@ -75,7 +178,8 @@ def _api(method: str, token: str, **kwargs) -> dict:
         return {"ok": False, "description": str(e)}
 
 
-def send_message(chat_id: int, text: str, token: str | None = None):
+def send_message(chat_id: int, text: str, token: str | None = None,
+                 reply_to: int | None = None, topic_id: int | None = None):
     """Send a message to a Telegram chat."""
     token = token or get_token()
     if not token:
@@ -83,7 +187,12 @@ def send_message(chat_id: int, text: str, token: str | None = None):
     # Split long messages (Telegram limit: 4096 chars)
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
     for chunk in chunks:
-        _api("sendMessage", token, chat_id=chat_id, text=chunk, parse_mode="Markdown")
+        kwargs = {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}
+        if reply_to:
+            kwargs["reply_to_message_id"] = reply_to
+        if topic_id:
+            kwargs["message_thread_id"] = topic_id
+        _api("sendMessage", token, **kwargs)
 
 
 def get_me(token: str | None = None) -> dict:
@@ -129,18 +238,20 @@ def _poll_loop(token: str):
     global _running
     offset = 0
 
-    # Verify bot
     me = get_me(token)
     if not me:
         _log.error("failed to connect to Telegram — invalid token?")
         _running = False
         return
-    _log.info(f"connected as @{me.get('username', '?')}")
-    db.kv_set("telegram:bot_username", me.get("username", ""))
+
+    bot_username = me.get("username", "")
+    _log.info(f"connected as @{bot_username}")
+    db.kv_set("telegram:bot_username", bot_username)
 
     while _running:
         try:
-            result = _api("getUpdates", token, offset=offset, timeout=30)
+            result = _api("getUpdates", token, offset=offset, timeout=30,
+                          allowed_updates=["message"])
             if not result.get("ok"):
                 _log.warning(f"getUpdates failed: {result.get('description')}")
                 time.sleep(5)
@@ -148,65 +259,141 @@ def _poll_loop(token: str):
 
             for update in result.get("result", []):
                 offset = update["update_id"] + 1
-                _handle_update(update, token)
+                _handle_update(update, token, bot_username)
 
         except Exception as e:
             _log.error(f"poll error: {e}", exc_info=True)
             time.sleep(5)
 
 
-def _handle_update(update: dict, token: str):
+def _handle_update(update: dict, token: str, bot_username: str):
     """Process a single Telegram update."""
     msg = update.get("message")
     if not msg:
         return
 
     chat_id = msg["chat"]["id"]
+    chat_type = msg["chat"].get("type", "private")  # private, group, supergroup
     user_id = msg["from"]["id"]
     username = msg["from"].get("username", "")
     text = msg.get("text", "")
+    message_id = msg.get("message_id")
+    topic_id = msg.get("message_thread_id")  # supergroup topic
 
     if not text:
         return
 
-    # Check allowed users
-    allowed = get_allowed_users()
-    if allowed and user_id not in allowed:
-        _log.warning(f"blocked message from user {user_id} (@{username})")
+    # ── Verification flow ──
+    if not is_verified():
+        pending = get_pending_code()
+        if pending and text.strip().upper() == pending.upper():
+            # Code matches — verify this user as owner
+            set_owner_id(user_id)
+            db.kv_set("telegram:owner_username", username)
+            clear_verification()
+            send_message(chat_id, f"✅ Verified! You are now the owner.\n\nI'll only respond to you from now on.", token)
+            _log.info(f"owner verified: @{username} ({user_id})")
+            return
+        elif pending:
+            # Wrong code
+            send_message(chat_id, "🔐 Enter the verification code shown in qwe-qwe to confirm ownership.", token)
+            return
+        else:
+            # No code generated yet — show in bot
+            code = generate_verification_code()
+            send_message(chat_id, f"🔐 Verification required!\n\nEnter this code in qwe-qwe (web UI or CLI):\n\n`{code}`\n\nOr type the code here after entering it.", token)
+            _log.info(f"sent verification code to @{username} ({user_id})")
+            return
+
+    # ── Owner check ──
+    owner_id = get_owner_id()
+
+    # ── Private chat ──
+    if chat_type == "private":
+        if user_id != owner_id:
+            _log.warning(f"blocked DM from non-owner {user_id} (@{username})")
+            return
+        _process_message(chat_id, text, user_id, username, message_id, token, topic_id=None, thread_id=None)
         return
 
-    _log.info(f"message from @{username} ({user_id}): {text[:100]}")
+    # ── Group/supergroup ──
+    if chat_type in ("group", "supergroup"):
+        allowed_groups = get_allowed_groups()
+        if allowed_groups and chat_id not in allowed_groups:
+            return  # silently ignore non-allowed groups
 
-    # Auto-save first user
-    if not allowed:
-        set_allowed_users([user_id])
-        _log.info(f"auto-allowed first user: {user_id} (@{username})")
+        # Check if bot should respond
+        group_mode = get_group_mode()
+        should_respond = False
 
-    # Send typing indicator
-    _api("sendChatAction", token, chat_id=chat_id, action="typing")
+        if group_mode == "all":
+            should_respond = True
+        elif group_mode == "mention":
+            # Respond only if mentioned or replied to
+            if f"@{bot_username}" in text:
+                text = text.replace(f"@{bot_username}", "").strip()
+                should_respond = True
+            elif msg.get("reply_to_message", {}).get("from", {}).get("username") == bot_username:
+                should_respond = True
 
-    # Route to agent
+        if not should_respond:
+            return
+
+        # Only owner can trigger in groups (unless explicitly allowed)
+        if user_id != owner_id:
+            _log.debug(f"ignored group msg from non-owner {user_id}")
+            return
+
+        # Topic → Thread mapping
+        thread_id = None
+        if topic_id and is_topics_enabled():
+            topic_name = ""
+            # Try to get topic name from reply
+            thread_id = _get_or_create_thread_for_topic(chat_id, topic_id, topic_name)
+
+        _process_message(chat_id, text, user_id, username, message_id, token,
+                         topic_id=topic_id, thread_id=thread_id)
+
+
+def _process_message(chat_id: int, text: str, user_id: int, username: str,
+                     message_id: int, token: str, topic_id: int | None = None,
+                     thread_id: str | None = None):
+    """Route message to agent and send response."""
+    _log.info(f"processing: @{username} in {chat_id}" +
+              (f" topic={topic_id}" if topic_id else "") +
+              (f" thread={thread_id}" if thread_id else "") +
+              f": {text[:100]}")
+
+    # Typing indicator
+    kwargs = {"chat_id": chat_id, "action": "typing"}
+    if topic_id:
+        kwargs["message_thread_id"] = topic_id
+    _api("sendChatAction", token, **kwargs)
+
     if _on_message:
         try:
-            response = _on_message(chat_id, text, user_id, username)
+            response = _on_message(chat_id, text, user_id, username, thread_id)
             if response:
-                send_message(chat_id, response, token)
+                send_message(chat_id, response, token, reply_to=message_id, topic_id=topic_id)
         except Exception as e:
             _log.error(f"handler error: {e}", exc_info=True)
-            send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token)
-    else:
-        send_message(chat_id, "Bot is running but no handler configured.", token)
+            send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token, topic_id=topic_id)
 
 
 # ── Status ──
 
 def status() -> dict:
     """Get bot status."""
-    token = get_token()
     return {
         "enabled": is_enabled(),
         "running": _running,
-        "has_token": bool(token),
+        "has_token": bool(get_token()),
+        "verified": is_verified(),
         "username": db.kv_get("telegram:bot_username") or "",
-        "allowed_users": get_allowed_users(),
+        "owner_id": get_owner_id(),
+        "owner_username": get_owner_username(),
+        "pending_code": get_pending_code() or "",
+        "allowed_groups": get_allowed_groups(),
+        "group_mode": get_group_mode(),
+        "topics_enabled": is_topics_enabled(),
     }
