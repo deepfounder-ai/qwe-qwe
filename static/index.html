@@ -853,7 +853,7 @@ async function loadSettingsProviders() {
         <div class="provider-url">${p.url}</div>
         ${p.models.length ? `<div class="provider-models">${p.models.length} models</div>` : ''}
       </div>
-      ${!p.has_key ? `<button class="s-btn" onclick="setProviderKey('${p.name}')">Set key</button>` : ''}
+      <button class="s-btn" onclick="event.stopPropagation();setProviderKey('${p.name}')">${p.has_key ? '<i class="ph ph-key"></i> Change key' : '<i class="ph ph-key"></i> Set key'}</button>
     `;
     card.onclick = (e) => { if (e.target.tagName !== 'BUTTON') switchProvider(p.name); };
     container.appendChild(card);
