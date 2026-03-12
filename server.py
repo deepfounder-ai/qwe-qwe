@@ -570,6 +570,59 @@ def _cron_callback(name: str, task: str, result: str):
 import scheduler
 scheduler.on_complete(_cron_callback)
 
+# ── Telegram Bot ──
+import telegram_bot
+
+
+def _telegram_handler(chat_id: int, text: str, user_id: int, username: str) -> str:
+    """Handle incoming Telegram message → agent → response."""
+    import agent
+    # Use a dedicated thread for Telegram or default
+    tid = db.kv_get("telegram:thread_id")
+    result = agent.run(text, thread_id=tid or None)
+
+    # Also broadcast to WebSocket
+    if _ws_loop and _ws_clients:
+        ws_msg = {
+            "type": "telegram",
+            "from": f"@{username}" if username else str(user_id),
+            "text": text,
+            "reply": result.reply,
+        }
+        asyncio.run_coroutine_threadsafe(_broadcast(ws_msg), _ws_loop)
+
+    return result.reply
+
+
+@app.get("/api/telegram/status")
+async def telegram_status():
+    return telegram_bot.status()
+
+
+@app.post("/api/telegram/config")
+async def telegram_config(request: Request):
+    req = await request.json()
+    if "token" in req:
+        telegram_bot.set_token(req["token"])
+        # Verify token
+        me = telegram_bot.get_me(req["token"])
+        if not me:
+            return JSONResponse({"error": "Invalid token"}, status_code=400)
+        return {"ok": True, "username": me.get("username")}
+    return {"ok": True}
+
+
+@app.post("/api/telegram/toggle")
+async def telegram_toggle(request: Request):
+    req = await request.json()
+    enabled = bool(req.get("enabled", False))
+    telegram_bot.set_enabled(enabled)
+    if enabled:
+        telegram_bot.start(on_message=_telegram_handler)
+    else:
+        telegram_bot.stop()
+    return {"enabled": enabled, "running": telegram_bot._running}
+
 
 # ── Run ──
 
@@ -588,6 +641,10 @@ def start(host: str = "0.0.0.0", port: int = 7860):
     # CLI flag overrides
     if host != "0.0.0.0":
         actual_host = host
+
+    # Auto-start Telegram bot if enabled
+    if telegram_bot.is_enabled() and telegram_bot.get_token():
+        telegram_bot.start(on_message=_telegram_handler)
 
     _log.info(f"starting web server on {actual_host}:{port} (LAN: {'on' if lan else 'off'})")
     if actual_host == "0.0.0.0":
