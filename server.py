@@ -172,6 +172,30 @@ async def setup_save(request: Request):
     return {"ok": True}
 
 
+@app.get("/api/network")
+async def network_status():
+    """Get network access status."""
+    lan = db.kv_get("network:lan_access") == "1"
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "unknown"
+    return {"lan_access": lan, "ip": ip, "port": _current_port}
+
+
+@app.post("/api/network")
+async def network_toggle(request: Request):
+    """Toggle LAN access."""
+    req = await request.json()
+    lan = bool(req.get("lan_access", False))
+    db.kv_set("network:lan_access", "1" if lan else "0")
+    return {"lan_access": lan, "restart_required": True}
+
+
 @app.get("/api/history")
 async def history(limit: int = 20, thread_id: str | None = None):
     """Recent conversation history for a thread."""
@@ -527,12 +551,38 @@ scheduler.on_complete(_cron_callback)
 
 # ── Run ──
 
+_current_port = 7860
+
 def start(host: str = "0.0.0.0", port: int = 7860):
     """Start the web server."""
+    global _current_port
+    _current_port = port
     import uvicorn
-    _log.info(f"starting web server on {host}:{port}")
-    print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}\n")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+    # Check LAN access setting
+    lan = db.kv_get("network:lan_access") == "1"
+    actual_host = "0.0.0.0" if lan else "127.0.0.1"
+    # CLI flag overrides
+    if host != "0.0.0.0":
+        actual_host = host
+
+    _log.info(f"starting web server on {actual_host}:{port} (LAN: {'on' if lan else 'off'})")
+    if actual_host == "0.0.0.0":
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}")
+            print(f"  📱 LAN access → http://{ip}:{port}\n")
+        except Exception:
+            print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}\n")
+    else:
+        print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}")
+        print(f"  🔒 Local only (enable LAN in Settings → System)\n")
+
+    uvicorn.run(app, host=actual_host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":
