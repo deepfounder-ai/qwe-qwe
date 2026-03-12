@@ -1011,12 +1011,67 @@ async function loadSettingsThreads(includeArchived) {
   container.appendChild(summary);
 }
 async function setThreadModel(tid) {
-  // Build model options from known providers
-  const model = prompt('Model for this thread (empty = use default):', '');
-  if (model === null) return;  // cancelled
+  // Fetch available models from all providers
+  const provRes = await fetch('/api/providers');
+  const allProviders = await provRes.json();
+  
+  // Build list of all models across providers
+  let allModels = [];
+  for (const p of allProviders) {
+    for (const m of (p.models || [])) {
+      allModels.push({model: m, provider: p.display || p.name});
+    }
+  }
+  
+  // Also try to fetch from active provider's server
+  try {
+    const mRes = await fetch('/api/models');
+    const mData = await mRes.json();
+    for (const m of (mData.models || [])) {
+      if (!allModels.find(x => x.model === m)) {
+        allModels.push({model: m, provider: mData.provider});
+      }
+    }
+  } catch(e) {}
+
+  // Create modal
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:400px;width:90%;max-height:70vh;overflow-y:auto;';
+  modal.innerHTML = `
+    <h3 style="margin:0 0 12px;color:var(--accent);"><i class="ph ph-brain"></i> Thread Model</h3>
+    <p style="color:var(--text-dim);font-size:12px;margin:0 0 16px;">Pick a model for this thread or use default.</p>
+    <div id="modelPickList"></div>
+    <div style="margin-top:12px;display:flex;gap:8px;">
+      <button class="s-btn" onclick="this.closest('div[style]').parentElement.remove();pickThreadModel('${tid}','')">Use default</button>
+      <button class="s-btn" style="margin-left:auto;color:var(--text-dim);" onclick="this.closest('div[style]').parentElement.remove()">Cancel</button>
+    </div>
+  `;
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const list = modal.querySelector('#modelPickList');
+  if (!allModels.length) {
+    list.innerHTML = '<span style="color:var(--text-dim)">No models found. Check provider settings.</span>';
+    return;
+  }
+  for (const m of allModels) {
+    const btn = document.createElement('div');
+    btn.style.cssText = 'padding:8px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;';
+    btn.innerHTML = `<span style="color:var(--text);">${m.model}</span><span style="color:var(--text-dim);font-size:11px;">${m.provider}</span>`;
+    btn.onmouseenter = () => btn.style.borderColor = 'var(--accent)';
+    btn.onmouseleave = () => btn.style.borderColor = 'var(--border)';
+    btn.onclick = () => { overlay.remove(); pickThreadModel(tid, m.model); };
+    list.appendChild(btn);
+  }
+}
+
+async function pickThreadModel(tid, model) {
   await fetch(`/api/threads/${tid}/model`, {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({model: model.trim()})
+    body: JSON.stringify({model})
   });
   loadSettingsThreads();
 }
