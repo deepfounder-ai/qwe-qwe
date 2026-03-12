@@ -12,8 +12,14 @@ DIM='\033[2m'
 NC='\033[0m'
 
 echo ""
-echo -e "  ${BOLD}⚡ qwe-qwe installer${NC}"
+echo -e "  ${YELLOW}   ____                  ____                 ${NC}"
+echo -e "  ${YELLOW}  / __ \\__      _____   / __ \\__      _____  ${NC}"
+echo -e "  ${YELLOW} | |  | \\ \\ /\\ / / _ \\ | |  | \\ \\ /\\ / / _ \\ ${NC}"
+echo -e "  ${YELLOW} | |__| |\\ V  V /  __/ | |__| |\\ V  V /  __/ ${NC}"
+echo -e "  ${YELLOW}  \\___\\_\\ \\_/\\_/ \\___|  \\___\\_\\ \\_/\\_/ \\___| ${NC}"
+echo ""
 echo -e "  ${DIM}Lightweight offline AI agent for local models${NC}"
+echo -e "  ${DIM}https://github.com/deepfounder-ai/qwe-qwe${NC}"
 echo ""
 
 step()  { echo -e "  ${GREEN}✓${NC} $1"; }

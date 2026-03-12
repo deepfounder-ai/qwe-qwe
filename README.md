@@ -1,6 +1,21 @@
-# ⚡ qwe-qwe
+<p align="center">
+  <img src="static/logo.png" alt="qwe-qwe" width="280">
+</p>
 
-Lightweight offline AI agent for local models. No cloud, no API keys, no subscriptions — just your GPU.
+<h3 align="center">Lightweight offline AI agent for local models</h3>
+
+<p align="center">
+  No cloud. No API keys. No subscriptions. Just your GPU.
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#interfaces">Interfaces</a> •
+  <a href="#tools">Tools</a> •
+  <a href="#skills">Skills</a>
+</p>
+
+---
 
 ## Architecture
 
@@ -17,17 +32,16 @@ Web UI (browser)   ←──┘        ├── Qdrant (semantic memory)
 
 ## Quick Start
 
+**One-line install:**
 ```bash
-# 1. Clone
-git clone <repo> && cd qwe-qwe
+curl -fsSL https://raw.githubusercontent.com/deepfounder-ai/qwe-qwe/main/install.sh | bash
+```
 
-# 2. Install
+**Or manually:**
+```bash
+git clone https://github.com/deepfounder-ai/qwe-qwe.git && cd qwe-qwe
 ./setup.sh
-
-# 3. Activate venv
 source .venv/bin/activate
-
-# 4. Run
 qwe-qwe              # terminal chat
 qwe-qwe --web        # web UI at http://localhost:7860
 ```
