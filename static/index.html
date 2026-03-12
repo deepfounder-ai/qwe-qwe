@@ -598,6 +598,32 @@ body {
       </select>
       <button onclick="obNext()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);">Next →</button>
     </div>
+    <div id="onboardStepProvider" class="ob-step" style="display:none;">
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🔌 LLM Provider</label>
+      <select id="obProvider" onchange="obProviderChanged()" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box; appearance:auto;">
+        <option value="lmstudio">🖥 LM Studio (local)</option>
+        <option value="ollama">🦙 Ollama (local)</option>
+        <option value="openai">🟢 OpenAI</option>
+        <option value="openrouter">🔀 OpenRouter</option>
+        <option value="groq">⚡ Groq</option>
+        <option value="together">🤝 Together AI</option>
+        <option value="deepseek">🐋 DeepSeek</option>
+      </select>
+      <div id="obEndpointWrap">
+        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">📡 Endpoint URL</label>
+        <input id="obEndpoint" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      </div>
+      <div id="obApiKeyWrap" style="display:none;">
+        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🔑 API Key</label>
+        <input id="obApiKey" type="password" placeholder="sk-..." style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      </div>
+      <div id="obModelWrap">
+        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🧠 Model</label>
+        <input id="obModel" placeholder="auto-detected" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      </div>
+      <p id="obProviderHint" style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;"></p>
+      <button onclick="obNextToSoul()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);">Next →</button>
+    </div>
     <div id="onboardStep2" class="ob-step" style="display:none;">
       <p style="color:var(--text-dim); font-size:13px; margin:0 0 4px;">Personality sliders (0–10, drag to adjust)</p>
       <p style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;">💡 You can add custom traits later in Settings → Soul</p>
@@ -647,8 +673,33 @@ function showOnboarding() {
   document.getElementById('obName').focus();
 }
 
+const OB_PROVIDERS = {
+  lmstudio:   {url:'http://localhost:1234/v1', local:true, hint:'Start LM Studio and load a model'},
+  ollama:     {url:'http://localhost:11434/v1', local:true, hint:'Run: ollama serve'},
+  openai:     {url:'https://api.openai.com/v1', local:false, hint:'Get key at platform.openai.com'},
+  openrouter: {url:'https://openrouter.ai/api/v1', local:false, hint:'Get key at openrouter.ai'},
+  groq:       {url:'https://api.groq.com/openai/v1', local:false, hint:'Free tier at console.groq.com'},
+  together:   {url:'https://api.together.xyz/v1', local:false, hint:'Get key at together.ai'},
+  deepseek:   {url:'https://api.deepseek.com/v1', local:false, hint:'Get key at platform.deepseek.com'},
+};
+
+function obProviderChanged() {
+  const prov = document.getElementById('obProvider').value;
+  const info = OB_PROVIDERS[prov];
+  document.getElementById('obEndpoint').value = info.url;
+  document.getElementById('obApiKeyWrap').style.display = info.local ? 'none' : 'block';
+  document.getElementById('obProviderHint').textContent = '💡 ' + info.hint;
+  document.getElementById('obModel').placeholder = info.local ? 'auto-detected from server' : 'e.g. gpt-4o, claude-sonnet-4';
+}
+
 function obNext() {
   document.getElementById('onboardStep1').style.display = 'none';
+  document.getElementById('onboardStepProvider').style.display = 'block';
+  obProviderChanged();  // init provider fields
+}
+
+function obNextToSoul() {
+  document.getElementById('onboardStepProvider').style.display = 'none';
   document.getElementById('onboardStep2').style.display = 'block';
 }
 
@@ -665,6 +716,10 @@ async function obFinish() {
     user_name: document.getElementById('obName').value,
     agent_name: document.getElementById('obAgent').value,
     language: document.getElementById('obLang').value,
+    provider: document.getElementById('obProvider').value,
+    endpoint: document.getElementById('obEndpoint').value,
+    api_key: document.getElementById('obApiKey').value || '',
+    model: document.getElementById('obModel').value || '',
     traits
   };
   try {
