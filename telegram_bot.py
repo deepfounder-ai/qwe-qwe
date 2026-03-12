@@ -244,6 +244,10 @@ def _poll_loop(token: str):
         _running = False
         return
 
+    # Delete any existing webhook (required for long polling)
+    _api("deleteWebhook", token, drop_pending_updates=False)
+    _log.info("webhook cleared")
+
     bot_username = me.get("username", "")
     _log.info(f"connected as @{bot_username}")
     db.kv_set("telegram:bot_username", bot_username)
