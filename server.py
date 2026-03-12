@@ -146,18 +146,19 @@ async def setup_save(request: Request):
     if req.get("language"):
         db.kv_set("soul:language", req["language"].strip())
 
-    # Provider setup
+    # Provider setup — set key/endpoint BEFORE switching (switch validates key)
     if req.get("provider"):
         prov = req["provider"]
-        providers.switch(prov)
         if req.get("api_key"):
             providers.set_key(prov, req["api_key"])
         if req.get("endpoint"):
-            # Custom endpoint override
             import json as _j
             p = providers.get_provider(prov)
             p["url"] = req["endpoint"]
             db.kv_set(f"provider:config:{prov}", _j.dumps(p))
+        # Now switch (key is already set)
+        result = providers.switch(prov)
+        logger.event("provider_switch", provider=prov, result=result)
         if req.get("model"):
             providers.set_model(req["model"])
 
