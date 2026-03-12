@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>qwe-qwe</title>
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
 <style>
 :root {
   --bg: #0a0a0a;
@@ -135,6 +136,8 @@ body {
 .msg.assistant:hover .msg-actions { opacity: 1; }
 .msg-action-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); cursor: pointer; padding: 2px 6px; font-size: 12px; line-height: 1; }
 .msg-action-btn:hover { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+.ph-spinner { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .msg.error { background: #2d1515; border: 1px solid var(--error); align-self: center; color: var(--error); font-size: 13px; }
 .msg.status { align-self: center; color: var(--text-dim); font-size: 12px; padding: 4px 12px; background: transparent; font-family: var(--mono); }
 .msg-thinking {
@@ -395,9 +398,9 @@ body {
     <div class="status-dot" id="statusDot"></div>
     <div class="logo"><img src="/static/logo.png" alt="qwe-qwe">qwe-qwe</div>
     <div class="header-nav">
-      <button class="nav-btn active" data-page="chat" onclick="showPage('chat')">💬 Chat</button>
-      <button class="nav-btn" data-page="cron" onclick="showPage('cron')">⏰ Cron</button>
-      <button class="nav-btn" data-page="settings" onclick="showPage('settings')">⚙ Settings</button>
+      <button class="nav-btn active" data-page="chat" onclick="showPage('chat')"><i class="ph ph-chat-circle"></i> Chat</button>
+      <button class="nav-btn" data-page="cron" onclick="showPage('cron')"><i class="ph ph-clock"></i> Cron</button>
+      <button class="nav-btn" data-page="settings" onclick="showPage('settings')"><i class="ph ph-gear"></i> Settings</button>
     </div>
   </div>
   <div class="header-right">
@@ -447,11 +450,11 @@ body {
 <div class="page" id="pageSettings">
   <div class="settings">
     <div class="settings-nav">
-      <div class="settings-nav-item active" onclick="showSection('soul')"><span class="nav-icon">🧬</span><span>Soul</span></div>
-      <div class="settings-nav-item" onclick="showSection('model')"><span class="nav-icon">🧠</span><span>Model</span></div>
-      <div class="settings-nav-item" onclick="showSection('skills')"><span class="nav-icon">⚡</span><span>Skills</span></div>
-      <div class="settings-nav-item" onclick="showSection('threads')"><span class="nav-icon">💬</span><span>Threads</span></div>
-      <div class="settings-nav-item" onclick="showSection('system')"><span class="nav-icon">🔧</span><span>System</span></div>
+      <div class="settings-nav-item active" onclick="showSection('soul')"><span class="nav-icon"><i class="ph ph-dna"></i></span><span>Soul</span></div>
+      <div class="settings-nav-item" onclick="showSection('model')"><span class="nav-icon"><i class="ph ph-brain"></i></span><span>Model</span></div>
+      <div class="settings-nav-item" onclick="showSection('skills')"><span class="nav-icon"><i class="ph ph-lightning"></i></span><span>Skills</span></div>
+      <div class="settings-nav-item" onclick="showSection('threads')"><span class="nav-icon"><i class="ph ph-chats-circle"></i></span><span>Threads</span></div>
+      <div class="settings-nav-item" onclick="showSection('system')"><span class="nav-icon"><i class="ph ph-wrench"></i></span><span>System</span></div>
     </div>
     <div class="settings-content">
 
@@ -577,11 +580,11 @@ body {
       <p style="margin:8px 0 0; color:var(--text-dim); font-size:13px;">Let's get you set up in 30 seconds</p>
     </div>
     <div id="onboardStep1" class="ob-step">
-      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">👤 Your name</label>
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-user"></i> Your name</label>
       <input id="obName" placeholder="e.g. Kir" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
-      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🤖 Agent name</label>
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-robot"></i> Agent name</label>
       <input id="obAgent" placeholder="e.g. Jarvis" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
-      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🗣 Agent speaks in</label>
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-translate"></i> Agent speaks in</label>
       <select id="obLang" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box; appearance:auto;">
         <option value="English">🇬🇧 English</option>
         <option value="Русский">🇷🇺 Русский</option>
@@ -603,7 +606,7 @@ body {
       <button onclick="obNext()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);">Next →</button>
     </div>
     <div id="onboardStepProvider" class="ob-step" style="display:none;">
-      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🔌 LLM Provider</label>
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-plug"></i> LLM Provider</label>
       <select id="obProvider" onchange="obProviderChanged()" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box; appearance:auto;">
         <option value="lmstudio">🖥 LM Studio (local)</option>
         <option value="ollama">🦙 Ollama (local)</option>
@@ -614,15 +617,15 @@ body {
         <option value="deepseek">🐋 DeepSeek</option>
       </select>
       <div id="obEndpointWrap">
-        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">📡 Endpoint URL</label>
+        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-globe-simple"></i> Endpoint URL</label>
         <input id="obEndpoint" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
       </div>
       <div id="obApiKeyWrap" style="display:none;">
-        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🔑 API Key</label>
+        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-key"></i> API Key</label>
         <input id="obApiKey" type="password" placeholder="sk-..." style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
       </div>
       <div id="obModelWrap">
-        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🧠 Model</label>
+        <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-brain"></i> Model</label>
         <input id="obModel" placeholder="auto-detected" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
       </div>
       <p id="obProviderHint" style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;"></p>
@@ -630,7 +633,7 @@ body {
     </div>
     <div id="onboardStep2" class="ob-step" style="display:none;">
       <p style="color:var(--text-dim); font-size:13px; margin:0 0 4px;">Personality sliders (0–10, drag to adjust)</p>
-      <p style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;">💡 You can add custom traits later in Settings → Soul</p>
+      <p style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;"><i class="ph ph-lightbulb"></i> You can add custom traits later in Settings → Soul</p>
       <div id="obTraits"></div>
       <button onclick="obFinish()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; margin-top:16px; font-family:var(--sans);">⚡ Start chatting</button>
     </div>
@@ -640,11 +643,11 @@ body {
 <script>
 // ── Onboarding ──
 const OB_TRAITS = [
-  {key:'humor', label:'😄 Humor', lo:'serious', hi:'funny'},
-  {key:'honesty', label:'💎 Honesty', lo:'diplomatic', hi:'direct'},
-  {key:'brevity', label:'✂️ Brevity', lo:'verbose', hi:'concise'},
-  {key:'formality', label:'🎩 Formality', lo:'casual', hi:'formal'},
-  {key:'creativity', label:'🎨 Creativity', lo:'practical', hi:'wild'},
+  {key:'humor', label:'Humor', icon:'ph-smiley', lo:'serious', hi:'funny'},
+  {key:'honesty', label:'Honesty', icon:'ph-diamond', lo:'diplomatic', hi:'direct'},
+  {key:'brevity', label:'Brevity', icon:'ph-scissors', lo:'verbose', hi:'concise'},
+  {key:'formality', label:'Formality', icon:'ph-tie', lo:'casual', hi:'formal'},
+  {key:'creativity', label:'Creativity', icon:'ph-paint-brush', lo:'practical', hi:'wild'},
 ];
 
 async function checkOnboarding() {
@@ -663,7 +666,7 @@ function showOnboarding() {
   container.innerHTML = OB_TRAITS.map(t => `
     <div style="margin-bottom:14px;">
       <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:4px;">
-        <span>${t.label}</span><span id="obVal_${t.key}" style="color:var(--accent);">5</span>
+        <span><i class="ph ${t.icon}"></i> ${t.label}</span><span id="obVal_${t.key}" style="color:var(--accent);">5</span>
       </div>
       <div style="display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-dim);">
         <span>${t.lo}</span>
@@ -692,7 +695,7 @@ function obProviderChanged() {
   const info = OB_PROVIDERS[prov];
   document.getElementById('obEndpoint').value = info.url;
   document.getElementById('obApiKeyWrap').style.display = info.local ? 'none' : 'block';
-  document.getElementById('obProviderHint').textContent = '💡 ' + info.hint;
+  document.getElementById('obProviderHint').innerHTML = '<i class="ph ph-lightbulb"></i> ' + info.hint;
   document.getElementById('obModel').placeholder = info.local ? 'auto-detected from server' : 'e.g. gpt-4o, claude-sonnet-4';
 }
 
@@ -1048,7 +1051,7 @@ function renderTaskResults(data) {
   if (data.pending > 0) parts.push(`<div style="color:var(--accent);margin-bottom:8px">⏳ ${data.pending} task(s) running...</div>`);
   if (data.results?.length) {
     for (const r of data.results) {
-      const icon = r.status === 'done' ? '✅' : '❌';
+      const icon = r.status === 'done' ? '<i class="ph ph-check-circle"></i>' : '<i class="ph ph-x-circle"></i>';
       parts.push(`<div style="margin-bottom:6px">${icon} <strong>#${r.id}</strong> ${r.task.substring(0,60)}<br><span style="font-size:12px;color:var(--text-dim)">${r.result.substring(0,200)}</span></div>`);
     }
   }
@@ -1198,7 +1201,7 @@ function addMessage(role, text, meta) {
     const branchBtn = document.createElement('button');
     branchBtn.className = 'msg-action-btn';
     branchBtn.title = 'Branch into new thread';
-    branchBtn.textContent = '🌿';
+    branchBtn.innerHTML = '<i class="ph ph-git-branch"></i>';
     branchBtn.onclick = () => branchFromMessage(text);
     actions.appendChild(branchBtn);
     div.appendChild(actions);
@@ -1208,19 +1211,19 @@ function addMessage(role, text, meta) {
     if (meta.thinking && meta.thinking.trim()) {
       const think = document.createElement('details');
       think.className = 'msg-thinking';
-      think.innerHTML = `<summary>💭 thinking (${meta.thinking.length} chars)</summary><pre style="white-space:pre-wrap;margin:6px 0 0;font-size:12px">${escapeHtml(meta.thinking)}</pre>`;
+      think.innerHTML = `<summary><i class="ph ph-thought-bubble"></i> thinking (${meta.thinking.length} chars)</summary><pre style="white-space:pre-wrap;margin:6px 0 0;font-size:12px">${escapeHtml(meta.thinking)}</pre>`;
       div.insertBefore(think, div.firstChild);
     }
     const m = document.createElement('div'); m.className = 'msg-meta';
     let p = [];
     if (meta.duration_ms) p.push(`${meta.duration_ms}ms`);
-    if (meta.tools?.length) p.push(meta.tools.map(t=>`<span class="tool-tag">🔧 ${t}</span>`).join(''));
-    if (meta.context_hits) p.push(`📎 ${meta.context_hits} memories`);
+    if (meta.tools?.length) p.push(meta.tools.map(t=>`<span class="tool-tag"><i class="ph ph-wrench"></i> ${t}</span>`).join(''));
+    if (meta.context_hits) p.push(`<i class="ph ph-paperclip"></i> ${meta.context_hits} memories`);
     m.innerHTML = p.join(' · '); div.appendChild(m);
   }
   chat.appendChild(div); chat.scrollTop = chat.scrollHeight;
 }
-function showStatus(text) { removeStatus(); const d=document.createElement('div'); d.className='msg status'; d.id='statusMsg'; d.textContent=`⏳ ${text}`; chat.appendChild(d); chat.scrollTop=chat.scrollHeight; }
+function showStatus(text) { removeStatus(); const d=document.createElement('div'); d.className='msg status'; d.id='statusMsg'; d.innerHTML=`<i class="ph ph-spinner"></i> ${text}`; chat.appendChild(d); chat.scrollTop=chat.scrollHeight; }
 function removeStatus() { document.getElementById('statusMsg')?.remove(); }
 
 // ── Send ──
@@ -1257,7 +1260,7 @@ async function loadThreadStats(tid) {
     const lastAct = s.last_message ? timeAgo(s.last_message) : '—';
     el.innerHTML = `
       <span class="ts-item">💬 <span class="ts-val">${s.user_messages}</span> you</span>
-      <span class="ts-item">🤖 <span class="ts-val">${s.assistant_messages}</span> agent</span>
+      <span class="ts-item"><i class="ph ph-robot"></i> <span class="ts-val">${s.assistant_messages}</span> agent</span>
       <span class="ts-item">🔧 <span class="ts-val">${s.tool_calls}</span> tools</span>
       <span class="ts-item">🪙 <span class="ts-val">${s.est_tokens > 1000 ? (s.est_tokens/1000).toFixed(1)+'k' : s.est_tokens}</span> tokens</span>
       <span class="ts-item">⏱ ${lastAct}</span>
@@ -1278,7 +1281,7 @@ async function loadHistory(tid) {
   const res = await fetch(`/api/history?limit=30&thread_id=${t}`);
   const msgs = await res.json();
   chat.innerHTML = '';
-  if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo"><img src="/static/logo.png" alt="qwe-qwe"></div><div class="empty-text">start chatting</div></div>'; return; }
+  if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo"><img src="/static/logo.png" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-chat-circle-dots"></i> start chatting</div></div>'; return; }
   msgs.forEach(m => addMessage(m.role, m.content));
   chat.scrollTop = chat.scrollHeight;
   loadThreadStats(t);
