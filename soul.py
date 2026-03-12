@@ -167,13 +167,32 @@ def to_prompt(soul: dict) -> str:
     # Identity + personality as levels
     user_name = db.kv_get("user_name") or "Boss"
     lines.append(f"You are {soul['name']}. The user's name is {user_name}. Reply in {soul['language']}.")
-    lines.append("Personality (0=min, 10=max):")
+
+    # Build personality as direct behavioral instructions
+    active_traits = []
     for trait, value in soul.items():
         if trait in ("name", "language"):
             continue
+        value = int(value) if isinstance(value, str) else value
+        if value <= 2:
+            continue  # trait is off, skip
         if trait in TRAIT_DESCRIPTIONS:
             low, high = TRAIT_DESCRIPTIONS[trait]
-            lines.append(f"  {trait}={value} ({low} ← → {high})")
+            if value >= 8:
+                active_traits.append(f"Be VERY {high}.")
+            elif value >= 5:
+                active_traits.append(f"Be somewhat {high}.")
+            else:
+                active_traits.append(f"Lean slightly towards {high} over {low}.")
+        else:
+            # Custom traits without descriptions
+            if value >= 8:
+                active_traits.append(f"Be extremely {trait}ic." if not trait.endswith(('ic', 'al', 'ous', 'ive', 'ful')) else f"Be extremely {trait}.")
+            elif value >= 5:
+                active_traits.append(f"Be moderately {trait}ic." if not trait.endswith(('ic', 'al', 'ous', 'ive', 'ful')) else f"Be moderately {trait}.")
+
+    if active_traits:
+        lines.append("Personality: " + " ".join(active_traits))
 
     # System info (1 line)
     lines.append(f"System: {_get_sysinfo()}")
