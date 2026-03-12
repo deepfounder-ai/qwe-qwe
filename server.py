@@ -16,7 +16,7 @@ _abort_event = threading.Event()
 _ws_clients: set = set()
 _ws_loop: asyncio.AbstractEventLoop | None = None
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -122,10 +122,10 @@ async def setup_status():
 
 
 @app.post("/api/setup")
-async def setup_save(req: dict = {}):
+async def setup_save(request: Request):
     """Save first-run onboarding data."""
-    from fastapi import Request
     import json as _json
+    req = await request.json()
 
     if "tz_offset" in req:
         offset = int(req["tz_offset"])
