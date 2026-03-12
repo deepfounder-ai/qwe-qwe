@@ -139,8 +139,12 @@ body {
 .msg-action-btn:hover { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
 .ph-spinner { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-#lanToggle:checked + span { background: var(--accent); }
-#lanToggle:checked ~ #lanDot, #lanToggle:checked + span + span { left: 23px; }
+.toggle-switch { position:relative; display:inline-block; width:44px; height:24px; cursor:pointer; }
+.toggle-switch input { opacity:0; width:0; height:0; position:absolute; }
+.toggle-track { position:absolute; inset:0; background:var(--border); border-radius:12px; transition:.2s; }
+.toggle-thumb { position:absolute; top:3px; left:3px; width:18px; height:18px; background:#fff; border-radius:50%; transition:.2s; }
+.toggle-switch input:checked + .toggle-track { background:var(--accent); }
+.toggle-switch input:checked + .toggle-track + .toggle-thumb { left:23px; }
 .msg.error { background: #2d1515; border: 1px solid var(--error); align-self: center; color: var(--error); font-size: 13px; }
 .msg.status { align-self: center; color: var(--text-dim); font-size: 12px; padding: 4px 12px; background: transparent; font-family: var(--mono); }
 .msg-thinking {
@@ -564,10 +568,10 @@ body {
           <div class="s-card-title"><i class="ph ph-wifi-high"></i> Network Access</div>
           <div class="s-row">
             <span class="s-row-label">Allow LAN devices</span>
-            <label style="position:relative;display:inline-block;width:44px;height:24px;cursor:pointer;">
-              <input type="checkbox" id="lanToggle" onchange="toggleLAN(this.checked)" style="opacity:0;width:0;height:0;">
-              <span style="position:absolute;inset:0;background:var(--border);border-radius:12px;transition:.2s;"></span>
-              <span id="lanDot" style="position:absolute;top:3px;left:3px;width:18px;height:18px;background:#fff;border-radius:50%;transition:.2s;"></span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="lanToggle" onchange="toggleLAN(this.checked)">
+              <span class="toggle-track"></span>
+              <span class="toggle-thumb"></span>
             </label>
           </div>
           <div id="lanInfo" style="display:none; margin-top:8px; padding:8px 12px; background:var(--surface); border-radius:6px; font-size:12px; color:var(--text-dim);">
