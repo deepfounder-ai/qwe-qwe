@@ -175,7 +175,8 @@ async def setup_save(request: Request):
 @app.get("/api/network")
 async def network_status():
     """Get network access status."""
-    lan = db.kv_get("network:lan_access") == "1"
+    lan_val = db.kv_get("network:lan_access")
+    lan = lan_val != "0"
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -559,8 +560,9 @@ def start(host: str = "0.0.0.0", port: int = 7860):
     _current_port = port
     import uvicorn
 
-    # Check LAN access setting
-    lan = db.kv_get("network:lan_access") == "1"
+    # Check LAN access setting (default: on for backward compat)
+    lan_val = db.kv_get("network:lan_access")
+    lan = lan_val != "0"  # default on, only off if explicitly "0"
     actual_host = "0.0.0.0" if lan else "127.0.0.1"
     # CLI flag overrides
     if host != "0.0.0.0":
