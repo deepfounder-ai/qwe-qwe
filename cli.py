@@ -508,23 +508,16 @@ def _first_run_setup():
     """Interactive setup on first launch — city, name, language, soul."""
     console.print("\n  [bold yellow]⚡ Welcome to qwe-qwe! Let's set up.[/]\n")
 
-    # 1. City / timezone
-    console.print("  [yellow]🌍 What city are you in?[/]")
+    # 1. Auto-detect timezone
     try:
-        city = input("  City: ").strip().lower()
-        offset = _CITY_TZ.get(city)
-        if offset is None:
-            for c, o in _CITY_TZ.items():
-                if city in c or c in city:
-                    offset = o
-                    break
-        if offset is None:
-            console.print(f"  [dim]Don't know '{city}', defaulting to UTC.[/]")
-            offset = 0
+        import time as _time
+        offset = -(_time.timezone // 3600) if _time.daylight == 0 else -(_time.altzone // 3600)
         config.TZ_OFFSET = offset
         db.kv_set("timezone", str(offset))
-        db.kv_set("timezone_city", city)
-    except (ValueError, EOFError):
+        tz_name = _time.tzname[0]
+        db.kv_set("timezone_name", tz_name)
+        console.print(f"  [green]✓[/] Timezone: UTC{'+' if offset >= 0 else ''}{offset} ({tz_name})")
+    except Exception:
         config.TZ_OFFSET = 0
 
     # 2. User's name
