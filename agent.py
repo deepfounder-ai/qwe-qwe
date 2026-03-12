@@ -136,8 +136,25 @@ def _maybe_compact(thread_id: str | None = None):
         _log.error("compaction failed", exc_info=True)
 
 
+def _get_thread_model(tid: str | None) -> str | None:
+    """Get thread-specific model override, if any."""
+    actual_tid = tid or threads.get_active_id()
+    t = threads.get(actual_tid)
+    if t and t.get("meta", {}).get("model"):
+        return t["meta"]["model"]
+    return None
+
+
 def run(user_input: str, thread_id: str | None = None) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response."""
+    # Check thread-specific model override
+    thread_model = _get_thread_model(thread_id)
+    if thread_model:
+        _original_model = providers.get_model()
+        providers.set_model(thread_model)
+    else:
+        _original_model = None
+
     client = providers.get_client()
     result = TurnResult()
     turn_start = time.time()
@@ -341,9 +358,13 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
                      est_tokens=est_tokens, context_hits=result.auto_context_hits,
                      thread=tid or "active")
 
+        if _original_model:
+            providers.set_model(_original_model)
         return result
 
     _log.warning(f"max tool rounds ({config.MAX_TOOL_ROUNDS}) exhausted")
     result.reply = "I've used all my tool rounds for this turn."
     db.save_message("assistant", result.reply, thread_id=tid)
+    if _original_model:
+        providers.set_model(_original_model)
     return result

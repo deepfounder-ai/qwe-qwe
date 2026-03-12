@@ -102,7 +102,7 @@ def list_all(include_archived: bool = False) -> list[dict]:
     """List all threads, sorted by last activity."""
     _ensure_table()
     conn = db._get_conn()
-    q = "SELECT id, name, created_at, updated_at, archived FROM threads"
+    q = "SELECT id, name, created_at, updated_at, archived, meta FROM threads"
     if not include_archived:
         q += " WHERE archived=0"
     q += " ORDER BY CASE WHEN id='default' THEN 0 ELSE 1 END, updated_at DESC"
@@ -110,7 +110,7 @@ def list_all(include_archived: bool = False) -> list[dict]:
 
     result = []
     active = get_active_id()
-    for tid, name, created, updated, archived in rows:
+    for tid, name, created, updated, archived, meta_raw in rows:
         msg_count = conn.execute(
             "SELECT COUNT(*) FROM messages WHERE thread_id=?", (tid,)
         ).fetchone()[0]
@@ -125,7 +125,7 @@ def list_all(include_archived: bool = False) -> list[dict]:
         result.append({
             "id": tid, "name": name, "created_at": created, "updated_at": updated,
             "archived": bool(archived), "messages": msg_count, "preview": preview or "",
-            "active": tid == active,
+            "active": tid == active, "meta": json.loads(meta_raw or "{}"),
         })
     return result
 

@@ -984,7 +984,12 @@ async function loadSettingsThreads(includeArchived) {
     row.innerHTML = `
       <div class="thread-info">
         <div class="thread-name">${t.name} ${t.archived ? '<span style="color:var(--text-dim)">(archived)</span>' : ''}</div>
-        <div class="thread-meta">${t.messages} msgs (${t.user_messages || 0} you · ${t.assistant_messages || 0} agent · ${t.tool_calls || 0} tools) · ~${(t.est_tokens || 0).toLocaleString()} tokens · ${date}</div>
+        <div class="thread-meta">
+          ${t.messages} msgs (${t.user_messages || 0} you · ${t.assistant_messages || 0} agent · ${t.tool_calls || 0} tools) · ~${(t.est_tokens || 0).toLocaleString()} tokens · ${date}
+          <span style="margin-left:8px;color:var(--accent);font-size:11px;" title="Thread model override">
+            <i class="ph ph-brain"></i> <a href="#" onclick="event.preventDefault();setThreadModel('${t.id}')" style="color:var(--accent);text-decoration:none;">${t.meta?.model || 'default'}</a>
+          </span>
+        </div>
         ${t.preview ? `<div class="thread-preview">${t.preview}</div>` : ''}
       </div>
       <div style="display:flex;gap:6px">
@@ -1005,6 +1010,17 @@ async function loadSettingsThreads(includeArchived) {
   `;
   container.appendChild(summary);
 }
+async function setThreadModel(tid) {
+  // Build model options from known providers
+  const model = prompt('Model for this thread (empty = use default):', '');
+  if (model === null) return;  // cancelled
+  await fetch(`/api/threads/${tid}/model`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({model: model.trim()})
+  });
+  loadSettingsThreads();
+}
+
 async function deleteThread(tid, name) {
   if (!confirm(`Delete "${name}" and all messages?`)) return;
   await fetch(`/api/threads/${tid}`, {method:'DELETE'});

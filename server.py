@@ -426,7 +426,28 @@ async def thread_stats(thread_id: str):
         "created_at": t["created_at"],
         "first_message": first[0] if first else None,
         "last_message": last[0] if last else None,
+        "model": t.get("meta", {}).get("model"),
     }
+
+
+@app.post("/api/threads/{thread_id}/model")
+async def set_thread_model(thread_id: str, request: Request):
+    """Set a model override for a specific thread."""
+    req = await request.json()
+    model = req.get("model", "")
+    t = threads.get(thread_id)
+    if not t:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    meta = t.get("meta", {})
+    if model:
+        meta["model"] = model
+    else:
+        meta.pop("model", None)  # clear override
+    conn = db._get_conn()
+    import json as _j
+    conn.execute("UPDATE threads SET meta=? WHERE id=?", (_j.dumps(meta), thread_id))
+    conn.commit()
+    return {"ok": True, "model": model or None}
 
 
 @app.get("/api/threads/active")
