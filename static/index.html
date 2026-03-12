@@ -564,6 +564,98 @@ body {
   </div>
 </div>
 
+<!-- Onboarding modal -->
+<div id="onboardingOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:9999; display:none; align-items:center; justify-content:center;">
+  <div style="background:var(--bg); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:420px; width:90%; font-family:var(--sans);">
+    <div style="text-align:center; margin-bottom:24px;">
+      <img src="/static/logo.png" alt="qwe-qwe" style="height:60px; margin-bottom:12px;">
+      <h2 style="margin:0; color:var(--accent); font-family:var(--mono);">Welcome to qwe-qwe</h2>
+      <p style="margin:8px 0 0; color:var(--text-dim); font-size:13px;">Let's get you set up in 30 seconds</p>
+    </div>
+    <div id="onboardStep1" class="ob-step">
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🌍 Your city</label>
+      <input id="obCity" placeholder="e.g. Buenos Aires" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">👤 Your name</label>
+      <input id="obName" placeholder="e.g. Kir" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🤖 Agent name</label>
+      <input id="obAgent" placeholder="e.g. Jarvis" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;">🗣 Language</label>
+      <input id="obLang" placeholder="e.g. English, Русский" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 16px; box-sizing:border-box;">
+      <button onclick="obNext()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);">Next →</button>
+    </div>
+    <div id="onboardStep2" class="ob-step" style="display:none;">
+      <p style="color:var(--text-dim); font-size:13px; margin:0 0 16px;">Personality sliders (0–10, drag to adjust)</p>
+      <div id="obTraits"></div>
+      <button onclick="obFinish()" style="width:100%; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; margin-top:16px; font-family:var(--sans);">⚡ Start chatting</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Onboarding ──
+const OB_TRAITS = [
+  {key:'humor', label:'😄 Humor', lo:'serious', hi:'funny'},
+  {key:'honesty', label:'💎 Honesty', lo:'diplomatic', hi:'direct'},
+  {key:'brevity', label:'✂️ Brevity', lo:'verbose', hi:'concise'},
+  {key:'formality', label:'🎩 Formality', lo:'casual', hi:'formal'},
+  {key:'creativity', label:'🎨 Creativity', lo:'practical', hi:'wild'},
+];
+
+async function checkOnboarding() {
+  try {
+    const r = await fetch('/api/setup');
+    const d = await r.json();
+    if (!d.complete) showOnboarding();
+  } catch(e) {}
+}
+
+function showOnboarding() {
+  const overlay = document.getElementById('onboardingOverlay');
+  overlay.style.display = 'flex';
+  // Build trait sliders
+  const container = document.getElementById('obTraits');
+  container.innerHTML = OB_TRAITS.map(t => `
+    <div style="margin-bottom:14px;">
+      <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:4px;">
+        <span>${t.label}</span><span id="obVal_${t.key}" style="color:var(--accent);">5</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-dim);">
+        <span>${t.lo}</span>
+        <input type="range" min="0" max="10" value="5" id="obSlider_${t.key}"
+          oninput="document.getElementById('obVal_${t.key}').textContent=this.value"
+          style="flex:1; accent-color:var(--accent);">
+        <span>${t.hi}</span>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('obCity').focus();
+}
+
+function obNext() {
+  document.getElementById('onboardStep1').style.display = 'none';
+  document.getElementById('onboardStep2').style.display = 'block';
+}
+
+async function obFinish() {
+  const traits = {};
+  OB_TRAITS.forEach(t => {
+    traits[t.key] = parseInt(document.getElementById('obSlider_' + t.key).value);
+  });
+  const body = {
+    city: document.getElementById('obCity').value,
+    user_name: document.getElementById('obName').value,
+    agent_name: document.getElementById('obAgent').value,
+    language: document.getElementById('obLang').value,
+    traits
+  };
+  try {
+    await fetch('/api/setup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  } catch(e) {}
+  document.getElementById('onboardingOverlay').style.display = 'none';
+  loadStatus();
+}
+</script>
+
 <script>
 // ── State ──
 let ws = null, reconnectTimer = null, activeThreadId = null, threadsList = [];
@@ -1127,6 +1219,7 @@ function cycleThread(dir) {
 }
 
 // ── Init ──
+checkOnboarding();
 connect(); input.focus(); loadThinkingState();
 </script>
 </body>

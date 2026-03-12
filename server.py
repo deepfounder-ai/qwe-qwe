@@ -115,6 +115,61 @@ async def status():
     }
 
 
+@app.get("/api/setup")
+async def setup_status():
+    """Check if first-run setup is complete."""
+    return {"complete": bool(db.kv_get("setup_complete"))}
+
+
+@app.post("/api/setup")
+async def setup_save(req: dict = {}):
+    """Save first-run onboarding data."""
+    from fastapi import Request
+    import json as _json
+
+    if req.get("city"):
+        city = req["city"].strip().lower()
+        # Timezone lookup (same as CLI)
+        _CITY_TZ = {
+            "moscow": 3, "london": 0, "berlin": 1, "paris": 1, "tokyo": 9,
+            "new york": -5, "los angeles": -8, "chicago": -6, "dubai": 4,
+            "singapore": 8, "sydney": 10, "hong kong": 8, "mumbai": 5,
+            "istanbul": 3, "buenos aires": -3, "são paulo": -3, "sao paulo": -3,
+            "toronto": -5, "vancouver": -8, "amsterdam": 1, "zurich": 1,
+            "seoul": 9, "beijing": 8, "bangkok": 7, "jakarta": 7, "taipei": 8,
+            "lisbon": 0, "madrid": 1, "rome": 1, "vienna": 1, "prague": 1,
+            "warsaw": 1, "stockholm": 1, "oslo": 1, "helsinki": 2, "athens": 2,
+            "cairo": 2, "nairobi": 3, "lagos": 1, "johannesburg": 2,
+            "mexico city": -6, "bogota": -5, "lima": -5, "santiago": -4,
+            "denver": -7, "phoenix": -7, "dallas": -6, "miami": -5,
+            "seattle": -8, "san francisco": -8, "boston": -5, "atlanta": -5,
+        }
+        offset = _CITY_TZ.get(city)
+        if offset is None:
+            for c, o in _CITY_TZ.items():
+                if city in c or c in city:
+                    offset = o
+                    break
+        config.TZ_OFFSET = offset or 0
+        db.kv_set("timezone", str(offset or 0))
+        db.kv_set("timezone_city", city)
+
+    if req.get("user_name"):
+        db.kv_set("user_name", req["user_name"].strip())
+    if req.get("agent_name"):
+        db.kv_set("soul:name", req["agent_name"].strip())
+    if req.get("language"):
+        db.kv_set("soul:language", req["language"].strip())
+
+    traits = req.get("traits", {})
+    for key, val in traits.items():
+        if isinstance(val, (int, float)):
+            db.kv_set(f"soul:{key}", str(max(0, min(10, int(val)))))
+
+    db.kv_set("setup_complete", "1")
+    return {"ok": True}
+
+
 @app.get("/api/history")
 async def history(limit: int = 20, thread_id: str | None = None):
     """Recent conversation history for a thread."""
