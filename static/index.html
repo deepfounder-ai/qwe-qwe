@@ -953,14 +953,18 @@ async function loadSettingsThreads(includeArchived) {
   const threads = await res.json();
   const container = document.getElementById('threadList');
   container.innerHTML = '';
+  let totalMsgs = 0, totalTokens = 0, totalTools = 0;
   for (const t of threads) {
+    totalMsgs += t.messages || 0;
+    totalTokens += t.est_tokens || 0;
+    totalTools += t.tool_calls || 0;
     const row = document.createElement('div');
     row.className = `thread-row${t.active ? ' active-thread' : ''}`;
     const date = new Date(t.created_at * 1000).toLocaleDateString();
     row.innerHTML = `
       <div class="thread-info">
         <div class="thread-name">${t.name} ${t.archived ? '<span style="color:var(--text-dim)">(archived)</span>' : ''}</div>
-        <div class="thread-meta">${t.id} · ${t.messages} msgs · ${date}</div>
+        <div class="thread-meta">${t.messages} msgs (${t.user_messages || 0} you · ${t.assistant_messages || 0} agent · ${t.tool_calls || 0} tools) · ~${(t.est_tokens || 0).toLocaleString()} tokens · ${date}</div>
         ${t.preview ? `<div class="thread-preview">${t.preview}</div>` : ''}
       </div>
       <div style="display:flex;gap:6px">
@@ -970,6 +974,16 @@ async function loadSettingsThreads(includeArchived) {
     `;
     container.appendChild(row);
   }
+  // Summary row
+  const summary = document.createElement('div');
+  summary.style.cssText = 'padding:12px 16px; border-top:1px solid var(--border); margin-top:8px; font-size:13px; color:var(--text-dim); display:flex; gap:16px;';
+  summary.innerHTML = `
+    <span><i class="ph ph-chats-circle"></i> ${totalMsgs} total messages</span>
+    <span><i class="ph ph-lightning"></i> ~${totalTokens.toLocaleString()} tokens</span>
+    <span><i class="ph ph-wrench"></i> ${totalTools} tool calls</span>
+    <span><i class="ph ph-stack"></i> ${threads.length} threads</span>
+  `;
+  container.appendChild(summary);
 }
 async function deleteThread(tid, name) {
   if (!confirm(`Delete "${name}" and all messages?`)) return;

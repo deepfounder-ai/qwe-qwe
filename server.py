@@ -350,8 +350,17 @@ async def toggle_skill(name: str, data: dict):
 
 @app.get("/api/threads")
 async def list_threads(include_archived: bool = False):
-    """List all threads."""
-    return threads.list_all(include_archived=include_archived)
+    """List all threads with stats."""
+    all_threads = threads.list_all(include_archived=include_archived)
+    conn = db._get_conn()
+    for t in all_threads:
+        tid = t["id"]
+        row = conn.execute("SELECT COALESCE(SUM(LENGTH(content)),0) FROM messages WHERE thread_id=?", (tid,)).fetchone()
+        t["est_tokens"] = row[0] // 4 if row else 0
+        t["user_messages"] = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='user'", (tid,)).fetchone()[0]
+        t["assistant_messages"] = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='assistant'", (tid,)).fetchone()[0]
+        t["tool_calls"] = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='tool'", (tid,)).fetchone()[0]
+    return all_threads
 
 
 @app.post("/api/threads")
