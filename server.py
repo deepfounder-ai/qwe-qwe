@@ -352,6 +352,10 @@ async def create_thread(data: dict):
     """Create a new thread."""
     name = data.get("name", "New Thread")
     t = threads.create(name, meta=data.get("meta"))
+    # Seed message — branch from existing conversation
+    seed = data.get("seed_message")
+    if seed:
+        db.save_message("assistant", seed, thread_id=t["id"])
     return t
 
 

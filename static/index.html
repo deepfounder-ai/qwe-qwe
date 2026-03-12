@@ -130,7 +130,11 @@ body {
 }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
 .msg.user { background: var(--user-bg); align-self: flex-end; border-bottom-right-radius: 4px; border: 1px solid #2a2a4e; }
-.msg.assistant { background: var(--agent-bg); align-self: flex-start; border-bottom-left-radius: 4px; border: 1px solid var(--border); }
+.msg.assistant { background: var(--agent-bg); align-self: flex-start; border-bottom-left-radius: 4px; border: 1px solid var(--border); position: relative; }
+.msg-actions { position: absolute; top: 6px; right: 8px; opacity: 0; transition: opacity 0.15s; display: flex; gap: 4px; }
+.msg.assistant:hover .msg-actions { opacity: 1; }
+.msg-action-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); cursor: pointer; padding: 2px 6px; font-size: 12px; line-height: 1; }
+.msg-action-btn:hover { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
 .msg.error { background: #2d1515; border: 1px solid var(--error); align-self: center; color: var(--error); font-size: 13px; }
 .msg.status { align-self: center; color: var(--text-dim); font-size: 12px; padding: 4px 12px; background: transparent; font-family: var(--mono); }
 .msg-thinking {
@@ -1132,6 +1136,23 @@ async function switchThread(tid) {
   activeThreadId = tid;
   renderTabs(); loadHistory(tid);
 }
+async function branchFromMessage(msgText) {
+  const preview = msgText.substring(0, 50).replace(/[^a-zA-Zа-яА-Я0-9 ]/g, '').trim();
+  const name = prompt('Branch thread name:', preview || 'Branch');
+  if (!name) return;
+  const res = await fetch('/api/threads', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, seed_message: msgText})
+  });
+  const t = await res.json();
+  await fetch(`/api/threads/${t.id}/switch`, {method: 'POST'});
+  activeThreadId = t.id;
+  await loadThreads();
+  showPage('chat');
+  input.focus();
+}
+
 async function createThread() {
   const name = prompt('Thread name:', `Thread ${threadsList.length+1}`);
   if (!name) return;
@@ -1170,6 +1191,18 @@ function addMessage(role, text, meta) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   div.innerHTML = renderMarkdown(text);
+  if (role === 'assistant') {
+    // Branch button
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    const branchBtn = document.createElement('button');
+    branchBtn.className = 'msg-action-btn';
+    branchBtn.title = 'Branch into new thread';
+    branchBtn.textContent = '🌿';
+    branchBtn.onclick = () => branchFromMessage(text);
+    actions.appendChild(branchBtn);
+    div.appendChild(actions);
+  }
   if (meta && role === 'assistant') {
     // Thinking block (collapsible) — only if model actually produced thinking
     if (meta.thinking && meta.thinking.trim()) {
