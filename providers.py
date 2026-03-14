@@ -147,6 +147,68 @@ def get_client() -> OpenAI:
     return _client
 
 
+def ensure_model_loaded() -> bool:
+    """For local providers (lmstudio/ollama): check if model is loaded, auto-load if not.
+    
+    Uses LM Studio v1 REST API to check loaded_instances and POST /api/v1/models/load.
+    Returns True if model is ready, False if loading failed.
+    """
+    import requests
+
+    active = get_active_name()
+    if active not in ("lmstudio", "ollama"):
+        return True  # cloud providers always "loaded"
+
+    p = get_provider()
+    base_url = p.get("url", "").rstrip("/")
+    if not base_url:
+        return False
+
+    # Strip /v1 suffix to get base API URL
+    api_base = base_url.replace("/v1", "")
+    model = get_model()
+
+    # Check if model is actually loaded via v1 API (has loaded_instances)
+    try:
+        r = requests.get(f"{api_base}/api/v1/models", timeout=5)
+        if r.ok:
+            models = r.json().get("models", [])
+            for m in models:
+                if m.get("key") == model and m.get("loaded_instances"):
+                    return True  # model is loaded and has active instances
+            _log.info(f"model '{model}' not loaded in memory, auto-loading...")
+    except Exception as e:
+        # v1 API not available — fall back to /v1/models check
+        try:
+            r = requests.get(f"{base_url}/models", timeout=5)
+            if r.ok:
+                ids = [m.get("id") for m in r.json().get("data", [])]
+                if model in ids:
+                    return True
+        except Exception:
+            pass
+        _log.warning(f"failed to check models: {e}")
+        return False
+
+    # Try to load via LM Studio v1 API
+    try:
+        r = requests.post(
+            f"{api_base}/api/v1/models/load",
+            json={"model": model},
+            timeout=120,  # loading can take a while
+        )
+        if r.ok:
+            load_time = r.json().get("load_time_seconds", "?")
+            _log.info(f"model '{model}' auto-loaded in {load_time}s")
+            return True
+        else:
+            _log.warning(f"auto-load failed: {r.status_code} {r.text[:200]}")
+            return False
+    except Exception as e:
+        _log.error(f"auto-load error: {e}")
+        return False
+
+
 def _invalidate():
     """Force client recreation on next call."""
     global _client, _client_key

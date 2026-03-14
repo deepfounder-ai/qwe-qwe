@@ -193,6 +193,9 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
 
         all_tools = tools.get_all_tools()
 
+        # Ensure model is loaded (auto-load for local providers)
+        providers.ensure_model_loaded()
+
         # Stream the response
         # Check thinking toggle
         extra = {}
