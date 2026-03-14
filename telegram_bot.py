@@ -403,8 +403,14 @@ def _handle_update(update: dict, token: str, bot_username: str):
                 _log.info(f"wrong code from @{username} ({user_id}), attempt {attempts}/{MAX_ATTEMPTS}")
             return
 
-    # ── Owner check ──
+    # ── Built-in commands (work for owner in any chat) ──
     owner_id = get_owner_id()
+    if text.strip() == "/chatid" and user_id == owner_id:
+        info = f"📋 Chat ID: `{chat_id}`\nType: {chat_type}"
+        if topic_id:
+            info += f"\nTopic ID: `{topic_id}`"
+        send_message(chat_id, info, token, topic_id=topic_id)
+        return
 
     # ── Private chat ──
     if chat_type == "private":
