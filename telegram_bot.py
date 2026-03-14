@@ -5,8 +5,15 @@ Uses long polling (no webhook needed). Works behind NAT, WSL, etc.
 Setup:
 1. Create bot via @BotFather → get token
 2. Set token via CLI (`/telegram token <TOKEN>`) or Settings → System
-3. Bot sends verification code → enter it to confirm ownership
-4. Only verified owner can chat; others are ignored
+3. Generate activation code in web UI or CLI
+4. Send the code to the bot in Telegram
+5. If correct → you're the verified owner
+6. If wrong → 3 attempts max, then permanent ban by Telegram user ID
+
+Security:
+- Activation codes are one-time, 6 digits, TTL 10 minutes
+- After 3 failed attempts, Telegram user ID is permanently banned
+- Only verified owner can chat; others are ignored
 
 Features:
 - Private chat with owner
@@ -105,32 +112,94 @@ def set_topics_enabled(enabled: bool):
 
 # ── Verification ──
 
-def generate_verification_code() -> str:
-    """Generate a 6-char verification code and send it to the bot chat."""
+ACTIVATION_TTL = 600  # 10 minutes
+MAX_ATTEMPTS = 3      # permanent ban after this
+
+
+def generate_activation_code() -> str:
+    """Generate a 6-digit activation code (called from web UI or CLI).
+    
+    Returns the code. User must send it to the bot in Telegram.
+    Code expires after 10 minutes.
+    """
     global _pending_code
-    _pending_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    _pending_code = ''.join(random.choices(string.digits, k=6))
     db.kv_set("telegram:pending_code", _pending_code)
-    _log.info(f"verification code generated: {_pending_code}")
+    db.kv_set("telegram:code_created_at", str(time.time()))
+    _log.info(f"activation code generated: {_pending_code}")
     return _pending_code
 
 
 def get_pending_code() -> str | None:
+    """Get pending code if it exists and hasn't expired."""
     global _pending_code
-    if _pending_code:
-        return _pending_code
-    return db.kv_get("telegram:pending_code")
+    code = _pending_code or db.kv_get("telegram:pending_code")
+    if not code:
+        return None
+    # Check TTL
+    created = db.kv_get("telegram:code_created_at")
+    if created:
+        age = time.time() - float(created)
+        if age > ACTIVATION_TTL:
+            _log.info(f"activation code expired (age={int(age)}s)")
+            clear_verification()
+            return None
+    return code
 
 
 def clear_verification():
+    """Clear pending activation code."""
     global _pending_code
     _pending_code = None
     db.kv_set("telegram:pending_code", "")
+    db.kv_set("telegram:code_created_at", "")
 
 
 def verify_code(code: str) -> bool:
-    """Check if the provided code matches."""
+    """Check if the provided code matches (and hasn't expired)."""
     pending = get_pending_code()
-    return pending and code.strip().upper() == pending.upper()
+    return bool(pending and code.strip() == pending)
+
+
+# ── Ban system ──
+
+def _ban_key(user_id: int) -> str:
+    return f"telegram:banned:{user_id}"
+
+
+def _attempts_key(user_id: int) -> str:
+    return f"telegram:attempts:{user_id}"
+
+
+def is_banned(user_id: int) -> bool:
+    """Check if a Telegram user ID is permanently banned."""
+    return db.kv_get(_ban_key(user_id)) == "1"
+
+
+def ban_user(user_id: int):
+    """Permanently ban a Telegram user ID."""
+    db.kv_set(_ban_key(user_id), "1")
+    _log.warning(f"permanently banned user {user_id}")
+
+
+def get_attempts(user_id: int) -> int:
+    """Get number of failed activation attempts for a user."""
+    raw = db.kv_get(_attempts_key(user_id))
+    return int(raw) if raw else 0
+
+
+def increment_attempts(user_id: int) -> int:
+    """Increment failed attempts. Returns new count. Bans if >= MAX_ATTEMPTS."""
+    count = get_attempts(user_id) + 1
+    db.kv_set(_attempts_key(user_id), str(count))
+    if count >= MAX_ATTEMPTS:
+        ban_user(user_id)
+    return count
+
+
+def clear_attempts(user_id: int):
+    """Clear failed attempt counter (after successful verification)."""
+    db.kv_set(_attempts_key(user_id), "0")
 
 
 # ── Topic ↔ Thread mapping ──
@@ -289,24 +358,49 @@ def _handle_update(update: dict, token: str, bot_username: str):
 
     # ── Verification flow ──
     if not is_verified():
+        # Check if user is banned
+        if is_banned(user_id):
+            _log.warning(f"banned user {user_id} (@{username}) tried to message")
+            send_message(chat_id, "🚫 Access denied.", token)
+            return
+
         pending = get_pending_code()
-        if pending and text.strip().upper() == pending.upper():
+        if not pending:
+            # No activation code generated yet — tell user to generate one
+            send_message(chat_id,
+                "🔐 Activation required.\n\n"
+                "Generate an activation code in qwe-qwe:\n"
+                "• Web UI → Settings → Telegram\n"
+                "• CLI → `/telegram activate`\n\n"
+                "Then send the 6-digit code here.",
+                token)
+            _log.info(f"no pending code, told @{username} ({user_id}) to generate one")
+            return
+
+        if text.strip() == pending:
             # Code matches — verify this user as owner
             set_owner_id(user_id)
             db.kv_set("telegram:owner_username", username)
             clear_verification()
-            send_message(chat_id, f"✅ Verified! You are now the owner.\n\nI'll only respond to you from now on.", token)
+            clear_attempts(user_id)
+            send_message(chat_id,
+                "✅ Verified! You are now the owner.\n\n"
+                "I'll only respond to you from now on.",
+                token)
             _log.info(f"owner verified: @{username} ({user_id})")
             return
-        elif pending:
-            # Wrong code
-            send_message(chat_id, "🔐 Enter the verification code shown in qwe-qwe to confirm ownership.", token)
-            return
         else:
-            # No code generated yet — show in bot
-            code = generate_verification_code()
-            send_message(chat_id, f"🔐 Verification required!\n\nEnter this code in qwe-qwe (web UI or CLI):\n\n`{code}`\n\nOr type the code here after entering it.", token)
-            _log.info(f"sent verification code to @{username} ({user_id})")
+            # Wrong code
+            attempts = increment_attempts(user_id)
+            remaining = MAX_ATTEMPTS - attempts
+            if remaining <= 0:
+                send_message(chat_id, "🚫 Too many failed attempts. Access permanently denied.", token)
+                _log.warning(f"user {user_id} (@{username}) banned after {MAX_ATTEMPTS} failed attempts")
+            else:
+                send_message(chat_id,
+                    f"❌ Wrong code. {remaining} attempt{'s' if remaining != 1 else ''} remaining.",
+                    token)
+                _log.info(f"wrong code from @{username} ({user_id}), attempt {attempts}/{MAX_ATTEMPTS}")
             return
 
     # ── Owner check ──
@@ -388,6 +482,7 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
 
 def status() -> dict:
     """Get bot status."""
+    pending = get_pending_code()
     return {
         "enabled": is_enabled(),
         "running": _running,
@@ -396,7 +491,7 @@ def status() -> dict:
         "username": db.kv_get("telegram:bot_username") or "",
         "owner_id": get_owner_id(),
         "owner_username": get_owner_username(),
-        "pending_code": get_pending_code() or "",
+        "has_pending_code": bool(pending),
         "allowed_groups": get_allowed_groups(),
         "group_mode": get_group_mode(),
         "topics_enabled": is_topics_enabled(),

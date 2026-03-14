@@ -155,6 +155,46 @@ EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
 └── pyproject.toml  # Package config
 ```
 
+## Telegram Bot
+
+Connect your agent to Telegram for mobile access.
+
+### Setup
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) → copy the token
+2. Set the token:
+   - **CLI:** `/telegram token <TOKEN>`
+   - **Web:** Settings → Telegram → paste token
+3. Start the bot: `/telegram start`
+4. Generate activation code: `/telegram activate` (or click "Generate Code" in web UI)
+5. Open your bot in Telegram and send the 6-digit code
+6. ✅ Verified — you're the owner
+
+### Security
+
+- Activation codes are **one-time, 6 digits, expire in 10 minutes**
+- **3 wrong attempts → permanent ban** for that Telegram user ID
+- Only the verified owner can chat with the bot
+- Others are silently ignored
+
+### Features
+
+- Private chat with owner
+- Group support (mention-only or all messages)
+- Supergroup topics → qwe-qwe threads mapping
+- Long messages auto-split (4000 char chunks)
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `/telegram` | Show status |
+| `/telegram token <TOKEN>` | Set bot token |
+| `/telegram start` | Start polling |
+| `/telegram stop` | Stop polling |
+| `/telegram activate` | Generate activation code |
+| `/telegram reset` | Reset owner verification |
+
 ## License
 
 MIT

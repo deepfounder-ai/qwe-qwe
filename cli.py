@@ -678,9 +678,9 @@ def handle_telegram(args: str):
         console.print(f"  Groups:   {s['allowed_groups'] or 'any'}")
         console.print(f"  Mode:     {s['group_mode']}")
         console.print(f"  Topics:   {'on' if s['topics_enabled'] else 'off'}")
-        if s.get('pending_code'):
-            console.print(f"\n  [yellow]Pending code: {s['pending_code']}[/]")
-        console.print(f"\n  [dim]Commands: /telegram token <TOKEN> | start | stop | verify <CODE> | reset[/]\n")
+        if s.get('has_pending_code'):
+            console.print(f"\n  [yellow]⏳ Activation code pending — send it to the bot in Telegram[/]")
+        console.print(f"\n  [dim]Commands: /telegram token <TOKEN> | activate | start | stop | reset[/]\n")
         return
 
     if cmd == "token":
@@ -691,10 +691,23 @@ def handle_telegram(args: str):
         me = telegram_bot.get_me(val)
         if me:
             console.print(f"  [green]✓ Token saved — @{me.get('username')}[/]")
-            console.print(f"  [dim]Now send a message to your bot. It will reply with a verification code.[/]")
-            console.print(f"  [dim]Then run: /telegram start[/]")
+            console.print(f"  [dim]Next: /telegram start → /telegram activate[/]")
         else:
             console.print(f"  [red]✗ Invalid token[/]")
+        return
+
+    if cmd == "activate":
+        if telegram_bot.is_verified():
+            console.print(f"  [yellow]Already verified as @{telegram_bot.get_owner_username()}[/]")
+            console.print(f"  [dim]Run /telegram reset first to re-verify[/]")
+            return
+        if not telegram_bot.get_token():
+            console.print(f"  [red]Set bot token first: /telegram token <TOKEN>[/]")
+            return
+        code = telegram_bot.generate_activation_code()
+        console.print(f"\n  [bold green]🔑 Activation code: {code}[/]")
+        console.print(f"  [dim]Send this code to your bot in Telegram within 10 minutes.[/]")
+        console.print(f"  [dim]⚠️  3 wrong attempts = permanent ban for that Telegram user.[/]\n")
         return
 
     if cmd == "start":
@@ -703,28 +716,13 @@ def handle_telegram(args: str):
         telegram_bot.start(on_message=_telegram_handler)
         console.print(f"  [green]✓ Bot started[/]")
         if not telegram_bot.is_verified():
-            console.print(f"  [yellow]Send a message to your bot to get verification code[/]")
+            console.print(f"  [yellow]Run /telegram activate to generate an activation code[/]")
         return
 
     if cmd == "stop":
         telegram_bot.stop()
         telegram_bot.set_enabled(False)
         console.print(f"  [yellow]✓ Bot stopped[/]")
-        return
-
-    if cmd == "verify":
-        if not val:
-            code = telegram_bot.get_pending_code()
-            if code:
-                console.print(f"  [yellow]Pending code: {code}[/]")
-                console.print(f"  [dim]Enter it in Telegram chat with the bot[/]")
-            else:
-                console.print(f"  [dim]No pending code. Send a message to the bot first.[/]")
-            return
-        if telegram_bot.verify_code(val):
-            console.print(f"  [green]✓ Verified![/]")
-        else:
-            console.print(f"  [red]✗ Wrong code[/]")
         return
 
     if cmd == "reset":

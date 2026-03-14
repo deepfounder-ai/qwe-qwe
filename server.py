@@ -628,13 +628,26 @@ async def telegram_toggle(request: Request):
     return {"enabled": enabled, "running": telegram_bot._running}
 
 
+@app.post("/api/telegram/activate")
+async def telegram_activate():
+    """Generate a new activation code. User sends this code to the bot in Telegram."""
+    if telegram_bot.is_verified():
+        return JSONResponse({"error": "Already verified. Reset first to re-verify."}, status_code=400)
+    code = telegram_bot.generate_activation_code()
+    return {
+        "ok": True,
+        "code": code,
+        "ttl_seconds": telegram_bot.ACTIVATION_TTL,
+        "message": f"Send this code to the bot in Telegram: {code}"
+    }
+
+
 @app.post("/api/telegram/verify")
 async def telegram_verify(request: Request):
-    """Verify ownership with the code shown in Telegram."""
+    """Verify ownership with the code (legacy endpoint, redirects to activate)."""
     req = await request.json()
     code = req.get("code", "")
     if telegram_bot.verify_code(code):
-        # Need to get the user who sent the code — they already verified via bot
         return {"ok": True, "verified": True}
     return JSONResponse({"error": "Invalid code"}, status_code=400)
 
