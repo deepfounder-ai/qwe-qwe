@@ -492,6 +492,7 @@ def status() -> dict:
         "owner_id": get_owner_id(),
         "owner_username": get_owner_username(),
         "has_pending_code": bool(pending),
+        "pending_code": pending or "",
         "allowed_groups": get_allowed_groups(),
         "group_mode": get_group_mode(),
         "topics_enabled": is_topics_enabled(),

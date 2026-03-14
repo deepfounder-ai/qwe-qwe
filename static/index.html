@@ -1239,7 +1239,8 @@ async function loadTelegramStatus() {
     verifySection.style.display = (s.has_token && !s.verified) ? 'block' : 'none';
     const pendingEl = document.getElementById('tgPendingCode');
     const activateBtn = document.getElementById('tgActivateBtn');
-    if (s.has_pending_code) {
+    if (s.has_pending_code && s.pending_code) {
+      document.getElementById('tgCodeDisplay').textContent = s.pending_code;
       pendingEl.style.display = 'block';
       if (activateBtn) activateBtn.style.display = 'none';
     } else {
