@@ -184,10 +184,28 @@ def switch(name: str) -> str:
     config.LLM_BASE_URL = p["url"]
     config.LLM_API_KEY = p["key"]
 
-    # If provider has models and no model is set, use first one
-    if p.get("models"):
-        config.LLM_MODEL = p["models"][0]
-        db.kv_set(_db_key("model"), p["models"][0])
+    # Always reset model when switching providers.
+    # Current model may not exist on the new provider.
+    current_model = get_model()
+    provider_models = p.get("models", [])
+
+    if provider_models and current_model not in provider_models:
+        # Current model doesn't exist on new provider — pick first available
+        new_model = provider_models[0]
+        config.LLM_MODEL = new_model
+        db.kv_set(_db_key("model"), new_model)
+        _log.info(f"model auto-switched: {current_model} → {new_model} (not available on {name})")
+    elif not provider_models:
+        # No model list (e.g. lmstudio/ollama) — try to discover
+        try:
+            discovered = fetch_models(name)
+            if discovered and current_model not in discovered:
+                new_model = discovered[0]
+                config.LLM_MODEL = new_model
+                db.kv_set(_db_key("model"), new_model)
+                _log.info(f"model auto-switched: {current_model} → {new_model} (discovered from {name})")
+        except Exception:
+            pass  # can't discover, keep current model
 
     _invalidate()
     _log.info(f"provider switched: {old} → {name} ({p['url']})")
