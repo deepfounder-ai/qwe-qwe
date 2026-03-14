@@ -605,15 +605,21 @@ body {
             </div>
             <p style="color:var(--text-dim); font-size:11px; margin:6px 0 0;"><i class="ph ph-lightbulb"></i> Create a bot via <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent);">@BotFather</a></p>
           </div>
-          <!-- Verification -->
+          <!-- Activation -->
           <div id="tgVerifySection" style="display:none; margin-top:12px; padding:12px; background:var(--surface); border-radius:8px;">
-            <p style="color:var(--accent); font-size:13px; margin:0 0 8px;"><i class="ph ph-shield-check"></i> Verification</p>
-            <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">Send any message to the bot in Telegram. It will reply with a code.</p>
-            <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;"><strong>Reply with that code in Telegram</strong> to verify ownership.</p>
-            <div id="tgPendingCode" style="display:none; margin:8px 0; padding:8px; background:var(--bg); border:1px dashed var(--accent); border-radius:6px; text-align:center;">
-              <span style="color:var(--text-dim); font-size:11px;">Waiting for code in Telegram...</span>
-              <button class="s-btn" onclick="loadTelegramStatus()" style="margin-left:8px; font-size:11px;"><i class="ph ph-arrow-clockwise"></i> Refresh</button>
+            <p style="color:var(--accent); font-size:13px; margin:0 0 8px;"><i class="ph ph-shield-check"></i> Activation</p>
+            <p style="color:var(--text-dim); font-size:12px; margin:0 0 4px;">1. Click <strong>Generate Code</strong> below</p>
+            <p style="color:var(--text-dim); font-size:12px; margin:0 0 4px;">2. Open your bot in Telegram</p>
+            <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">3. Send the 6-digit code to the bot</p>
+            <p style="color:var(--text-dim); font-size:11px; margin:0 0 12px; opacity:0.7;">⚠️ 3 wrong attempts = permanent ban for that Telegram account</p>
+            <div id="tgPendingCode" style="display:none; margin:8px 0; padding:12px; background:var(--bg); border:1px dashed var(--accent); border-radius:6px; text-align:center;">
+              <span id="tgCodeDisplay" style="font-size:24px; font-weight:700; color:var(--accent); letter-spacing:4px; font-family:var(--mono);"></span>
+              <p style="color:var(--text-dim); font-size:11px; margin:8px 0 0;">Send this code to the bot in Telegram. Expires in 10 minutes.</p>
+              <button class="s-btn" onclick="loadTelegramStatus()" style="margin-top:8px; font-size:11px;"><i class="ph ph-arrow-clockwise"></i> Check status</button>
             </div>
+            <button id="tgActivateBtn" class="s-btn" onclick="generateActivationCode()" style="width:100%; padding:8px; font-size:13px; margin-top:4px;">
+              <i class="ph ph-key"></i> Generate Code
+            </button>
           </div>
         </div>
         <!-- Group settings -->
@@ -1228,18 +1234,17 @@ async function loadTelegramStatus() {
       ownerEl.innerHTML = '<span style="color:var(--text-dim);">Not verified</span>';
     }
 
-    // Verify section
+    // Activation section
     const verifySection = document.getElementById('tgVerifySection');
     verifySection.style.display = (s.has_token && !s.verified) ? 'block' : 'none';
     const pendingEl = document.getElementById('tgPendingCode');
-    if (s.pending_code) {
+    const activateBtn = document.getElementById('tgActivateBtn');
+    if (s.has_pending_code) {
       pendingEl.style.display = 'block';
-      pendingEl.innerHTML = `<span style="color:var(--text-dim); font-size:11px;"><i class="ph ph-hourglass"></i> Code sent to Telegram. Reply with it there to verify.</span> <button class="s-btn" onclick="loadTelegramStatus()" style="margin-left:8px; font-size:11px;"><i class="ph ph-arrow-clockwise"></i> Refresh</button>`;
-    } else if (s.has_token && !s.verified) {
-      pendingEl.style.display = 'block';
-      pendingEl.innerHTML = `<span style="color:var(--text-dim); font-size:11px;">Send any message to @${s.username || 'your bot'} in Telegram to start.</span>`;
+      if (activateBtn) activateBtn.style.display = 'none';
     } else {
       pendingEl.style.display = 'none';
+      if (activateBtn) activateBtn.style.display = 'block';
     }
 
     // Group settings (show only if verified)
@@ -1254,6 +1259,30 @@ async function loadTelegramStatus() {
       ).join('') || '<span style="color:var(--text-dim);font-size:12px;">No groups added (bot will respond in any group it\'s in)</span>';
     }
   } catch(e) { console.error('tg status err:', e); }
+}
+
+async function generateActivationCode() {
+  const btn = document.getElementById('tgActivateBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="ph ph-spinner ph-spin"></i> Generating...';
+  try {
+    const res = await fetch('/api/telegram/activate', {method:'POST'});
+    const data = await res.json();
+    if (data.error) {
+      alert(data.error);
+      btn.disabled = false;
+      btn.innerHTML = '<i class="ph ph-key"></i> Generate Code';
+      return;
+    }
+    // Show the code
+    document.getElementById('tgCodeDisplay').textContent = data.code;
+    document.getElementById('tgPendingCode').style.display = 'block';
+    btn.style.display = 'none';
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.innerHTML = '<i class="ph ph-key"></i> Generate Code';
+  }
 }
 
 async function saveTgToken() {
