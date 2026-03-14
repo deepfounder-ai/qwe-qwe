@@ -507,8 +507,28 @@ async def websocket_chat(ws: WebSocket):
 
             _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}")
 
-            # Send "thinking" status
-            await ws.send_json({"type": "status", "text": "thinking..."})
+            # Check if model needs loading
+            loading_msg = None
+            if providers.get_active_name() in ("lmstudio", "ollama"):
+                import requests as _req
+                try:
+                    p = providers.get_provider()
+                    api_base = p.get("url", "").rstrip("/").replace("/v1", "")
+                    model = providers.get_model()
+                    r = _req.get(f"{api_base}/api/v1/models", timeout=5)
+                    if r.ok:
+                        models_data = r.json().get("models", [])
+                        model_loaded = any(
+                            m.get("key") == model and m.get("loaded_instances")
+                            for m in models_data
+                        )
+                        if not model_loaded:
+                            loading_msg = f"Loading model {model}..."
+                except Exception:
+                    pass
+
+            # Send status
+            await ws.send_json({"type": "status", "text": loading_msg or "thinking..."})
 
             try:
                 # Run agent in thread pool (it's blocking)

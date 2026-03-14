@@ -462,6 +462,28 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
               (f" thread={thread_id}" if thread_id else "") +
               f": {text[:100]}")
 
+    # Check if model needs loading (notify user about delay)
+    import providers
+    loading_notified = False
+    if providers.get_active_name() in ("lmstudio", "ollama"):
+        import requests as _req
+        try:
+            p = providers.get_provider()
+            api_base = p.get("url", "").rstrip("/").replace("/v1", "")
+            model = providers.get_model()
+            r = _req.get(f"{api_base}/api/v1/models", timeout=5)
+            if r.ok:
+                models = r.json().get("models", [])
+                model_loaded = any(
+                    m.get("key") == model and m.get("loaded_instances")
+                    for m in models
+                )
+                if not model_loaded:
+                    send_message(chat_id, f"⏳ Loading model `{model}`...", token, topic_id=topic_id)
+                    loading_notified = True
+        except Exception:
+            pass
+
     # Typing indicator
     kwargs = {"chat_id": chat_id, "action": "typing"}
     if topic_id:
