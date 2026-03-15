@@ -41,7 +41,7 @@ The result: a snappy agent that responds in 1-5 seconds on an RTX 4070, fully of
 
 ## Why Small Models
 
-| | Cloud (GPT-4, Claude) | Local (Qwen 9B) |
+| | Cloud (GPT, Claude) | Local (Qwen 9B) |
 |---|---|---|
 | **Latency** | 2-10s network + inference | 1-5s local inference |
 | **Privacy** | Data leaves your machine | Everything stays local |
@@ -160,7 +160,7 @@ The primary target is **local models via LM Studio or Ollama**. Cloud providers 
 |----------|------|-------|
 | **LM Studio** | Local ⭐ | Primary target. Auto-loads models |
 | **Ollama** | Local ⭐ | Standard Ollama API |
-| **OpenAI** | Cloud | GPT-4, etc. |
+| **OpenAI** | Cloud | GPT, etc. |
 | **OpenRouter** | Cloud | Multi-model gateway |
 | **Groq** | Cloud | Fast inference |
 | **Together** | Cloud | Open-source models |
