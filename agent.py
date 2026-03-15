@@ -22,19 +22,43 @@ def _extract_thinking(text: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _auto_context(user_input: str) -> str:
-    """Auto-retrieve relevant memories for the user's message."""
+def _auto_context(user_input: str, thread_id: str | None = None) -> str:
+    """Auto-retrieve relevant memories: thread-scoped first, then global.
+    
+    Strategy:
+    1. Search within current thread (if thread_id provided) — up to 2 results
+    2. Search globally — up to remaining slots
+    3. Deduplicate by content
+    """
     try:
-        results = memory.search(user_input, limit=config.MAX_MEMORY_RESULTS)
-        if not results:
-            return ""
+        seen_texts = set()
         lines = ["[Relevant context from memory:]"]
-        for r in results:
-            if r["score"] > 0.3:  # only include if somewhat relevant
-                lines.append(f"- [{r['tag']}] {r['text']}")
+
+        # Thread-scoped search first (prioritize local context)
+        if thread_id:
+            thread_results = memory.search(
+                user_input, limit=2, thread_id=thread_id
+            )
+            for r in thread_results:
+                if r["score"] > 0.3 and r["text"] not in seen_texts:
+                    tag_info = f"{r['tag']}"
+                    lines.append(f"- [{tag_info}] {r['text']}")
+                    seen_texts.add(r["text"])
+
+        # Global search (fill remaining slots)
+        remaining = config.MAX_MEMORY_RESULTS - (len(lines) - 1)
+        if remaining > 0:
+            global_results = memory.search(user_input, limit=remaining + 2)
+            for r in global_results:
+                if len(lines) - 1 >= config.MAX_MEMORY_RESULTS:
+                    break
+                if r["score"] > 0.3 and r["text"] not in seen_texts:
+                    lines.append(f"- [{r['tag']}] {r['text']}")
+                    seen_texts.add(r["text"])
+
         hits = len(lines) - 1
         if hits > 0:
-            _log.info(f"auto_context: {hits} memories injected")
+            _log.info(f"auto_context: {hits} memories injected (thread={thread_id or 'global'})")
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
@@ -49,8 +73,8 @@ def _build_messages(user_input: str, thread_id: str | None = None) -> list[dict]
     agent_soul = soul.load()
     system_text = soul.to_prompt(agent_soul)
 
-    # Auto-retrieve from Qdrant
-    context = _auto_context(user_input)
+    # Auto-retrieve from Qdrant (thread-scoped + global)
+    context = _auto_context(user_input, thread_id=thread_id)
     if context:
         system_text += "\n\n" + context
 
@@ -224,7 +248,7 @@ def _maybe_compact(thread_id: str | None = None):
             summary = _strip_thinking(resp.choices[0].message.content or "")
 
             if summary and summary.strip().upper() != "SKIP":
-                memory.save(summary, tag="compaction")
+                memory.save(summary, tag="compaction", thread_id=thread_id)
                 _log.info(f"compaction: saved summary ({len(summary)} chars)")
                 _notify_compaction("summary", {
                     "thread_id": thread_id,

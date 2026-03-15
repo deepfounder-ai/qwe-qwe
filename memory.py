@@ -67,12 +67,25 @@ def _embed(text: str) -> list[float]:
 
 
 def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
-           tag: str | None = None) -> list[dict]:
-    """Semantic search over memories. Returns [{text, tag, score, ts}]."""
+           tag: str | None = None, thread_id: str | None = None) -> list[dict]:
+    """Semantic search over memories with optional tag/thread filters.
+    
+    Args:
+        query: search text
+        limit: max results
+        tag: filter by tag
+        thread_id: filter by thread (or None for global search)
+    
+    Returns [{text, tag, thread_id, score, ts, ...}]
+    """
     qc = _get_qdrant()
-    filt = None
+    conditions = []
     if tag:
-        filt = Filter(must=[FieldCondition(key="tag", match=MatchValue(value=tag))])
+        conditions.append(FieldCondition(key="tag", match=MatchValue(value=tag)))
+    if thread_id:
+        conditions.append(FieldCondition(key="thread_id", match=MatchValue(value=thread_id)))
+    filt = Filter(must=conditions) if conditions else None
+
     results = qc.query_points(
         config.QDRANT_COLLECTION,
         query=_embed(query),
@@ -84,6 +97,7 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
             "id": r.id,
             "text": r.payload.get("text", ""),
             "tag": r.payload.get("tag", ""),
+            "thread_id": r.payload.get("thread_id", ""),
             "score": round(r.score, 3),
             "ts": r.payload.get("ts", 0),
         }
@@ -91,10 +105,29 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
     ]
 
 
-def save(text: str, tag: str = "general", dedup: bool = True) -> str:
-    """Save a memory. Deduplicates by default (updates if similar exists)."""
+def save(text: str, tag: str = "general", dedup: bool = True,
+         thread_id: str | None = None, meta: dict | None = None) -> str:
+    """Save a memory with optional thread context and metadata.
+    
+    Args:
+        text: memory content
+        tag: category (general, user, compaction, project, etc.)
+        dedup: if True, update existing memory if >0.9 similarity
+        thread_id: associate with a specific thread/topic
+        meta: extra metadata dict (source, topic_name, etc.)
+    """
     qc = _get_qdrant()
     vector = _embed(text)
+
+    payload = {
+        "text": text,
+        "tag": tag,
+        "ts": time.time(),
+    }
+    if thread_id:
+        payload["thread_id"] = thread_id
+    if meta:
+        payload.update(meta)
 
     # Deduplicate: if very similar memory exists, update it
     if dedup:
@@ -103,13 +136,11 @@ def save(text: str, tag: str = "general", dedup: bool = True) -> str:
                 config.QDRANT_COLLECTION, query=vector, limit=1,
             )
             if results.points and results.points[0].score > 0.9:
-                # Update existing point
                 existing = results.points[0]
                 qc.upsert(
                     config.QDRANT_COLLECTION,
                     points=[PointStruct(
-                        id=existing.id, vector=vector,
-                        payload={"text": text, "tag": tag, "ts": time.time()},
+                        id=existing.id, vector=vector, payload=payload,
                     )],
                 )
                 return str(existing.id)
@@ -119,13 +150,7 @@ def save(text: str, tag: str = "general", dedup: bool = True) -> str:
     point_id = str(uuid.uuid4())
     qc.upsert(
         config.QDRANT_COLLECTION,
-        points=[
-            PointStruct(
-                id=point_id,
-                vector=vector,
-                payload={"text": text, "tag": tag, "ts": time.time()},
-            )
-        ],
+        points=[PointStruct(id=point_id, vector=vector, payload=payload)],
     )
     return point_id
 
