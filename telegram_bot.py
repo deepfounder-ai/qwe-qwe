@@ -401,7 +401,7 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         current = db.kv_get("thinking_enabled") == "true"
         new_val = not current
         db.kv_set("thinking_enabled", "true" if new_val else "false")
-        status_text = "💭 Thinking: **ON**\nМодель будет размышлять перед ответом" if new_val else "💭 Thinking: **OFF**\nБыстрые ответы без размышлений"
+        status_text = "💭 Thinking: **ON**\nModel will reason before responding" if new_val else "💭 Thinking: **OFF**\nFast responses without reasoning"
         send_message(chat_id, status_text, token, topic_id=topic_id)
         return True
 
