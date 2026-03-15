@@ -647,6 +647,7 @@ def run(user_input: str, thread_id: str | None = None,
     rounds = 0
     last_failed_tool = None
     fail_count = 0
+    _injected_instructions: set[str] = set()  # track which skill instructions were injected
 
     max_tool_rounds = config.get("max_tool_rounds")
     while rounds < max_tool_rounds:
@@ -655,7 +656,7 @@ def run(user_input: str, thread_id: str | None = None,
             result.reply = "⏹ Stopped."
             break
 
-        all_tools = tools.get_all_tools()
+        all_tools = tools.get_all_tools(compact=True)
 
         # Ensure model is loaded (auto-load for local providers)
         providers.ensure_model_loaded()
@@ -787,6 +788,14 @@ def run(user_input: str, thread_id: str | None = None,
                     args_short = str(args)[:80]
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
+
+                # Lazy skill instruction injection
+                import skills
+                instruction = skills.get_instruction(tc["name"])
+                if instruction and tc["name"] not in _injected_instructions:
+                    _injected_instructions.add(tc["name"])
+                    messages.insert(1, {"role": "system", "content": instruction})
+                    _log.info(f"lazy-injected instruction for skill tool: {tc['name']}")
 
                 tool_start = time.time()
                 tool_result = tools.execute(tc["name"], args)

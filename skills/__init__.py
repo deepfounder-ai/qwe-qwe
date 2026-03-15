@@ -89,8 +89,25 @@ def disable(name: str) -> str:
     return f"✓ {name} disabled"
 
 
-def get_tools() -> list[dict]:
-    """Get merged tool definitions from all active skills."""
+def _compact_tool(tool: dict) -> dict:
+    """Return a copy of tool definition with truncated description (≤80 chars)."""
+    import copy
+    t = copy.deepcopy(tool)
+    desc = t["function"].get("description", "")
+    # Truncate to first sentence or 80 chars
+    dot = desc.find(". ")
+    if 0 < dot <= 80:
+        t["function"]["description"] = desc[:dot + 1]
+    elif len(desc) > 80:
+        t["function"]["description"] = desc[:77] + "..."
+    return t
+
+
+def get_tools(compact: bool = False) -> list[dict]:
+    """Get merged tool definitions from all active skills.
+
+    If compact=True, truncate descriptions to save tokens in system prompt.
+    """
     active = get_active()
     all_tools = []
     for name in active:
@@ -99,10 +116,33 @@ def get_tools() -> list[dict]:
             continue
         try:
             mod = _load_module(path)
-            all_tools.extend(getattr(mod, "TOOLS", []))
+            skill_tools = getattr(mod, "TOOLS", [])
+            if compact:
+                skill_tools = [_compact_tool(t) for t in skill_tools]
+            all_tools.extend(skill_tools)
         except Exception:
             pass
     return all_tools
+
+
+def get_instruction(tool_name: str) -> str | None:
+    """Get the INSTRUCTION text from the skill that owns this tool.
+
+    Returns None if the skill has no INSTRUCTION attribute.
+    """
+    active = get_active()
+    for name in active:
+        path = SKILLS_DIR / f"{name}.py"
+        if not path.exists():
+            continue
+        try:
+            mod = _load_module(path)
+            tool_names = [t["function"]["name"] for t in getattr(mod, "TOOLS", [])]
+            if tool_name in tool_names:
+                return getattr(mod, "INSTRUCTION", None)
+        except Exception:
+            pass
+    return None
 
 
 def execute(tool_name: str, args: dict) -> str:

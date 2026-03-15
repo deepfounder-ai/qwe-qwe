@@ -464,7 +464,7 @@ def execute(name: str, args: dict) -> str:
         return f"Error: {type(e).__name__}: {e}"
 
 
-def get_all_tools() -> list[dict]:
+def get_all_tools(compact: bool = False) -> list[dict]:
     """Get base tools + active skill tools."""
     import skills
-    return TOOLS + skills.get_tools()
+    return TOOLS + skills.get_tools(compact=compact)
