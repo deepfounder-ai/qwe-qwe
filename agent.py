@@ -16,6 +16,55 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
 
 
+def _clean_response(text: str) -> str:
+    """Post-process LLM response: remove ChatGPT-isms, excess formatting."""
+    # Strip markdown headers (## / ### / ####) — not appropriate for chat
+    text = re.sub(r'^#{1,4}\s+.*$', lambda m: m.group(0).lstrip('#').strip(), text, flags=re.MULTILINE)
+
+    # Strip markdown tables (lines with |---|)
+    lines = text.split('\n')
+    cleaned = []
+    skip_table = False
+    for line in lines:
+        stripped = line.strip()
+        # Detect table separator
+        if re.match(r'^\|[-\s|:]+\|$', stripped):
+            skip_table = True
+            continue
+        # Table rows
+        if skip_table and stripped.startswith('|') and stripped.endswith('|'):
+            # Convert table row to bullet point
+            cells = [c.strip() for c in stripped.strip('|').split('|') if c.strip()]
+            if cells:
+                cleaned.append('- ' + ' | '.join(cells))
+            continue
+        # First table header row (before separator)
+        if stripped.startswith('|') and stripped.endswith('|') and not skip_table:
+            continue  # skip header, separator will trigger conversion
+        skip_table = False
+        cleaned.append(line)
+    text = '\n'.join(cleaned)
+
+    # Remove trailing "Хочешь ещё?" / "Нужно что-то?" patterns
+    text = re.sub(
+        r'\n+(?:Хочешь|Нужно|Скажи|Если нужно|Что именно|Могу ещё|Давай|Подсказать)[\s\S]{0,100}[?!😊😄🤔]\s*$',
+        '', text
+    )
+
+    # Remove "Вариант N:" sections if more than 1
+    variant_count = len(re.findall(r'(?:Вариант|Variant|Option)\s*\d', text))
+    if variant_count > 1:
+        # Keep only first variant
+        parts = re.split(r'\n+(?:Вариант|Variant|Option)\s*\d[:\.]?\s*', text)
+        if len(parts) >= 2:
+            text = parts[0] + parts[1]
+
+    # Collapse multiple blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
 def _extract_thinking(text: str) -> str | None:
     """Extract thinking content."""
     m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
@@ -492,7 +541,7 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
             rounds += 1
             continue
 
-        result.reply = raw_reply
+        result.reply = _clean_response(raw_reply)
         db.save_message("assistant", result.reply, thread_id=tid)
 
         # Track session tokens (estimate from content length since streaming doesn't give usage)
