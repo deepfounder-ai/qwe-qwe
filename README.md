@@ -29,7 +29,7 @@ Optimized for **Qwen 3.5 9B** running on a single consumer GPU (8GB VRAM). Cloud
 
 ## Philosophy
 
-Most AI agent frameworks assume GPT-4 or Claude — unlimited context, perfect instruction following, cheap API calls. Real life is different:
+Most AI agent frameworks assume GPT or Claude — unlimited context, perfect instruction following, cheap API calls. Real life is different:
 
 - **Small models get confused** with too many tools → we cap the tool set and keep descriptions minimal
 - **Context is expensive** at 9B scale → system prompt is ~250 tokens (vs 24k in cloud agents)
