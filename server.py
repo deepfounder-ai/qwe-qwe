@@ -601,25 +601,40 @@ def _compaction_callback(event: str, data: dict):
         ws_msg = {"type": "compaction", "event": event, **data}
         asyncio.run_coroutine_threadsafe(_broadcast(ws_msg), _ws_loop)
 
-    # Telegram notification (only for start and done)
+    # Telegram notification — send to the same chat/topic where compaction happened
     if event == "start":
-        _tg_notify(f"🔄 Compacting memory: {data.get('messages', 0)} messages (~{data.get('tokens', 0)} tokens)...")
+        _tg_notify_thread(data, f"🔄 Compacting memory: {data.get('messages', 0)} messages (~{data.get('tokens', 0)} tokens)...")
     elif event == "summary":
         summary = data.get("summary", "")[:200]
-        _tg_notify(f"🧠 Saved to memory:\n_{summary}_")
+        _tg_notify_thread(data, f"🧠 Saved to memory:\n_{summary}_")
     elif event == "done":
-        _tg_notify(f"✅ Compaction done. {data.get('remaining', 0)} messages remaining.")
+        _tg_notify_thread(data, f"✅ Compaction done. {data.get('remaining', 0)} messages remaining.")
     elif event == "error":
-        _tg_notify(f"⚠️ Compaction error: {data.get('error', '')[:100]}")
+        _tg_notify_thread(data, f"⚠️ Compaction error: {data.get('error', '')[:100]}")
 
 
-def _tg_notify(text: str):
-    """Send compaction notification to the active Telegram chat."""
+def _tg_notify_thread(data: dict, text: str):
+    """Send notification to the Telegram chat/topic where the thread lives."""
     if not telegram_bot.is_verified() or not telegram_bot._running:
         return
-    owner = telegram_bot.get_owner_id()
-    if owner:
-        telegram_bot.send_message(owner, text)
+
+    thread_id = data.get("thread_id")
+    chat_id = None
+    topic_id = None
+
+    # Try to get Telegram chat/topic from thread metadata
+    if thread_id:
+        t = threads.get(thread_id)
+        if t and t.get("meta"):
+            chat_id = t["meta"].get("telegram_chat_id")
+            topic_id = t["meta"].get("telegram_topic_id")
+
+    # Fallback to owner DM
+    if not chat_id:
+        chat_id = telegram_bot.get_owner_id()
+
+    if chat_id:
+        telegram_bot.send_message(chat_id, text, topic_id=topic_id)
 
 
 _agent.on_compaction(_compaction_callback)
