@@ -27,3 +27,10 @@ soul.json
 user.md
 heartbeat.md
 memory/collection/
+skills/
+!skills/__init__.py
+!skills/weather.py
+!skills/notes.py
+!skills/timer.py
+!skills/soul_editor.py
+!skills/skill_creator.py
