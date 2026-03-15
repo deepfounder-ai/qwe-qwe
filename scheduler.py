@@ -194,9 +194,19 @@ def _execute_task(task_desc: str) -> str:
     """Run a task through the LLM."""
     import config, tools
 
+    # Simple reminders don't need LLM — just return the text
+    reminder_markers = ["remind", "напомни", "напоминание", "напомнить", "выпить", "drink", "stretch", "break"]
+    lower_task = task_desc.lower()
+    if any(m in lower_task for m in reminder_markers) and len(task_desc) < 200:
+        return task_desc
+
     client = providers.get_client()
     messages = [
-        {"role": "system", "content": "You are a background scheduler worker. Complete the task. Use tools. Be concise."},
+        {"role": "system", "content": (
+            "You are a background task worker. Execute the task and return the result. "
+            "If the task is a reminder, just return the reminder text — do NOT create new reminders or timers. "
+            "Use tools only when needed. Be concise."
+        )},
         {"role": "user", "content": task_desc},
     ]
 
