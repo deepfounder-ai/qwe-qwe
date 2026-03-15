@@ -165,6 +165,21 @@ body {
 .msg blockquote { border-left: 3px solid var(--accent-dim); padding-left: 12px; margin: 6px 0; color: var(--text-dim); }
 .input-area { padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
 .input-row { display: flex; gap: 10px; align-items: flex-end; }
+.img-preview { position: relative; display: inline-block; margin-bottom: 8px; }
+.img-preview img { max-height: 80px; border-radius: 8px; border: 1px solid var(--border); }
+.img-preview .img-remove {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px;
+  background: var(--error); color: #fff; border: none; border-radius: 50%;
+  font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.btn-attach {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  width: 44px; height: 44px; border-radius: 10px; cursor: pointer; font-size: 18px;
+  display: flex; align-items: center; justify-content: center; transition: all 0.15s; flex-shrink: 0;
+}
+.btn-attach:hover { border-color: var(--accent); color: var(--accent); }
+.drag-over { border: 2px dashed var(--accent) !important; background: var(--accent-bg) !important; }
+.msg img.msg-img { max-width: 300px; max-height: 200px; border-radius: 8px; margin: 6px 0; display: block; }
 #input {
   flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
   padding: 12px 16px; color: var(--text); font-family: var(--sans); font-size: 14px;
@@ -425,7 +440,10 @@ body {
 <div class="page active" id="pageChatWrap">
   <div class="chat" id="chat"></div>
   <div class="input-area">
+    <div class="img-preview" id="imgPreview" style="display:none"></div>
     <div class="input-row">
+      <button class="btn-attach" onclick="document.getElementById('fileInput').click()" title="Attach image"><i class="ph ph-image"></i></button>
+      <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="handleFileSelect(this)">
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
       <button id="stop" class="stop-btn" onclick="stopGeneration()" style="display:none" title="Stop generation">■</button>
@@ -1609,12 +1627,21 @@ function startRename(tabEl, tid, cur) {
 }
 
 // ── Messages ──
-function addMessage(role, text, meta) {
+function addMessage(role, text, meta, imageSrc) {
   const empty = chat.querySelector('.empty');
   if (empty) empty.remove();
   const div = document.createElement('div');
   div.className = `msg ${role}`;
-  div.innerHTML = renderMarkdown(text);
+  if (imageSrc) {
+    const img = document.createElement('img');
+    img.src = imageSrc;
+    img.className = 'msg-img';
+    img.alt = 'uploaded image';
+    div.appendChild(img);
+  }
+  const content = document.createElement('div');
+  content.innerHTML = renderMarkdown(text);
+  div.appendChild(content);
   if (role === 'assistant') {
     // Branch button
     const actions = document.createElement('div');
@@ -1647,13 +1674,73 @@ function addMessage(role, text, meta) {
 function showStatus(text) { removeStatus(); const d=document.createElement('div'); d.className='msg status'; d.id='statusMsg'; d.innerHTML=`<i class="ph ph-spinner"></i> ${text}`; chat.appendChild(d); chat.scrollTop=chat.scrollHeight; }
 function removeStatus() { document.getElementById('statusMsg')?.remove(); }
 
+// ── Image handling ──
+let pendingImage = null;
+function handleFileSelect(inp) {
+  const file = inp.files[0];
+  if (!file) return;
+  readImageFile(file);
+  inp.value = '';
+}
+function readImageFile(file) {
+  if (!file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    pendingImage = e.target.result.split(',')[1];
+    const preview = document.getElementById('imgPreview');
+    preview.textContent = '';
+    const img = document.createElement('img');
+    img.src = e.target.result;
+    const btn = document.createElement('button');
+    btn.className = 'img-remove';
+    btn.textContent = '×';
+    btn.onclick = clearImage;
+    preview.appendChild(img);
+    preview.appendChild(btn);
+    preview.style.display = 'inline-block';
+  };
+  reader.readAsDataURL(file);
+}
+function clearImage() {
+  pendingImage = null;
+  const preview = document.getElementById('imgPreview');
+  preview.textContent = '';
+  preview.style.display = 'none';
+}
+// Drag and drop
+const chatPage = document.getElementById('pageChatWrap');
+chatPage.addEventListener('dragover', (e) => { e.preventDefault(); chatPage.classList.add('drag-over'); });
+chatPage.addEventListener('dragleave', () => chatPage.classList.remove('drag-over'));
+chatPage.addEventListener('drop', (e) => {
+  e.preventDefault(); chatPage.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) readImageFile(file);
+});
+// Paste image from clipboard
+input.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      readImageFile(item.getAsFile());
+      return;
+    }
+  }
+});
+
 // ── Send ──
 function send() {
   const text = input.value.trim();
-  if (!text || !ws || ws.readyState !== 1) return;
-  addMessage('user', text);
-  ws.send(JSON.stringify({ text, thread_id: activeThreadId }));
+  if (!text && !pendingImage) return;
+  if (!ws || ws.readyState !== 1) return;
+  const msgText = text || (pendingImage ? 'What\'s in this image?' : '');
+  addMessage('user', msgText, null, pendingImage ? `data:image/png;base64,${pendingImage}` : null);
+  const payload = { text: msgText, thread_id: activeThreadId };
+  if (pendingImage) payload.image_b64 = pendingImage;
+  ws.send(JSON.stringify(payload));
   input.value = ''; input.style.height = 'auto';
+  clearImage();
   setGenerating(true);
 }
 function setGenerating(on) {

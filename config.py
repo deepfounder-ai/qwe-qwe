@@ -1,24 +1,35 @@
-"""qwe-qwe configuration — all settings in one place."""
+"""qwe-qwe configuration — all settings in one place.
+
+Override any setting via environment variables with QWE_ prefix:
+  QWE_LLM_URL, QWE_LLM_MODEL, QWE_LLM_KEY,
+  QWE_EMBED_URL, QWE_EMBED_MODEL, QWE_EMBED_KEY,
+  QWE_QDRANT_MODE, QWE_QDRANT_PATH, QWE_QDRANT_URL,
+  QWE_DB_PATH
+"""
+
+import os
+
+_env = os.environ.get
 
 # LLM
-LLM_BASE_URL = "http://192.168.0.49:1234/v1"
-LLM_MODEL = "qwen/qwen3.5-9b"
-LLM_API_KEY = "lm-studio"
+LLM_BASE_URL = _env("QWE_LLM_URL", "http://localhost:1234/v1")
+LLM_MODEL = _env("QWE_LLM_MODEL", "qwen/qwen3.5-9b")
+LLM_API_KEY = _env("QWE_LLM_KEY", "lm-studio")
 
-# Embeddings (same LM Studio server)
-EMBED_BASE_URL = "http://192.168.0.49:1234/v1"
-EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
-EMBED_API_KEY = "lm-studio"
-EMBED_DIM = 768
+# Embeddings (defaults to same server as LLM)
+EMBED_BASE_URL = _env("QWE_EMBED_URL", LLM_BASE_URL)
+EMBED_MODEL = _env("QWE_EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
+EMBED_API_KEY = _env("QWE_EMBED_KEY", LLM_API_KEY)
+EMBED_DIM = int(_env("QWE_EMBED_DIM", "768"))
 
 # Qdrant (local disk for persistence, no server needed)
-QDRANT_MODE = "disk"  # "memory" | "disk" | "server"
-QDRANT_PATH = "./memory"  # for disk mode
-QDRANT_URL = "http://localhost:6333"  # for server mode
-QDRANT_COLLECTION = "qwe_qwe"
+QDRANT_MODE = _env("QWE_QDRANT_MODE", "disk")  # "memory" | "disk" | "server"
+QDRANT_PATH = _env("QWE_QDRANT_PATH", "./memory")  # for disk mode
+QDRANT_URL = _env("QWE_QDRANT_URL", "http://localhost:6333")  # for server mode
+QDRANT_COLLECTION = _env("QWE_QDRANT_COLLECTION", "qwe_qwe")
 
 # SQLite
-DB_PATH = "qwe_qwe.db"
+DB_PATH = _env("QWE_DB_PATH", "qwe_qwe.db")
 
 # Timezone offset from UTC (hours). Stored in DB, set via /soul or ask user.
 # Default: 0 (UTC). Agent should ask user on first run and save to kv "timezone".

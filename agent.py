@@ -11,6 +11,68 @@ _console = Console()
 _abort_event = threading.Event()  # can be replaced by server
 
 
+def _repair_json(raw: str) -> dict:
+    """Attempt to repair malformed JSON from small models (Qwen, etc.).
+
+    Common issues: trailing commas, single quotes, unclosed brackets,
+    comments, raw newlines in strings, BOM characters.
+    Returns parsed dict or {} if repair fails.
+    """
+    if not raw or not raw.strip():
+        return {}
+
+    s = raw.strip()
+
+    # Remove BOM and zero-width chars
+    s = s.lstrip("\ufeff\u200b\u200c\u200d")
+
+    # Remove JS-style comments: // ... and /* ... */
+    s = re.sub(r"//[^\n]*", "", s)
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
+
+    # Replace single quotes with double quotes (outside of double-quoted strings)
+    # Simple heuristic: if no double quotes at all, swap single→double
+    if '"' not in s and "'" in s:
+        s = s.replace("'", '"')
+
+    # Fix raw newlines/tabs inside string values → escape them
+    # Match content between quotes and escape control chars
+    def _escape_controls(m: re.Match) -> str:
+        inner = m.group(1)
+        inner = inner.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+        return f'"{inner}"'
+    s = re.sub(r'"((?:[^"\\]|\\.)*?(?:\n|\r|\t)(?:[^"\\]|\\.)*?)"', _escape_controls, s)
+
+    # Remove trailing commas before } or ]
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+
+    # Try parsing after basic fixes
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    # Try to close unclosed brackets/braces
+    opens = s.count("{") - s.count("}")
+    s += "}" * max(0, opens)
+    brackets = s.count("[") - s.count("]")
+    s += "]" * max(0, brackets)
+
+    # Close unclosed string (odd number of unescaped quotes)
+    quote_count = len(re.findall(r'(?<!\\)"', s))
+    if quote_count % 2 == 1:
+        s += '"'
+        # Re-close brackets that might now be inside the string
+        opens = s.count("{") - s.count("}")
+        s += "}" * max(0, opens)
+
+    try:
+        return json.loads(s)
+    except Exception:
+        _log.warning(f"json repair failed: {raw[:200]}")
+        return {}
+
+
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks from model output."""
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
@@ -117,7 +179,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         return ""
 
 
-def _build_messages(user_input: str, thread_id: str | None = None, source: str = "cli") -> list[dict]:
+def _build_messages(user_input: str, thread_id: str | None = None,
+                    source: str = "cli", image_b64: str | None = None) -> list[dict]:
     """Build minimal context: soul + auto-context + recent history + user message."""
     # Soul → compact system prompt
     agent_soul = soul.load()
@@ -149,15 +212,22 @@ def _build_messages(user_input: str, thread_id: str | None = None, source: str =
 
     msgs.extend(history)
 
-    # New user message
-    msgs.append({"role": "user", "content": user_input})
+    # New user message — multimodal if image provided
+    if image_b64:
+        user_content = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+            {"type": "text", "text": user_input or "What's in this image?"},
+        ]
+        msgs.append({"role": "user", "content": user_content})
+    else:
+        msgs.append({"role": "user", "content": user_input})
     return msgs
 
 
 class TurnResult:
     """Result of one agent turn with debug info."""
     __slots__ = ("reply", "thinking", "prompt_tokens", "completion_tokens", "total_tokens",
-                 "tool_calls_made", "model", "auto_context_hits")
+                 "tool_calls_made", "model", "auto_context_hits", "json_repairs")
 
     def __init__(self):
         self.reply = ""
@@ -168,6 +238,7 @@ class TurnResult:
         self.tool_calls_made: list[str] = []
         self.model = providers.get_model()
         self.auto_context_hits = 0
+        self.json_repairs = 0
 
 
 def _estimate_tokens(messages: list[dict]) -> int:
@@ -347,11 +418,13 @@ def _get_thread_model(tid: str | None) -> str | None:
     return None
 
 
-def run(user_input: str, thread_id: str | None = None, source: str = "cli") -> TurnResult:
+def run(user_input: str, thread_id: str | None = None,
+        source: str = "cli", image_b64: str | None = None) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response.
-    
+
     Args:
         source: "cli", "web", or "telegram" — tells the agent where it's running
+        image_b64: optional base64-encoded image for vision
     """
     # Check thread-specific model override
     thread_model = _get_thread_model(thread_id)
@@ -377,7 +450,7 @@ def run(user_input: str, thread_id: str | None = None, source: str = "cli") -> T
     # Save user message
     db.save_message("user", user_input, thread_id=tid)
 
-    messages = _build_messages(user_input, thread_id=tid, source=source)
+    messages = _build_messages(user_input, thread_id=tid, source=source, image_b64=image_b64)
 
     # Touch thread timestamp
     threads.touch(tid)
@@ -482,15 +555,21 @@ def run(user_input: str, thread_id: str | None = None, source: str = "cli") -> T
             for tc in tool_calls_data.values():
                 result.tool_calls_made.append(tc["name"])
 
-                # Show tool call
+                # Parse tool call arguments (with repair for small models)
                 try:
                     args = json.loads(tc["arguments"])
+                except Exception:
+                    _log.warning(f"json parse failed, attempting repair: {tc['arguments'][:200]}")
+                    args = _repair_json(tc["arguments"])
+                    if args:
+                        result.json_repairs += 1
+                        _log.info(f"json repair succeeded for {tc['name']}")
+                try:
                     args_short = json.dumps(args, ensure_ascii=False)
                     if len(args_short) > 80:
                         args_short = args_short[:80] + "..."
                 except Exception:
-                    args = {}
-                    args_short = tc["arguments"][:80]
+                    args_short = str(args)[:80]
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
 

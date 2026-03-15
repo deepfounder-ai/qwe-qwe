@@ -194,18 +194,15 @@ def to_prompt(soul: dict) -> str:
     if active_traits:
         lines.append("Personality: " + " ".join(active_traits))
 
-    # System info (1 line)
-    lines.append(f"System: {_get_sysinfo()}")
     # Current time in user's timezone
     from datetime import datetime, timezone, timedelta
     tz = timezone(timedelta(hours=config.TZ_OFFSET))
     now = datetime.now(tz).strftime("%Y-%m-%d %H:%M") + f" (UTC{config.TZ_OFFSET:+d})"
-    lines.append(f"Current time: {now}")
+    lines.append(f"Time: {now}")
 
-    # Core rules
+    # Core rules — compact for small model context
     lang = soul['language']
-    lines.append(f"""
-Rules:
+    lines.append(f"""Rules:
 1. ALWAYS reply in {lang}. Every response must be in {lang}. This is mandatory.
 2. ALWAYS use tools for actions. Never say "I would run..." — run it.
 3. If unsure, TRY first with a tool, then report the result.
@@ -214,6 +211,8 @@ Rules:
 6. Save important user info to memory_save automatically.
 7. Keep responses short unless asked for detail.
 8. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.
+9. NEVER store passwords, API keys, tokens, or secrets in files. Use secret_save tool ONLY.
+10. Create ONLY what the user asked for. Never add extra tasks, reminders, or schedules on your own.
 11. Formatting rules:
    - NO headers (# ## ###) in regular replies. Headers are for documents, not chat.
    - NO tables. Use simple lists instead.
@@ -222,20 +221,14 @@ Rules:
    - Write like a human in a chat, not like a wiki article.
    - Do NOT end with "Хочешь ещё?" / "Нужно что-то ещё?" — just answer and stop.
    - Keep it SHORT. If user asks for a list, give a list. Not a presentation.
-9. NEVER store passwords, API keys, tokens, or secrets in files. Use secret_save tool ONLY.
-10. Create ONLY what the user asked for. Never add extra tasks, reminders, or schedules on your own.""")
+NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.""")
 
     # Tool usage examples — critical for small models
-    lines.append("""
-Examples of correct tool use:
-User: "install httpie" → shell({"command": "pip install httpie", "timeout": 120})
-User: "what files are here" → shell({"command": "ls -la"})
-User: "remember I like python" → memory_save({"text": "User prefers Python", "tag": "user"})
-User: "what do you know about me" → memory_search({"query": "user preferences"})
-User: "read config.py" → read_file({"path": "config.py"})
-User: "research X and also install Y" → spawn_task({"task":"research X"}) + spawn_task({"task":"install Y"})
-User: "remind me to drink water at 9am" → schedule_task({"name":"water","task":"Remind user to drink water","schedule":"daily 09:00"})
-CRITICAL: NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.""")
+    lines.append("""Examples:
+"install httpie" → shell({"command":"pip install httpie","timeout":120})
+"what files here" → shell({"command":"ls -la"})
+"remember I like python" → memory_save({"text":"User prefers Python","tag":"user"})
+"read config.py" → read_file({"path":"config.py"})""")
 
     return "\n".join(lines)
 

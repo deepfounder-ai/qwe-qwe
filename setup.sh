@@ -55,21 +55,25 @@ mkdir -p memory
 mkdir -p skills
 step "Created directories (logs/, memory/, skills/)"
 
-# 5. Check LM Studio
+# 5. Auto-discover LLM servers
 echo ""
-info "Checking LM Studio connection..."
-LM_URL=$(python3 -c "import config; print(config.LLM_BASE_URL)" 2>/dev/null || echo "http://192.168.0.49:1234/v1")
-LM_HOST=$(echo $LM_URL | sed 's|/v1||' | sed 's|http://||')
-
-if curl -s --connect-timeout 3 "http://${LM_HOST}/v1/models" >/dev/null 2>&1; then
-    MODELS=$(curl -s "http://${LM_HOST}/v1/models" | python3 -c "import sys,json; [print(f'    - {m[\"id\"]}') for m in json.load(sys.stdin).get('data',[])]" 2>/dev/null)
-    step "LM Studio connected (${LM_HOST})"
-    if [ -n "$MODELS" ]; then
-        echo "$MODELS"
+info "Searching for LLM servers..."
+LM_FOUND=false
+for port in 1234 11434 8080; do
+    if curl -s --connect-timeout 1 "http://localhost:$port/v1/models" >/dev/null 2>&1; then
+        MODELS=$(curl -s "http://localhost:$port/v1/models" | python3 -c "import sys,json; [print(f'    - {m[\"id\"]}') for m in json.load(sys.stdin).get('data',[])]" 2>/dev/null)
+        step "LLM server found at localhost:$port"
+        if [ -n "$MODELS" ]; then
+            echo "$MODELS"
+        fi
+        LM_FOUND=true
+        break
     fi
-else
-    warn "LM Studio not reachable at ${LM_HOST}"
-    info "Start LM Studio and load a model, then configure config.py"
+done
+if ! $LM_FOUND; then
+    warn "No LLM server found on localhost"
+    info "Start LM Studio or Ollama, load a model, then run qwe-qwe"
+    info "Or set QWE_LLM_URL=http://<ip>:<port>/v1"
 fi
 
 # 6. Summary

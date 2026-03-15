@@ -2,17 +2,32 @@
 
 import importlib, importlib.util, sys
 from pathlib import Path
+from types import ModuleType
 import db
 
 SKILLS_DIR = Path(__file__).parent
 
+# Module cache: name -> (mtime, module)
+_module_cache: dict[str, tuple[float, ModuleType]] = {}
 
-def _load_module(path: Path):
-    """Load a Python module from path."""
+
+def _load_module(path: Path) -> ModuleType:
+    """Load a Python module from path, with mtime-based caching."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        raise ImportError(f"Skill file not found: {path}")
+
+    cached = _module_cache.get(path.stem)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    # Load fresh
     name = f"skill_{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    _module_cache[path.stem] = (mtime, mod)
     return mod
 
 
@@ -39,11 +54,16 @@ def list_all() -> list[dict]:
 
 
 def get_active() -> set[str]:
-    """Get set of active skill names from SQLite."""
+    """Get set of active skill names from SQLite. Cleans stale entries."""
     raw = db.kv_get("active_skills")
     if not raw:
         return set()
-    return set(raw.split(","))
+    names = set(raw.split(","))
+    # Remove skills whose files no longer exist
+    valid = {n for n in names if (SKILLS_DIR / f"{n}.py").exists()}
+    if valid != names:
+        set_active(valid)
+    return valid
 
 
 def set_active(names: set[str]):

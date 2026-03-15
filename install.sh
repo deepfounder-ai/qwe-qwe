@@ -117,17 +117,30 @@ else
     step "PATH already configured"
 fi
 
-# ── LM Studio check ──────────────────────────────────────
+# ── LM Studio / Ollama auto-discovery ─────────────────────
 echo ""
-info "Checking LM Studio..."
-LM_HOST="${LM_STUDIO_HOST:-192.168.0.49:1234}"
-
-if curl -s --connect-timeout 2 "http://${LM_HOST}/v1/models" >/dev/null 2>&1; then
-    step "LM Studio reachable at $LM_HOST"
-else
-    warn "LM Studio not found at $LM_HOST"
-    info "Start LM Studio, load a model, then edit config.py"
-    info "Or set LM_STUDIO_HOST=<ip>:<port> before running"
+info "Searching for LLM servers..."
+LM_FOUND=false
+for port in 1234 11434 8080; do
+    if curl -s --connect-timeout 1 "http://localhost:$port/v1/models" >/dev/null 2>&1; then
+        step "LLM server found at localhost:$port"
+        LM_FOUND=true
+        break
+    fi
+done
+if ! $LM_FOUND; then
+    # Try env override
+    if [ -n "${LM_STUDIO_HOST:-}" ]; then
+        if curl -s --connect-timeout 2 "http://${LM_STUDIO_HOST}/v1/models" >/dev/null 2>&1; then
+            step "LLM server reachable at $LM_STUDIO_HOST"
+            LM_FOUND=true
+        fi
+    fi
+fi
+if ! $LM_FOUND; then
+    warn "No LLM server found"
+    info "Start LM Studio or Ollama, load a model, then run qwe-qwe"
+    info "Or set QWE_LLM_URL=http://<ip>:<port>/v1"
 fi
 
 # ── done ──────────────────────────────────────────────────

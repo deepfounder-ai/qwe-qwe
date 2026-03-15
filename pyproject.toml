@@ -23,13 +23,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest"]
+rag = ["pypdf>=4.0"]
 
 [project.scripts]
 qwe-qwe = "cli:main_entry"
 
 [tool.setuptools]
 packages = ["skills"]
-py-modules = ["cli", "agent", "config", "db", "logger", "memory", "providers", "scheduler", "server", "soul", "tasks", "telegram_bot", "threads", "tools"]
+py-modules = ["cli", "agent", "config", "db", "discovery", "logger", "memory", "providers", "rag", "scheduler", "server", "soul", "tasks", "telegram_bot", "threads", "tools"]
 
 [tool.setuptools.package-data]
 "*" = ["static/**/*"]

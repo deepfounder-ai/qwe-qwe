@@ -14,7 +14,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "memory_search",
-            "description": "Search memories about user, past conversations, or saved facts.",
+            "description": "Search saved memories by query.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -28,7 +28,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "memory_save",
-            "description": "Save important info: user preferences, facts, decisions.",
+            "description": "Save important info to long-term memory.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -57,7 +57,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "shell",
-            "description": "Run any shell command. Use for: installs, file operations, git, system tasks. Returns stdout+stderr.",
+            "description": "Run a shell command. Returns stdout+stderr.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -154,7 +154,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "spawn_task",
-            "description": "Run a task in background while you handle other tasks. MUST use when user gives 2+ separate tasks in one message. Each task gets its own worker.",
+            "description": "Run a task in background. Use when user gives 2+ tasks at once.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -215,10 +215,45 @@ TOOLS = [
             },
         },
     },
+    # RAG tools
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_index",
+            "description": "Index a file or directory for search. Supports: txt, md, py, js, json, pdf, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File or directory path to index"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": "Search indexed files by query. Returns relevant text chunks with file paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_status",
+            "description": "Show RAG index status: files and chunks count.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
-
-# NOTE: web_fetch removed from core — small models handle 5 tools better than 6.
-# Available as a skill if needed.
 
 
 # ── Tool execution ──
@@ -345,6 +380,35 @@ def execute(name: str, args: dict) -> str:
         elif name == "secret_delete":
             import vault
             return vault.delete(args["key"])
+
+        elif name == "rag_index":
+            import rag
+            path = Path(args["path"]).expanduser()
+            if path.is_dir():
+                results = rag.index_directory(str(path))
+                indexed = sum(1 for r in results if r["status"] == "indexed")
+                total_chunks = sum(r["chunks"] for r in results)
+                return f"Indexed {indexed} files, {total_chunks} chunks total"
+            else:
+                result = rag.index_file(str(path))
+                return f"{result['path']}: {result['status']} ({result['chunks']} chunks)"
+
+        elif name == "rag_search":
+            import rag
+            results = rag.search(args["query"], limit=args.get("limit", 5))
+            if not results:
+                return "No results found. Try indexing files first with rag_index."
+            lines = []
+            for r in results:
+                lines.append(f"[{r['file_path']}] (score: {r['score']})")
+                lines.append(r["text"][:500])
+                lines.append("")
+            return "\n".join(lines)
+
+        elif name == "rag_status":
+            import rag
+            s = rag.get_status()
+            return f"RAG index: {s['files']} files, {s['chunks']} chunks"
 
         else:
             # Try skills

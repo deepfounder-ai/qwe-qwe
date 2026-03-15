@@ -941,11 +941,30 @@ def _handle_update(update: dict, token: str, bot_username: str):
     chat_type = msg["chat"].get("type", "private")  # private, group, supergroup
     user_id = msg["from"]["id"]
     username = msg["from"].get("username", "")
-    text = msg.get("text", "")
+    text = msg.get("text", "") or msg.get("caption", "")
     message_id = msg.get("message_id")
     topic_id = msg.get("message_thread_id")  # supergroup topic
 
-    if not text:
+    # Handle photos — download and encode as base64
+    image_b64 = None
+    photo = msg.get("photo")
+    if photo:
+        try:
+            import base64
+            file_id = photo[-1]["file_id"]  # highest resolution
+            file_info = _api("getFile", get_token(), file_id=file_id)
+            if file_info and file_info.get("ok"):
+                file_path = file_info["result"]["file_path"]
+                url = f"https://api.telegram.org/file/bot{get_token()}/{file_path}"
+                image_data = requests.get(url, timeout=30).content
+                image_b64 = base64.b64encode(image_data).decode()
+                if not text:
+                    text = "What's in this image?"
+                _log.info(f"photo received from @{username} ({len(image_data)} bytes)")
+        except Exception as e:
+            _log.error(f"photo download failed: {e}")
+
+    if not text and not image_b64:
         return
 
     # ── Verification flow ──
@@ -1017,7 +1036,8 @@ def _handle_update(update: dict, token: str, bot_username: str):
         if user_id != owner_id:
             _log.warning(f"blocked DM from non-owner {user_id} (@{username})")
             return
-        _process_message(chat_id, text, user_id, username, message_id, token, topic_id=None, thread_id=None)
+        _process_message(chat_id, text, user_id, username, message_id, token,
+                         topic_id=None, thread_id=None, image_b64=image_b64)
         return
 
     # ── Group/supergroup ──
@@ -1056,16 +1076,18 @@ def _handle_update(update: dict, token: str, bot_username: str):
             thread_id = _get_or_create_thread_for_topic(chat_id, topic_id, topic_name)
 
         _process_message(chat_id, text, user_id, username, message_id, token,
-                         topic_id=topic_id, thread_id=thread_id)
+                         topic_id=topic_id, thread_id=thread_id,
+                         image_b64=image_b64)
 
 
 def _process_message(chat_id: int, text: str, user_id: int, username: str,
                      message_id: int, token: str, topic_id: int | None = None,
-                     thread_id: str | None = None):
+                     thread_id: str | None = None, image_b64: str | None = None):
     """Route message to agent and send response."""
     _log.info(f"processing: @{username} in {chat_id}" +
               (f" topic={topic_id}" if topic_id else "") +
               (f" thread={thread_id}" if thread_id else "") +
+              (" [+image]" if image_b64 else "") +
               f": {text[:100]}")
 
     # Check if model needs loading (notify user about delay)
@@ -1110,7 +1132,8 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
 
     if _on_message:
         try:
-            response = _on_message(chat_id, text, user_id, username, thread_id)
+            response = _on_message(chat_id, text, user_id, username, thread_id,
+                                    image_b64=image_b64)
             if response:
                 typing_active.clear()  # stop typing before sending
                 send_message(chat_id, response, token, reply_to=message_id, topic_id=topic_id)

@@ -1,0 +1,18 @@
+services:
+  qwe-qwe:
+    build: .
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./data/memory:/app/memory
+      - ./data/logs:/app/logs
+      - ./data/skills:/app/skills
+      - ./data/uploads:/app/uploads
+      - qwe-db:/app/db
+    environment:
+      - QWE_LLM_URL=http://host.docker.internal:1234/v1
+      - QWE_DB_PATH=/app/db/qwe_qwe.db
+    restart: unless-stopped
+
+volumes:
+  qwe-db:

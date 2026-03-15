@@ -32,13 +32,14 @@ _log = logger.get("server")
 
 # ── Agent runner in thread pool (agent.run is sync/blocking) ──
 
-def _run_agent_sync(user_input: str, thread_id: str | None = None) -> dict:
+def _run_agent_sync(user_input: str, thread_id: str | None = None,
+                    image_b64: str | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
     _abort_event.clear()
     agent._abort_event = _abort_event  # share abort flag with agent
     t0 = time.time()
-    result = agent.run(user_input, thread_id=thread_id)
+    result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
@@ -67,13 +68,125 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="qwe-qwe", version="0.2.0", lifespan=lifespan)
 
+# ── Optional auth (set QWE_PASSWORD env to enable) ──
+_AUTH_PASSWORD = os.environ.get("QWE_PASSWORD", "")
+_AUTH_COOKIE = "qwe_auth"
+
+# ── Rate limiting (in-memory, per-IP) ──
+_rate_log: dict[str, list[float]] = {}  # ip -> [timestamps]
+_RATE_LIMIT = 30  # requests per minute
+
+
+def _check_rate_limit(ip: str) -> bool:
+    """Returns True if request is allowed."""
+    now = time.time()
+    timestamps = _rate_log.get(ip, [])
+    # Remove entries older than 60s
+    timestamps = [t for t in timestamps if now - t < 60]
+    if len(timestamps) >= _RATE_LIMIT:
+        _rate_log[ip] = timestamps
+        return False
+    timestamps.append(now)
+    _rate_log[ip] = timestamps
+    return True
+
+
+@app.middleware("http")
+async def auth_and_rate_middleware(request: Request, call_next):
+    """Optional password auth + rate limiting middleware."""
+    path = request.url.path
+
+    # Skip auth for login endpoint and static files
+    if path in ("/api/login", "/static") or path.startswith("/static/"):
+        return await call_next(request)
+
+    # Rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_rate_limit(client_ip):
+        return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+
+    # Auth check (only if QWE_PASSWORD is set)
+    if _AUTH_PASSWORD:
+        # Allow login page
+        if path == "/" and request.method == "GET":
+            cookie = request.cookies.get(_AUTH_COOKIE)
+            if cookie != _AUTH_PASSWORD:
+                # Serve login page instead
+                return await call_next(request)
+
+        # API/WS require auth cookie
+        if path.startswith("/api/") or path.startswith("/ws"):
+            cookie = request.cookies.get(_AUTH_COOKIE)
+            if cookie != _AUTH_PASSWORD:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    return await call_next(request)
+
+
+# Login endpoint
+@app.post("/api/login")
+async def login(request: Request):
+    """Authenticate with password. Sets auth cookie."""
+    if not _AUTH_PASSWORD:
+        return {"ok": True, "message": "no password set"}
+    body = await request.json()
+    password = body.get("password", "")
+    if password == _AUTH_PASSWORD:
+        response = JSONResponse({"ok": True})
+        response.set_cookie(_AUTH_COOKIE, _AUTH_PASSWORD,
+                            max_age=86400, httponly=True, samesite="lax")
+        return response
+    return JSONResponse({"error": "wrong password"}, status_code=401)
+
+
 # Static files
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# Uploads directory
+UPLOADS_DIR = Path(__file__).parent / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+
 # ── Routes ──
+
+@app.post("/api/upload")
+async def upload_image(request: Request):
+    """Upload an image file. Returns image_id for use in chat."""
+    import base64, uuid
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart" in content_type:
+        from fastapi import UploadFile
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "no file"}, status_code=400)
+        data = await file.read()
+        filename = file.filename or "image.png"
+    else:
+        # Raw base64 JSON: {"data": "base64...", "filename": "image.png"}
+        body = await request.json()
+        data = base64.b64decode(body.get("data", ""))
+        filename = body.get("filename", "image.png")
+
+    # Validate it's an image
+    ext = Path(filename).suffix.lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return JSONResponse({"error": "unsupported image format"}, status_code=400)
+
+    # Save
+    image_id = str(uuid.uuid4())[:8]
+    save_path = UPLOADS_DIR / f"{image_id}{ext}"
+    save_path.write_bytes(data)
+
+    # Return base64 for immediate use
+    b64 = base64.b64encode(data).decode()
+    _log.info(f"image uploaded: {image_id} ({len(data)} bytes)")
+    return {"image_id": image_id, "b64": b64, "path": str(save_path)}
+
 
 @app.get("/")
 async def index():
@@ -113,6 +226,15 @@ async def status():
         "memories": mem_count,
         "skills": active_skills,
     }
+
+
+@app.get("/api/discover")
+async def discover_servers():
+    """Auto-discover LLM servers on localhost."""
+    import discovery
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, discovery.discover)
+    return {"servers": results}
 
 
 @app.get("/api/setup")
@@ -515,14 +637,17 @@ async def websocket_chat(ws: WebSocket):
                 msg = json.loads(data)
                 user_input = msg.get("text", "").strip()
                 thread_id = msg.get("thread_id")  # optional — None uses active
+                image_b64 = msg.get("image_b64")  # optional base64 image
             except json.JSONDecodeError:
                 user_input = data.strip()
                 thread_id = None
+                image_b64 = None
 
-            if not user_input:
+            if not user_input and not image_b64:
                 continue
 
-            _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}")
+            _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}" +
+                       (" [+image]" if image_b64 else ""))
 
             # Check if model needs loading
             loading_msg = None
@@ -550,8 +675,10 @@ async def websocket_chat(ws: WebSocket):
             try:
                 # Run agent in thread pool (it's blocking)
                 loop = asyncio.get_event_loop()
+                import functools
                 result = await loop.run_in_executor(
-                    None, _run_agent_sync, user_input, thread_id
+                    None, functools.partial(_run_agent_sync, user_input,
+                                            thread_id, image_b64=image_b64)
                 )
 
                 # Send reply
@@ -671,11 +798,12 @@ _agent.on_compaction(_compaction_callback)
 import telegram_bot
 
 
-def _telegram_handler(chat_id: int, text: str, user_id: int, username: str, thread_id: str | None = None) -> str:
+def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
+                      thread_id: str | None = None, image_b64: str | None = None) -> str:
     """Handle incoming Telegram message → agent → response."""
     import agent
     tid = thread_id or db.kv_get("telegram:thread_id") or None
-    result = agent.run(text, thread_id=tid, source="telegram")
+    result = agent.run(text, thread_id=tid, source="telegram", image_b64=image_b64)
 
     # Also broadcast to WebSocket
     if _ws_loop and _ws_clients:
