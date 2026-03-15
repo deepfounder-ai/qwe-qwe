@@ -943,20 +943,36 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
         except Exception:
             pass
 
-    # Typing indicator
-    kwargs = {"chat_id": chat_id, "action": "typing"}
-    if topic_id:
-        kwargs["message_thread_id"] = topic_id
-    _api("sendChatAction", token, **kwargs)
+    # Continuous typing indicator (Telegram expires after 5s)
+    typing_active = threading.Event()
+    typing_active.set()
+
+    def _keep_typing():
+        while typing_active.is_set():
+            kwargs = {"chat_id": chat_id, "action": "typing"}
+            if topic_id:
+                kwargs["message_thread_id"] = topic_id
+            _api("sendChatAction", token, **kwargs)
+            # Wait 4s before next (typing lasts 5s, refresh before expiry)
+            typing_active.wait(4)
+            if not typing_active.is_set():
+                break
+
+    typing_thread = threading.Thread(target=_keep_typing, daemon=True)
+    typing_thread.start()
 
     if _on_message:
         try:
             response = _on_message(chat_id, text, user_id, username, thread_id)
             if response:
+                typing_active.clear()  # stop typing before sending
                 send_message(chat_id, response, token, reply_to=message_id, topic_id=topic_id)
         except Exception as e:
             _log.error(f"handler error: {e}", exc_info=True)
+            typing_active.clear()
             send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token, topic_id=topic_id)
+        finally:
+            typing_active.clear()
 
 
 # ── Status ──
