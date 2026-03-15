@@ -288,6 +288,7 @@ register_command("memory", "Search agent memory")
 register_command("threads", "List conversation threads")
 register_command("stats", "Session statistics")
 register_command("clear", "Clear conversation in this thread")
+register_command("settings", "View/edit agent settings")
 register_command("cron", "List scheduled tasks")
 register_command("thinking", "Toggle thinking mode on/off")
 register_command("doctor", "Run diagnostics on all components")
@@ -396,6 +397,27 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         import db as _db
         _db.clear_history(thread_id=thread_id)
         send_message(chat_id, "🗑 History cleared for this thread.", token, topic_id=topic_id)
+        return True
+
+    if cmd == "settings":
+        parts = cmd_args.split(None, 1) if cmd_args else []
+        if len(parts) == 2:
+            # /settings key value
+            key, val = parts
+            result = config.set(key, val)
+            send_message(chat_id, result, token, topic_id=topic_id)
+        else:
+            # /settings — show all
+            all_s = config.get_all()
+            lines = ["⚙️ **Settings:**\n"]
+            for k, info in all_s.items():
+                v = info["value"]
+                d = info["default"]
+                marker = "" if v == d else " *(modified)*"
+                lines.append(f"• `{k}` = **{v}**{marker}")
+                lines.append(f"  _{info['description']}_ ({info['min']}-{info['max']})")
+            lines.append(f"\nEdit: `/settings <key> <value>`")
+            send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
         return True
 
     if cmd == "cron":

@@ -95,11 +95,12 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                     seen_texts.add(r["text"])
 
         # Global search (fill remaining slots)
-        remaining = config.MAX_MEMORY_RESULTS - (len(lines) - 1)
+        max_memory = config.get("max_memory_results")
+        remaining = max_memory - (len(lines) - 1)
         if remaining > 0:
             global_results = memory.search(user_input, limit=remaining + 2)
             for r in global_results:
-                if len(lines) - 1 >= config.MAX_MEMORY_RESULTS:
+                if len(lines) - 1 >= max_memory:
                     break
                 if r["score"] > 0.3 and r["text"] not in seen_texts:
                     lines.append(f"- [{r['tag']}] {r['text']}")
@@ -211,7 +212,6 @@ def _notify_compaction(event: str, data: dict):
 
 
 # Token budget settings
-CONTEXT_BUDGET = 24000     # max tokens for context (leave ~8k for generation)
 SYSTEM_RESERVE = 2000      # system prompt + tools
 RECENT_RESERVE = 2         # always keep last N user+assistant pairs
 
@@ -224,14 +224,14 @@ def _maybe_compact(thread_id: str | None = None):
     # Check if we need compaction (token-based OR message count)
     msg_count = len(all_msgs)
     needs_compact = (
-        total_tokens > CONTEXT_BUDGET - SYSTEM_RESERVE or
-        msg_count > config.COMPACTION_THRESHOLD
+        total_tokens > config.get("context_budget") - SYSTEM_RESERVE or
+        msg_count > config.get("compaction_threshold")
     )
 
     if not needs_compact:
         return
 
-    _log.info(f"compaction triggered: {msg_count} msgs, ~{total_tokens} tokens (budget: {CONTEXT_BUDGET})")
+    _log.info(f"compaction triggered: {msg_count} msgs, ~{total_tokens} tokens (budget: {config.get('context_budget')})")
 
     # Keep recent messages (last N pairs)
     keep_count = RECENT_RESERVE * 2  # user + assistant pairs
@@ -391,7 +391,8 @@ def run(user_input: str, thread_id: str | None = None, source: str = "cli") -> T
     last_failed_tool = None
     fail_count = 0
 
-    while rounds < config.MAX_TOOL_ROUNDS:
+    max_tool_rounds = config.get("max_tool_rounds")
+    while rounds < max_tool_rounds:
         # Check abort
         if hasattr(sys.modules[__name__], '_abort_event') and _abort_event.is_set():
             result.reply = "⏹ Stopped."
@@ -571,7 +572,7 @@ def run(user_input: str, thread_id: str | None = None, source: str = "cli") -> T
             providers.set_model(_original_model)
         return result
 
-    _log.warning(f"max tool rounds ({config.MAX_TOOL_ROUNDS}) exhausted")
+    _log.warning(f"max tool rounds ({max_tool_rounds}) exhausted")
     result.reply = "I've used all my tool rounds for this turn."
     db.save_message("assistant", result.reply, thread_id=tid)
     if _original_model:

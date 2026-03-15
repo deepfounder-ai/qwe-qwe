@@ -651,6 +651,11 @@ body {
           </div>
         </div>
         <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-sliders-horizontal"></i> Agent Settings</div>
+          <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">Fine-tune agent behavior. Changes take effect immediately.</p>
+          <div id="agentSettings">Loading...</div>
+        </div>
+        <div class="s-card">
           <div class="s-card-title"><i class="ph ph-scroll"></i> Logs</div>
           <div class="s-btn-row" style="margin-top:0;margin-bottom:12px">
             <button class="s-btn" onclick="loadLogs('qwe-qwe.log')">All logs</button>
@@ -1208,6 +1213,8 @@ async function loadSettingsSystem() {
       document.getElementById('lanInfo').style.display = 'none';
     }
   } catch(e) {}
+  // Agent settings
+  loadAgentSettings();
 }
 // ── Telegram Bot ──
 async function loadTelegramStatus() {
@@ -1352,6 +1359,50 @@ async function toggleLAN(enabled) {
     info.style.display = 'none';
   }
 }
+async function loadAgentSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    const container = document.getElementById('agentSettings');
+    container.innerHTML = '';
+    for (const [key, info] of Object.entries(data)) {
+      const row = document.createElement('div');
+      row.className = 's-row';
+      row.style.alignItems = 'center';
+      const modified = info.value !== info.default;
+      row.innerHTML = `
+        <div style="flex:1;">
+          <span class="s-row-label" style="display:block;">${key.replace(/_/g, ' ')}${modified ? ' <span style="color:var(--accent); font-size:10px;">modified</span>' : ''}</span>
+          <span style="color:var(--text-dim); font-size:11px;">${info.description} (${info.min}–${info.max})</span>
+        </div>
+        <input type="number" class="s-input" style="width:80px; text-align:center;" 
+          value="${info.value}" min="${info.min}" max="${info.max}"
+          onchange="saveAgentSetting('${key}', this.value, this)">
+      `;
+      container.appendChild(row);
+    }
+  } catch(e) { console.error('Failed to load settings', e); }
+}
+
+async function saveAgentSetting(key, value, el) {
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({[key]: parseInt(value)})
+    });
+    const data = await res.json();
+    const result = data.results[key];
+    if (result && result.startsWith('✓')) {
+      el.style.borderColor = 'var(--accent)';
+      setTimeout(() => { el.style.borderColor = ''; }, 1500);
+    } else {
+      el.style.borderColor = '#f44';
+      alert(result);
+    }
+  } catch(e) { console.error('Failed to save setting', e); }
+}
+
 async function loadLogs(file) {
   const res = await fetch(`/api/logs?file=${file}&lines=80`);
   const data = await res.json();

@@ -281,6 +281,23 @@ async def remove_soul_trait(name: str):
     return {"result": soul.remove_trait(name)}
 
 
+# ── Settings API ──
+@app.get("/api/settings")
+async def get_settings():
+    """Get all editable settings."""
+    return config.get_all()
+
+
+@app.post("/api/settings")
+async def update_settings(request: Request):
+    """Update one or more settings. Body: {"key": value, ...}"""
+    data = await request.json()
+    results = {}
+    for key, value in data.items():
+        results[key] = config.set(key, value)
+    return {"results": results}
+
+
 # ── Provider/Model endpoints ──
 
 @app.get("/api/providers")

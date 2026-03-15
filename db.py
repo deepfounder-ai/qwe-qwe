@@ -71,7 +71,9 @@ def save_message(role: str, content: str | None = None,
     conn.commit()
 
 
-def get_recent_messages(limit: int = config.MAX_HISTORY_MESSAGES, thread_id: str | None = None) -> list[dict]:
+def get_recent_messages(limit: int = None, thread_id: str | None = None) -> list[dict]:
+    if limit is None:
+        limit = config.get("max_history_messages")
     conn = _get_conn()
     tid = _tid(thread_id)
     rows = conn.execute(
