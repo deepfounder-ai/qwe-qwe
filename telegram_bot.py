@@ -247,29 +247,48 @@ def _api(method: str, token: str, **kwargs) -> dict:
         return {"ok": False, "description": str(e)}
 
 
-# ── Slash commands ──
+# ── Slash commands (dynamic registry) ──
 
-BOT_COMMANDS = [
-    {"command": "chatid", "description": "Show chat ID and topic ID"},
-    {"command": "status", "description": "Agent status (model, provider, memory)"},
-    {"command": "soul", "description": "Show personality traits"},
-    {"command": "model", "description": "Show current model and provider"},
-    {"command": "skills", "description": "List active skills"},
-    {"command": "memory", "description": "Search agent memory"},
-    {"command": "threads", "description": "List conversation threads"},
-    {"command": "stats", "description": "Session statistics"},
-    {"command": "clear", "description": "Clear conversation in this thread"},
-    {"command": "help", "description": "Show available commands"},
-]
+_command_registry: dict[str, dict] = {}  # cmd → {description, handler}
+
+
+def register_command(cmd: str, description: str, handler=None):
+    """Register a bot command. Called at module level or by skills/plugins.
+    
+    Args:
+        cmd: command name without slash (e.g. "status")
+        description: shown in Telegram predictive input (max 256 chars)
+        handler: optional callable(args, chat_id, user_id, token, topic_id, thread_id) → str|None
+    """
+    _command_registry[cmd] = {"description": description[:256], "handler": handler}
+
+
+def get_commands() -> list[dict]:
+    """Get all registered commands for Telegram API."""
+    return [{"command": k, "description": v["description"]} for k, v in _command_registry.items()]
 
 
 def _register_commands(token: str):
-    """Register slash commands with Telegram for predictive input."""
-    result = _api("setMyCommands", token, commands=BOT_COMMANDS)
+    """Push registered commands to Telegram for predictive input."""
+    commands = get_commands()
+    result = _api("setMyCommands", token, commands=commands)
     if result.get("ok"):
-        _log.info(f"registered {len(BOT_COMMANDS)} slash commands")
+        _log.info(f"registered {len(commands)} slash commands")
     else:
         _log.warning(f"failed to register commands: {result}")
+
+
+# ── Built-in commands ──
+register_command("chatid", "Show chat ID and topic ID")
+register_command("status", "Agent status (model, provider, memory)")
+register_command("soul", "Show personality traits")
+register_command("model", "Show current model and provider")
+register_command("skills", "List active skills")
+register_command("memory", "Search agent memory")
+register_command("threads", "List conversation threads")
+register_command("stats", "Session statistics")
+register_command("clear", "Clear conversation in this thread")
+register_command("help", "Show available commands")
 
 
 def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
@@ -378,10 +397,24 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
 
     if cmd == "help":
         lines = ["📖 *Commands:*"]
-        for c in BOT_COMMANDS:
-            lines.append(f"/{c['command']} — {c['description']}")
+        for c, info in _command_registry.items():
+            lines.append(f"/{c} — {info['description']}")
         send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
         return True
+
+    # Check dynamic handlers (from skills/plugins)
+    if cmd in _command_registry and _command_registry[cmd].get("handler"):
+        try:
+            result = _command_registry[cmd]["handler"](
+                args, chat_id, user_id, token, topic_id, thread_id
+            )
+            if result:
+                send_message(chat_id, result, token, topic_id=topic_id)
+            return True
+        except Exception as e:
+            _log.error(f"command handler error /{cmd}: {e}")
+            send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token, topic_id=topic_id)
+            return True
 
     return False
 
