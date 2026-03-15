@@ -379,8 +379,14 @@ async def setup_save(request: Request):
 
     traits = req.get("traits", {})
     for key, val in traits.items():
-        if isinstance(val, (int, float)):
-            db.kv_set(f"soul:{key}", str(max(0, min(10, int(val)))))
+        # Accept both levels ("low"/"moderate"/"high") and legacy numbers
+        if isinstance(val, str) and val in ("low", "moderate", "high"):
+            db.kv_set(f"soul:{key}", val)
+        elif isinstance(val, (int, float)):
+            # Convert numeric to level
+            n = max(0, min(10, int(val)))
+            level = "low" if n <= 3 else "moderate" if n <= 6 else "high"
+            db.kv_set(f"soul:{key}", level)
 
     db.kv_set("setup_complete", "1")
     logger.event("setup_complete", user=req.get("user_name"), provider=req.get("provider"))
@@ -486,7 +492,7 @@ async def add_soul_trait(data: dict):
     name = data.get("name", "")
     low = data.get("low", "low")
     high = data.get("high", "high")
-    value = data.get("value", 5)
+    value = data.get("value", "moderate")
     return {"result": soul.add_trait(name, low, high, value)}
 
 

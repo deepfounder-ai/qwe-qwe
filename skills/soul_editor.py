@@ -7,14 +7,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "add_trait",
-            "description": "Add a new custom personality trait with low/high descriptions and a value 0-10.",
+            "description": "Add a new custom personality trait with low/high descriptions. Level: low, moderate, or high.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Trait name (e.g. 'sarcasm', 'patience')"},
-                    "low_desc": {"type": "string", "description": "Description when trait is 0 (e.g. 'never sarcastic')"},
-                    "high_desc": {"type": "string", "description": "Description when trait is 10 (e.g. 'very sarcastic')"},
-                    "value": {"type": "integer", "description": "Initial value 0-10"},
+                    "low_desc": {"type": "string", "description": "Description for low level (e.g. 'never sarcastic')"},
+                    "high_desc": {"type": "string", "description": "Description for high level (e.g. 'very sarcastic')"},
+                    "value": {"type": "string", "enum": ["low", "moderate", "high"], "description": "Initial level"},
                 },
                 "required": ["name", "low_desc", "high_desc", "value"],
             },
@@ -52,12 +52,14 @@ def execute(name: str, args: dict) -> str:
 
     if name == "add_trait":
         trait_name = args["name"].lower().replace(" ", "_")
-        value = max(0, min(10, args.get("value", 5)))
+        value = args.get("value", "moderate")
+        if value not in soul.LEVELS:
+            value = soul._migrate_numeric(str(value))
         low_desc = args["low_desc"]
         high_desc = args["high_desc"]
 
         # Save trait value
-        db.kv_set(f"soul:{trait_name}", str(value))
+        db.kv_set(f"soul:{trait_name}", value)
 
         # Save custom trait descriptions
         custom = _load_custom_traits()
@@ -68,7 +70,7 @@ def execute(name: str, args: dict) -> str:
         soul.DEFAULTS[trait_name] = value
         soul.TRAIT_DESCRIPTIONS[trait_name] = (low_desc, high_desc)
 
-        return f"✓ Added trait '{trait_name}' = {value}/10 ({low_desc} ← → {high_desc})"
+        return f"✓ Added trait '{trait_name}' = {value} ({low_desc} ↔ {high_desc})"
 
     elif name == "remove_trait":
         trait_name = args["name"].lower().replace(" ", "_")
@@ -97,13 +99,12 @@ def execute(name: str, args: dict) -> str:
         s = soul.load()
         lines = []
         custom = _load_custom_traits()
-        for trait, value in s.items():
+        for trait, level in s.items():
             if trait in ("name", "language"):
                 continue
             marker = " ★" if trait in custom else ""
             low, high = soul.TRAIT_DESCRIPTIONS.get(trait, ("?", "?"))
-            bar = "█" * value + "░" * (10 - value)
-            lines.append(f"  [{bar}] {trait}={value}{marker}  ({low} ← → {high})")
+            lines.append(f"  {trait}: {level}{marker}  ({low} ↔ {high})")
         return "\n".join(lines) if lines else "No traits configured."
 
     return f"Unknown tool: {name}"
@@ -126,5 +127,5 @@ def _ensure_custom_loaded():
     custom = _load_custom_traits()
     for trait_name, descs in custom.items():
         if trait_name not in soul.DEFAULTS:
-            soul.DEFAULTS[trait_name] = 5
+            soul.DEFAULTS[trait_name] = "moderate"
             soul.TRAIT_DESCRIPTIONS[trait_name] = (descs["low"], descs["high"])

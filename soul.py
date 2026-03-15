@@ -1,22 +1,26 @@
-"""Soul — agent personality as compact numeric config."""
+"""Soul — agent personality as compact config with low/moderate/high levels."""
 
 from pathlib import Path
 import os
 import db
 import config
 
+# Valid trait levels
+LEVELS = ("low", "moderate", "high")
+LEVEL_TEMP = {"low": 0.3, "moderate": 0.6, "high": 0.9}
+
 # Default personality template
 DEFAULTS = {
     "name": "Agent",
     "language": "English",
-    "humor": 5,
-    "honesty": 8,
-    "curiosity": 6,
-    "brevity": 7,
-    "formality": 3,
-    "proactivity": 5,
-    "empathy": 5,
-    "creativity": 5,
+    "humor": "moderate",
+    "honesty": "high",
+    "curiosity": "moderate",
+    "brevity": "high",
+    "formality": "low",
+    "proactivity": "moderate",
+    "empathy": "moderate",
+    "creativity": "moderate",
 }
 
 TRAIT_DESCRIPTIONS = {
@@ -31,6 +35,22 @@ TRAIT_DESCRIPTIONS = {
 }
 
 
+def _migrate_numeric(val: str) -> str:
+    """Convert old numeric 0-10 values to low/moderate/high."""
+    if val in LEVELS:
+        return val
+    try:
+        n = int(val)
+        if n <= 3:
+            return "low"
+        elif n <= 6:
+            return "moderate"
+        else:
+            return "high"
+    except (ValueError, TypeError):
+        return "moderate"
+
+
 def load() -> dict:
     # Load custom traits first
     _load_custom_traits()
@@ -38,7 +58,10 @@ def load() -> dict:
     for key in DEFAULTS:
         val = db.kv_get(f"soul:{key}")
         if val is not None and val != "":
-            soul[key] = int(val) if val.isdigit() else val
+            if key in ("name", "language"):
+                soul[key] = val
+            else:
+                soul[key] = _migrate_numeric(val)
     return soul
 
 
@@ -54,7 +77,7 @@ def _load_custom_traits():
         return
     for name, descs in custom.items():
         if name not in DEFAULTS:
-            DEFAULTS[name] = 5
+            DEFAULTS[name] = "moderate"
             TRAIT_DESCRIPTIONS[name] = (descs["low"], descs["high"])
 
 
@@ -65,11 +88,15 @@ def save(key: str, value) -> str:
         return f"✓ {key} = {value}"
     if key not in DEFAULTS:
         return f"Unknown trait: {key}. Use add_trait() to create new ones."
-    db.kv_set(f"soul:{key}", str(value))
-    return f"✓ {key} = {value}"
+    # Normalize value
+    val = str(value).lower().strip()
+    if val not in LEVELS:
+        val = _migrate_numeric(val)
+    db.kv_set(f"soul:{key}", val)
+    return f"✓ {key} = {val}"
 
 
-def add_trait(name: str, low: str = "low", high: str = "high", value: int = 5) -> str:
+def add_trait(name: str, low: str = "low", high: str = "high", value: str = "moderate") -> str:
     """Add a custom personality trait."""
     import json
     name = name.lower().strip()
@@ -78,6 +105,14 @@ def add_trait(name: str, low: str = "low", high: str = "high", value: int = 5) -
     if name in ("name", "language"):
         return "✗ Reserved field name"
 
+    # Normalize value
+    if isinstance(value, (int, float)):
+        value = _migrate_numeric(str(int(value)))
+    elif str(value).lower().strip() not in LEVELS:
+        value = _migrate_numeric(str(value))
+    else:
+        value = str(value).lower().strip()
+
     # Load existing custom traits
     raw = db.kv_get("soul:_custom_traits")
     custom = json.loads(raw) if raw else {}
@@ -85,7 +120,7 @@ def add_trait(name: str, low: str = "low", high: str = "high", value: int = 5) -
     # Add/update
     custom[name] = {"low": low, "high": high}
     db.kv_set("soul:_custom_traits", json.dumps(custom))
-    db.kv_set(f"soul:{name}", str(value))
+    db.kv_set(f"soul:{name}", value)
 
     # Update runtime
     DEFAULTS[name] = value
@@ -132,6 +167,13 @@ def get_trait_descriptions() -> dict:
     return result
 
 
+def get_temperature() -> float:
+    """Get temperature based on creativity trait level."""
+    s = load()
+    level = s.get("creativity", "moderate")
+    return LEVEL_TEMP.get(level, 0.6)
+
+
 import json  # ensure available at module level
 
 
@@ -170,26 +212,16 @@ def to_prompt(soul: dict) -> str:
 
     # Build personality as direct behavioral instructions
     active_traits = []
-    for trait, value in soul.items():
+    for trait, level in soul.items():
         if trait in ("name", "language"):
             continue
-        value = int(value) if isinstance(value, str) else value
-        if value <= 2:
-            continue  # trait is off, skip
         if trait in TRAIT_DESCRIPTIONS:
             low, high = TRAIT_DESCRIPTIONS[trait]
-            if value >= 8:
+            if level == "high":
                 active_traits.append(f"Be VERY {high}.")
-            elif value >= 5:
+            elif level == "moderate":
                 active_traits.append(f"Be somewhat {high}.")
-            else:
-                active_traits.append(f"Lean slightly towards {high} over {low}.")
-        else:
-            # Custom traits without descriptions
-            if value >= 8:
-                active_traits.append(f"Be extremely {trait}ic." if not trait.endswith(('ic', 'al', 'ous', 'ive', 'ful')) else f"Be extremely {trait}.")
-            elif value >= 5:
-                active_traits.append(f"Be moderately {trait}ic." if not trait.endswith(('ic', 'al', 'ous', 'ive', 'ful')) else f"Be moderately {trait}.")
+            # low = skip (trait is off)
 
     if active_traits:
         lines.append("Personality: " + " ".join(active_traits))
@@ -237,9 +269,8 @@ Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every tu
 def format_display(soul: dict) -> str:
     lines = [f"⚡ {soul['name']} ({soul['language']})"]
     lines.append("")
-    for trait, value in soul.items():
+    for trait, level in soul.items():
         if trait in ("name", "language"):
             continue
-        bar = "█" * value + "░" * (10 - value)
-        lines.append(f"  {trait:12s} [{bar}] {value}/10")
+        lines.append(f"  {trait:12s}  {level}")
     return "\n".join(lines)

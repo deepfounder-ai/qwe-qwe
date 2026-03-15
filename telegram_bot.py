@@ -335,7 +335,7 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         lines = [f"🎭 *{s.get('name', 'Agent')}* ({s.get('language', '?')})"]
         for k, v in s.items():
             if k not in ("name", "language"):
-                lines.append(f"  {k}: {'█' * v}{'░' * (10-v)} {v}/10")
+                lines.append(f"  {k}: {v}")
         send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
         return True
 

@@ -111,15 +111,10 @@ def handle_soul_command(args: str):
         parts = args.split(maxsplit=1)
         if len(parts) == 2:
             key, value = parts
-            try:
-                value_int = int(value)
-                if 0 <= value_int <= 10:
-                    value = value_int
-                else:
-                    console.print("  [red]Value must be 0-10[/]")
-                    return
-            except ValueError:
-                pass
+            value = value.lower().strip()
+            if value not in ("low", "moderate", "high") and key not in ("name", "language"):
+                console.print("  [red]Value must be low, moderate, or high[/]")
+                return
             result = soul.save(key, value)
             console.print(f"  [magenta]{result}[/]")
         return
@@ -140,22 +135,20 @@ def handle_soul_command(args: str):
             return
 
     console.print()
-    numeric_traits = [k for k in s if k not in ("name", "language")]
-    for trait in numeric_traits:
-        value = s[trait]
+    level_traits = [k for k in s if k not in ("name", "language")]
+    for trait in level_traits:
+        level = s[trait]
         low, high = soul.TRAIT_DESCRIPTIONS.get(trait, ("low", "high"))
-        bar = "█" * value + "░" * (10 - value)
-        console.print(f"  [{bar}] [bold cyan]{trait}[/] = [bold]{value}[/]  [dim]{low} ← → {high}[/]")
+        console.print(f"  [bold cyan]{trait}[/] = [bold]{level}[/]  [dim]{low} ↔ {high}[/]")
         try:
-            inp = console.input(f"  [dim]new value 0-10 (enter=keep)[/] > ").strip()
+            inp = console.input(f"  [dim]low/moderate/high (enter=keep)[/] > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
         if inp == "q":
             break
-        if inp.isdigit():
-            v = max(0, min(10, int(inp)))
-            soul.save(trait, v)
-            s[trait] = v
+        if inp in ("low", "moderate", "high"):
+            soul.save(trait, inp)
+            s[trait] = inp
 
     console.print()
     console.print(Panel(
