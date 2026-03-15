@@ -80,7 +80,7 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 # ── Rate limiting (in-memory, per-IP) ──
 _rate_log: dict[str, list[float]] = {}  # ip -> [timestamps]
-_RATE_LIMIT = 30  # requests per minute
+_RATE_LIMIT = 120  # requests per minute (Settings page loads many endpoints at once)
 
 
 def _check_rate_limit(ip: str) -> bool:
