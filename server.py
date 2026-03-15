@@ -726,6 +726,11 @@ async def _broadcast(msg: dict):
 
 def _cron_callback(name: str, task: str, result: str):
     """Called from scheduler thread when a cron task completes."""
+    # Heartbeat: suppress silent OK results
+    if name == "__heartbeat__" and "HEARTBEAT_OK" in result:
+        _log.debug("heartbeat OK — silent")
+        return
+
     # WebSocket notification
     if _ws_loop and _ws_clients:
         msg = {

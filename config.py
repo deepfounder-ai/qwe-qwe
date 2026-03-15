@@ -54,6 +54,7 @@ EDITABLE_SETTINGS = {
     "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 4000, 60000),
     "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, 5),
     "self_check_enabled":   ("setting:self_check_enabled",    int, 1,     "Self-check before shell/write_file (0=off, 1=on)", 0, 1),
+    "heartbeat_interval_min": ("setting:heartbeat_interval_min", int, 30, "Heartbeat interval in minutes", 5, 1440),
 }
 
 

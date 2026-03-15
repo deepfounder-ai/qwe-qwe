@@ -375,6 +375,11 @@ def _build_messages(user_input: str, thread_id: str | None = None,
 
     msgs = [{"role": "system", "content": system_text}]
 
+    # Heartbeat: skip chat history, only system + user profile + memories
+    if source == "heartbeat":
+        msgs.append({"role": "user", "content": user_input})
+        return msgs
+
     # Recent history from SQLite (skip if it would create invalid sequences)
     history = db.get_recent_messages(thread_id=thread_id)
 

@@ -293,6 +293,7 @@ register_command("cron", "List scheduled tasks")
 register_command("thinking", "Toggle thinking mode on/off")
 register_command("doctor", "Run diagnostics on all components")
 register_command("profile", "View/edit user profile")
+register_command("heartbeat", "Manage periodic tasks checklist")
 register_command("help", "Show available commands")
 
 
@@ -421,6 +422,58 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
                     lines.append(f"• {k.replace('user:', '')}: {v}")
                 lines.append(f"\nEdit: `/profile set <key> <value>`")
                 send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        return True
+
+    if cmd == "heartbeat":
+        import scheduler
+        if not args:
+            # Show status and items
+            enabled = db.kv_get("heartbeat:enabled") == "1"
+            raw = db.kv_get("heartbeat:items")
+            items = json.loads(raw) if raw else []
+            status_icon = "🟢" if enabled else "⚪"
+            lines = [f"{status_icon} *Heartbeat* {'ON' if enabled else 'OFF'}"]
+            if items:
+                for i, item in enumerate(items, 1):
+                    lines.append(f"  {i}. {item}")
+            else:
+                lines.append("  No items yet.")
+            lines.append(f"\n`/heartbeat add <task>`\n`/heartbeat remove <N>`\n`/heartbeat on` / `off`")
+            send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        elif args.startswith("add "):
+            task_text = args[4:].strip().strip('"').strip("'")
+            if not task_text:
+                send_message(chat_id, "Usage: `/heartbeat add <task>`", token, topic_id=topic_id)
+            else:
+                raw = db.kv_get("heartbeat:items")
+                items = json.loads(raw) if raw else []
+                items.append(task_text)
+                db.kv_set("heartbeat:items", json.dumps(items))
+                send_message(chat_id, f"✅ Added: {task_text}", token, topic_id=topic_id)
+        elif args.startswith("remove "):
+            try:
+                idx = int(args[7:].strip()) - 1
+                raw = db.kv_get("heartbeat:items")
+                items = json.loads(raw) if raw else []
+                if 0 <= idx < len(items):
+                    removed = items.pop(idx)
+                    db.kv_set("heartbeat:items", json.dumps(items))
+                    send_message(chat_id, f"✅ Removed: {removed}", token, topic_id=topic_id)
+                else:
+                    send_message(chat_id, f"Invalid index. Use `/heartbeat` to see items.", token, topic_id=topic_id)
+            except ValueError:
+                send_message(chat_id, "Usage: `/heartbeat remove <number>`", token, topic_id=topic_id)
+        elif args.strip() == "on":
+            db.kv_set("heartbeat:enabled", "1")
+            scheduler._register_heartbeat()
+            interval = config.get("heartbeat_interval_min")
+            send_message(chat_id, f"🟢 Heartbeat ON (every {interval}m)", token, topic_id=topic_id)
+        elif args.strip() == "off":
+            db.kv_set("heartbeat:enabled", "0")
+            scheduler._unregister_heartbeat()
+            send_message(chat_id, "⚪ Heartbeat OFF", token, topic_id=topic_id)
+        else:
+            send_message(chat_id, "Usage: `/heartbeat`, `add <task>`, `remove <N>`, `on`, `off`", token, topic_id=topic_id)
         return True
 
     if cmd == "settings":

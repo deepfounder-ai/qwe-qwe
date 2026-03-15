@@ -131,12 +131,73 @@ def on_complete(fn):
     _callbacks.append(fn)
 
 
+HEARTBEAT_TASK_NAME = "__heartbeat__"
+
+
+def _register_heartbeat():
+    """Auto-register heartbeat cron task if enabled and not already registered."""
+    if db.kv_get("heartbeat:enabled") != "1":
+        return
+    _ensure_table()
+    conn = db._get_conn()
+    row = conn.execute(
+        "SELECT id FROM scheduled_tasks WHERE name=?", (HEARTBEAT_TASK_NAME,)
+    ).fetchone()
+    if row:
+        return  # already registered
+    interval = config.get("heartbeat_interval_min")
+    schedule = f"every {interval}m"
+    next_run = time.time() + interval * 60
+    conn.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,1,1)",
+        (HEARTBEAT_TASK_NAME, HEARTBEAT_TASK_NAME, schedule, next_run)
+    )
+    conn.commit()
+    _log.info(f"heartbeat registered: every {interval}m")
+
+
+def _unregister_heartbeat():
+    """Remove heartbeat task from scheduler."""
+    _ensure_table()
+    conn = db._get_conn()
+    conn.execute("DELETE FROM scheduled_tasks WHERE name=?", (HEARTBEAT_TASK_NAME,))
+    conn.commit()
+    _log.info("heartbeat unregistered")
+
+
+def _execute_heartbeat() -> str:
+    """Execute heartbeat: run checklist items through agent."""
+    raw = db.kv_get("heartbeat:items")
+    if not raw:
+        return "HEARTBEAT_OK"
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        return "HEARTBEAT_OK"
+    if not items:
+        return "HEARTBEAT_OK"
+
+    import agent
+    prompt = (
+        "Here are your periodic tasks:\n"
+        + "\n".join(f"- {item}" for item in items)
+        + "\n\nCheck what's relevant now. If nothing needs attention, reply HEARTBEAT_OK."
+    )
+    try:
+        result = agent.run(prompt, thread_id=None, source="heartbeat")
+        return result.reply
+    except Exception as e:
+        _log.error(f"heartbeat agent error: {e}")
+        return f"Error: {e}"
+
+
 def start():
     """Start the scheduler background thread."""
     global _thread_started
     if _thread_started:
         return
     _thread_started = True
+    _register_heartbeat()
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
 
@@ -193,6 +254,10 @@ def _check_and_run():
 def _execute_task(task_desc: str) -> str:
     """Run a task through the LLM."""
     import config, tools
+
+    # Heartbeat tasks — special handling
+    if task_desc == HEARTBEAT_TASK_NAME:
+        return _execute_heartbeat()
 
     # Simple reminders don't need LLM — just return a clean notification
     reminder_markers = ["remind", "напомни", "напоминание", "напомнить", "выпить", "drink", "stretch", "break"]
