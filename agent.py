@@ -275,13 +275,13 @@ def _clean_response(text: str) -> str:
         cleaned.append(line)
     text = '\n'.join(cleaned)
 
-    # Remove trailing "Хочешь ещё?" / "Нужно что-то?" patterns
+    # Remove trailing "Want more?" / "Need anything else?" patterns (RU/EN)
     text = re.sub(
         r'\n+(?:Хочешь|Нужно|Скажи|Если нужно|Что именно|Могу ещё|Давай|Подсказать)[\s\S]{0,100}[?!😊😄🤔]\s*$',
         '', text
     )
 
-    # Remove "Вариант N:" sections if more than 1
+    # Remove "Option N:" / "Variant N:" sections if more than 1
     variant_count = len(re.findall(r'(?:Вариант|Variant|Option)\s*\d', text))
     if variant_count > 1:
         # Keep only first variant

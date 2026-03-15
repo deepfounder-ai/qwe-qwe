@@ -415,7 +415,7 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         else:
             profile = db.kv_get_prefix("user:")
             if not profile:
-                send_message(chat_id, "👤 No profile data yet.\n\nSet with: `/profile set name Кирилл`", token, topic_id=topic_id)
+                send_message(chat_id, "👤 No profile data yet.\n\nSet with: `/profile set name John`", token, topic_id=topic_id)
             else:
                 lines = ["👤 *Profile:*"]
                 for k, v in sorted(profile.items()):
