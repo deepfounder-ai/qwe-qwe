@@ -25,7 +25,7 @@ DB_PATH = "qwe_qwe.db"
 TZ_OFFSET = 0  # overridden at runtime from DB
 
 # Agent
-MAX_HISTORY_MESSAGES = 4   # last N messages in context (keep small for 32k models)
+MAX_HISTORY_MESSAGES = 10  # last N messages in context (smart compaction handles the rest)
 MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
 MAX_TOOL_ROUNDS = 10       # max consecutive tool calls per turn
 COMPACTION_THRESHOLD = 20  # auto-compact after N messages in DB
