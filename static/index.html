@@ -479,6 +479,9 @@ body {
       <div class="settings-nav-item" onclick="showSection('model')"><span class="nav-icon"><i class="ph ph-brain"></i></span><span>Model</span></div>
       <div class="settings-nav-item" onclick="showSection('skills')"><span class="nav-icon"><i class="ph ph-lightning"></i></span><span>Skills</span></div>
       <div class="settings-nav-item" onclick="showSection('threads')"><span class="nav-icon"><i class="ph ph-chats-circle"></i></span><span>Threads</span></div>
+      <div class="settings-nav-item" onclick="showSection('profile')"><span class="nav-icon"><i class="ph ph-user-circle"></i></span><span>Profile</span></div>
+      <div class="settings-nav-item" onclick="showSection('heartbeat')"><span class="nav-icon"><i class="ph ph-heartbeat"></i></span><span>Heartbeat</span></div>
+      <div class="settings-nav-item" onclick="showSection('stats')"><span class="nav-icon"><i class="ph ph-chart-bar"></i></span><span>Stats</span></div>
       <div class="settings-nav-item" onclick="showSection('system')"><span class="nav-icon"><i class="ph ph-wrench"></i></span><span>System</span></div>
     </div>
     <div class="settings-content">
@@ -570,6 +573,64 @@ body {
           <button class="s-btn" onclick="loadSettingsThreads(true)">Show archived</button>
         </div>
         <div id="threadList"></div>
+      </div>
+
+      <!-- User Profile -->
+      <div class="settings-section" id="sec-profile">
+        <h2>User Profile</h2>
+        <p class="desc">Facts the agent knows about you. Used in every conversation for personalization.</p>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-identification-card"></i> Profile Data</div>
+          <div id="profileRows"></div>
+          <div class="s-input-row" style="margin-top:12px;">
+            <input class="s-input" id="newProfileKey" placeholder="key (e.g. name)" style="width:140px">
+            <input class="s-input" id="newProfileValue" placeholder="value (e.g. Кирилл)" style="flex:1">
+            <button class="s-btn primary" onclick="addProfileField()">Add</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Heartbeat -->
+      <div class="settings-section" id="sec-heartbeat">
+        <h2>Heartbeat</h2>
+        <p class="desc">Periodic background tasks — the agent checks these items on a schedule and reports via Telegram.</p>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-power"></i> Control</div>
+          <div class="s-row">
+            <span class="s-row-label">Enable heartbeat</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="hbToggle" onchange="toggleHeartbeat()">
+              <span class="toggle-track"></span>
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+          <div class="s-row">
+            <span class="s-row-label">Interval (min)</span>
+            <span class="s-row-value" id="hbInterval">—</span>
+          </div>
+          <p style="color:var(--text-dim); font-size:11px; margin:8px 0 0;"><i class="ph ph-lightbulb"></i> Change interval in Agent Settings (heartbeat interval min)</p>
+        </div>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-list-checks"></i> Checklist</div>
+          <div id="hbItems"></div>
+          <div class="s-input-row" style="margin-top:12px;">
+            <input class="s-input" id="newHbItem" placeholder="e.g. check weather forecast" style="flex:1" onkeydown="if(event.key==='Enter')addHeartbeatItem()">
+            <button class="s-btn primary" onclick="addHeartbeatItem()">Add</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="settings-section" id="sec-stats">
+        <h2>Stats</h2>
+        <p class="desc">Reliability and usage counters — how the agent compensates for the small model.</p>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-chart-line-up"></i> Counters</div>
+          <div id="statsRows"><span class="s-row-label">Loading...</span></div>
+          <div class="s-btn-row" style="margin-top:12px;">
+            <button class="s-btn danger" onclick="resetStats()">Reset all counters</button>
+          </div>
+        </div>
       </div>
 
       <!-- System -->
@@ -925,6 +986,9 @@ async function loadAllSettings() {
   loadSettingsProviders();
   loadSettingsSkills();
   loadSettingsThreads();
+  loadSettingsProfile();
+  loadSettingsHeartbeat();
+  loadSettingsStats();
   loadSettingsSystem();
 }
 
@@ -1377,6 +1441,145 @@ async function toggleLAN(enabled) {
     info.style.display = 'none';
   }
 }
+// ── User Profile ──
+async function loadSettingsProfile() {
+  try {
+    const res = await fetch('/api/user-profile');
+    const data = await res.json();
+    const container = document.getElementById('profileRows');
+    container.innerHTML = '';
+    const entries = Object.entries(data).filter(([k,v]) => v);
+    if (entries.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-dim); font-size:13px; padding:8px 0;">No profile data yet. Add fields below or tell the agent about yourself.</p>';
+      return;
+    }
+    for (const [key, value] of entries) {
+      const row = document.createElement('div');
+      row.className = 's-row';
+      row.style.alignItems = 'center';
+      row.innerHTML = `
+        <span class="s-row-label" style="min-width:120px;">${key}</span>
+        <input class="s-input" style="flex:1" value="${value.replace(/"/g, '&quot;')}"
+          onchange="saveProfileField('${key}', this.value, this)">
+        <button class="s-btn danger" style="margin-left:8px; padding:4px 8px; font-size:12px;"
+          onclick="deleteProfileField('${key}')">×</button>
+      `;
+      container.appendChild(row);
+    }
+  } catch(e) { console.error('Profile load error:', e); }
+}
+
+async function saveProfileField(key, value, el) {
+  try {
+    await fetch('/api/user-profile', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key, value})});
+    if (el) { el.style.borderColor = 'var(--accent)'; setTimeout(() => { el.style.borderColor = ''; }, 1500); }
+  } catch(e) { console.error('Profile save error:', e); }
+}
+
+async function deleteProfileField(key) {
+  await fetch('/api/user-profile', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({delete: key})});
+  loadSettingsProfile();
+}
+
+async function addProfileField() {
+  const key = document.getElementById('newProfileKey').value.trim();
+  const value = document.getElementById('newProfileValue').value.trim();
+  if (!key || !value) return;
+  await fetch('/api/user-profile', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key, value})});
+  document.getElementById('newProfileKey').value = '';
+  document.getElementById('newProfileValue').value = '';
+  loadSettingsProfile();
+}
+
+// ── Heartbeat ──
+async function loadSettingsHeartbeat() {
+  try {
+    const res = await fetch('/api/heartbeat');
+    const data = await res.json();
+    document.getElementById('hbToggle').checked = data.enabled;
+    document.getElementById('hbInterval').textContent = data.interval_min + ' min';
+    const container = document.getElementById('hbItems');
+    container.innerHTML = '';
+    if (data.items.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-dim); font-size:13px; padding:8px 0;">No tasks yet. Add items below.</p>';
+      return;
+    }
+    data.items.forEach((item, i) => {
+      const row = document.createElement('div');
+      row.className = 's-row';
+      row.style.alignItems = 'center';
+      row.innerHTML = `
+        <span style="color:var(--text-dim); font-size:12px; min-width:24px;">${i+1}.</span>
+        <span style="flex:1; font-size:13px;">${item}</span>
+        <button class="s-btn danger" style="padding:4px 8px; font-size:12px;"
+          onclick="removeHeartbeatItem(${i})">×</button>
+      `;
+      container.appendChild(row);
+    });
+  } catch(e) { console.error('Heartbeat load error:', e); }
+}
+
+async function toggleHeartbeat() {
+  await fetch('/api/heartbeat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'toggle'})});
+  loadSettingsHeartbeat();
+}
+
+async function addHeartbeatItem() {
+  const input = document.getElementById('newHbItem');
+  const text = input.value.trim();
+  if (!text) return;
+  await fetch('/api/heartbeat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'add', text})});
+  input.value = '';
+  loadSettingsHeartbeat();
+}
+
+async function removeHeartbeatItem(index) {
+  await fetch('/api/heartbeat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'remove', index})});
+  loadSettingsHeartbeat();
+}
+
+// ── Stats ──
+const STAT_LABELS = {
+  tool_calls_total: {label: 'Tool calls', icon: 'ph-wrench'},
+  json_repairs: {label: 'JSON repairs', icon: 'ph-first-aid'},
+  retry_successes: {label: 'Retry successes', icon: 'ph-arrow-clockwise'},
+  self_check_fixes: {label: 'Self-check fixes', icon: 'ph-magnifying-glass'},
+  tool_errors: {label: 'Tool errors', icon: 'ph-warning'},
+};
+
+async function loadSettingsStats() {
+  try {
+    const res = await fetch('/api/stats');
+    const data = await res.json();
+    const container = document.getElementById('statsRows');
+    container.innerHTML = '';
+    const keys = Object.keys(STAT_LABELS);
+    // Show known stats first, then any extras
+    const allKeys = [...keys, ...Object.keys(data).filter(k => !keys.includes(k))];
+    if (allKeys.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-dim); font-size:13px; padding:8px 0;">No stats yet. Counters appear after the agent processes messages.</p>';
+      return;
+    }
+    for (const key of allKeys) {
+      const val = data[key] || 0;
+      const info = STAT_LABELS[key] || {label: key.replace(/_/g, ' '), icon: 'ph-hash'};
+      const row = document.createElement('div');
+      row.className = 's-row';
+      row.innerHTML = `
+        <span class="s-row-label"><i class="ph ${info.icon}" style="margin-right:6px;"></i>${info.label}</span>
+        <span class="s-row-value" style="font-size:16px; font-weight:600; color:var(--accent);">${val.toLocaleString()}</span>
+      `;
+      container.appendChild(row);
+    }
+  } catch(e) { console.error('Stats load error:', e); }
+}
+
+async function resetStats() {
+  if (!confirm('Reset all counters to zero?')) return;
+  await fetch('/api/stats/reset', {method:'POST'});
+  loadSettingsStats();
+}
+
 async function loadAgentSettings() {
   try {
     const res = await fetch('/api/settings');

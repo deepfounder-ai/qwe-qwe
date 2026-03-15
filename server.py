@@ -235,6 +235,92 @@ async def stats():
     return {k.replace("stats:", ""): int(v) for k, v in raw.items()}
 
 
+@app.post("/api/stats/reset")
+async def stats_reset():
+    """Reset all stats counters to zero."""
+    raw = db.kv_get_prefix("stats:")
+    for key in raw:
+        db.kv_set(key, "0")
+    return {"ok": True, "reset": len(raw)}
+
+
+@app.get("/api/user-profile")
+async def get_user_profile():
+    """Get user profile data."""
+    raw = db.kv_get_prefix("user:")
+    return {k.replace("user:", ""): v for k, v in raw.items()}
+
+
+@app.post("/api/user-profile")
+async def update_user_profile(request: Request):
+    """Update or delete user profile fields."""
+    req = await request.json()
+    if "delete" in req:
+        key = req["delete"].strip().lower().replace(" ", "_")
+        db.kv_set(f"user:{key}", "")
+        # Actually delete by setting empty — or use raw SQL
+        conn = db._get_conn()
+        conn.execute("DELETE FROM kv WHERE key=?", (f"user:{key}",))
+        conn.commit()
+        return {"ok": True, "deleted": key}
+    key = req.get("key", "").strip().lower().replace(" ", "_")
+    value = req.get("value", "").strip()
+    if not key:
+        return JSONResponse({"error": "key required"}, status_code=400)
+    db.kv_set(f"user:{key}", value)
+    return {"ok": True, "key": key, "value": value}
+
+
+@app.get("/api/heartbeat")
+async def get_heartbeat():
+    """Get heartbeat config and items."""
+    enabled = db.kv_get("heartbeat:enabled") == "1"
+    interval = config.get("heartbeat_interval_min")
+    raw = db.kv_get("heartbeat:items")
+    items = json.loads(raw) if raw else []
+    return {"enabled": enabled, "interval_min": interval, "items": items}
+
+
+@app.post("/api/heartbeat")
+async def update_heartbeat(request: Request):
+    """Manage heartbeat: add/remove items, toggle on/off."""
+    import scheduler
+    req = await request.json()
+    action = req.get("action", "")
+
+    if action == "add":
+        text = req.get("text", "").strip()
+        if not text:
+            return JSONResponse({"error": "text required"}, status_code=400)
+        raw = db.kv_get("heartbeat:items")
+        items = json.loads(raw) if raw else []
+        items.append(text)
+        db.kv_set("heartbeat:items", json.dumps(items))
+        return {"ok": True, "items": items}
+
+    if action == "remove":
+        idx = req.get("index", -1)
+        raw = db.kv_get("heartbeat:items")
+        items = json.loads(raw) if raw else []
+        if 0 <= idx < len(items):
+            removed = items.pop(idx)
+            db.kv_set("heartbeat:items", json.dumps(items))
+            return {"ok": True, "removed": removed, "items": items}
+        return JSONResponse({"error": "invalid index"}, status_code=400)
+
+    if action == "toggle":
+        current = db.kv_get("heartbeat:enabled") == "1"
+        new_val = not current
+        db.kv_set("heartbeat:enabled", "1" if new_val else "0")
+        if new_val:
+            scheduler._register_heartbeat()
+        else:
+            scheduler._unregister_heartbeat()
+        return {"ok": True, "enabled": new_val}
+
+    return JSONResponse({"error": "unknown action"}, status_code=400)
+
+
 @app.get("/api/discover")
 async def discover_servers():
     """Auto-discover LLM servers on localhost."""
