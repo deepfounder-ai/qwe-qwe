@@ -90,50 +90,173 @@ class TurnResult:
         self.auto_context_hits = 0
 
 
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Estimate token count for a list of messages (rough: 1 token ≈ 4 chars)."""
+    total = 0
+    for m in messages:
+        content = m.get("content") or ""
+        total += len(content) // 4 + 4  # +4 for role/metadata overhead
+        # Tool calls add extra tokens
+        if m.get("tool_calls"):
+            tc = m["tool_calls"]
+            if isinstance(tc, str):
+                total += len(tc) // 4
+            elif isinstance(tc, list):
+                for t in tc:
+                    total += 50  # overhead per tool call
+                    if isinstance(t, dict):
+                        args = t.get("function", {}).get("arguments", "")
+                        total += len(str(args)) // 4
+    return total
+
+
+# ── Compaction state (for notifications) ──
+_compaction_callbacks: list = []  # [(callback_fn, context)]
+
+
+def on_compaction(callback):
+    """Register a callback for compaction events: callback(event, data).
+    
+    Events: 'start', 'summary', 'done', 'skip', 'error'
+    """
+    _compaction_callbacks.append(callback)
+
+
+def _notify_compaction(event: str, data: dict):
+    """Notify all registered callbacks about compaction events."""
+    for cb in _compaction_callbacks:
+        try:
+            cb(event, data)
+        except Exception as e:
+            _log.warning(f"compaction callback error: {e}")
+
+
+# Token budget settings
+CONTEXT_BUDGET = 24000     # max tokens for context (leave ~8k for generation)
+SYSTEM_RESERVE = 2000      # system prompt + tools
+RECENT_RESERVE = 2         # always keep last N user+assistant pairs
+
+
 def _maybe_compact(thread_id: str | None = None):
-    """Auto-compact: summarize old messages into memory when history gets long."""
-    count = db.count_messages(thread_id=thread_id)
-    if count < config.COMPACTION_THRESHOLD:
+    """Smart compaction: token-aware, summarizes to memory, notifies."""
+    all_msgs = db.get_recent_messages(limit=200, thread_id=thread_id)
+    total_tokens = _estimate_tokens(all_msgs)
+
+    # Check if we need compaction (token-based OR message count)
+    msg_count = len(all_msgs)
+    needs_compact = (
+        total_tokens > CONTEXT_BUDGET - SYSTEM_RESERVE or
+        msg_count > config.COMPACTION_THRESHOLD
+    )
+
+    if not needs_compact:
         return
 
-    # Get oldest messages (keep recent ones)
-    keep_recent = config.MAX_HISTORY_MESSAGES
-    to_compact = db.get_oldest_messages(count - keep_recent, thread_id=thread_id)
-    if len(to_compact) < 4:
+    _log.info(f"compaction triggered: {msg_count} msgs, ~{total_tokens} tokens (budget: {CONTEXT_BUDGET})")
+
+    # Keep recent messages (last N pairs)
+    keep_count = RECENT_RESERVE * 2  # user + assistant pairs
+    if len(all_msgs) <= keep_count + 2:
+        return  # not enough to compact
+
+    # Split: old messages to compact, recent to keep
+    # all_msgs is already in chronological order
+    to_compact_msgs = all_msgs[:len(all_msgs) - keep_count]
+    
+    if len(to_compact_msgs) < 3:
         return
 
-    # Build conversation text for summarization
-    convo = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in to_compact if m['content'])
+    # Get DB IDs for the old messages
+    oldest = db.get_oldest_messages(len(to_compact_msgs), thread_id=thread_id)
+    if not oldest:
+        return
 
-    # Summarize via LLM
-    client = providers.get_client()
-    try:
-        _log.info(f"compaction: summarizing {len(to_compact)} messages")
-        resp = client.chat.completions.create(
-            model=providers.get_model(),
-            messages=[
-                {"role": "system", "content": "Extract ONLY important facts from this conversation: user preferences, decisions, names, tasks, technical info. If nothing important — reply with just 'SKIP'. No greetings or chitchat. Be very concise."},
-                {"role": "user", "content": convo},
-            ],
-            temperature=0.3,
-            max_tokens=256,
-        )
-        summary = _strip_thinking(resp.choices[0].message.content or "")
-        if summary and summary.strip().upper() != "SKIP":
-            memory.save(summary, tag="session")
-            _log.info(f"compaction: saved summary ({len(summary)} chars)")
-        else:
-            _log.info("compaction: nothing important, skipped")
+    compact_tokens = _estimate_tokens(to_compact_msgs)
+    _log.info(f"compacting {len(to_compact_msgs)} messages (~{compact_tokens} tokens)")
 
-        # Cleanup old session summaries (>7 days)
-        memory.cleanup(max_age_days=7, tag="session")
+    # Notify: compaction starting
+    _notify_compaction("start", {
+        "thread_id": thread_id,
+        "messages": len(to_compact_msgs),
+        "tokens": compact_tokens,
+    })
 
-        # Delete compacted messages
-        ids = [m["id"] for m in to_compact]
-        db.delete_messages_by_ids(ids)
-        _log.info(f"compaction: deleted {len(ids)} old messages")
-    except Exception:
-        _log.error("compaction failed", exc_info=True)
+    # Build conversation for summarization (truncate very long messages)
+    convo_lines = []
+    for m in to_compact_msgs:
+        content = m.get("content") or ""
+        if not content:
+            continue
+        role = m["role"]
+        # Truncate long tool outputs
+        if role == "tool":
+            content = content[:500] + ("..." if len(content) > 500 else "")
+        elif len(content) > 1000:
+            content = content[:1000] + "..."
+        convo_lines.append(f"{role}: {content}")
+
+    convo = "\n".join(convo_lines)
+
+    # Summarize via LLM (use background thread via tasks module)
+    import threading
+
+    def _do_compact():
+        try:
+            providers.ensure_model_loaded()
+            client = providers.get_client()
+            resp = client.chat.completions.create(
+                model=providers.get_model(),
+                messages=[
+                    {"role": "system", "content": (
+                        "Summarize this conversation into key facts. Extract:\n"
+                        "- User preferences and decisions\n"
+                        "- Technical details, configs, paths\n"
+                        "- Task results and outcomes\n"
+                        "- Names, dates, important context\n"
+                        "If nothing important — reply SKIP.\n"
+                        "Be concise: bullet points, max 200 words."
+                    )},
+                    {"role": "user", "content": convo[:8000]},  # cap input
+                ],
+                temperature=0.3,
+                max_tokens=512,
+            )
+            summary = _strip_thinking(resp.choices[0].message.content or "")
+
+            if summary and summary.strip().upper() != "SKIP":
+                memory.save(summary, tag="compaction")
+                _log.info(f"compaction: saved summary ({len(summary)} chars)")
+                _notify_compaction("summary", {
+                    "thread_id": thread_id,
+                    "summary": summary[:300],
+                    "saved_tokens": compact_tokens,
+                })
+            else:
+                _log.info("compaction: nothing important, skipped")
+                _notify_compaction("skip", {"thread_id": thread_id})
+
+            # Delete compacted messages
+            ids = [m["id"] for m in oldest]
+            db.delete_messages_by_ids(ids)
+
+            remaining = db.count_messages(thread_id=thread_id)
+            _log.info(f"compaction done: deleted {len(ids)} msgs, {remaining} remaining")
+            _notify_compaction("done", {
+                "thread_id": thread_id,
+                "deleted": len(ids),
+                "remaining": remaining,
+            })
+
+            # Cleanup old compaction summaries (>14 days)
+            memory.cleanup(max_age_days=14, tag="compaction")
+
+        except Exception as e:
+            _log.error(f"compaction failed: {e}", exc_info=True)
+            _notify_compaction("error", {"thread_id": thread_id, "error": str(e)})
+
+    # Run in background thread so it doesn't block the response
+    t = threading.Thread(target=_do_compact, daemon=True)
+    t.start()
 
 
 def _get_thread_model(tid: str | None) -> str | None:

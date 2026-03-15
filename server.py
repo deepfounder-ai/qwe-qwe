@@ -590,6 +590,40 @@ def _cron_callback(name: str, task: str, result: str):
 import scheduler
 scheduler.on_complete(_cron_callback)
 
+
+# ── Compaction notifications ──
+import agent as _agent
+
+def _compaction_callback(event: str, data: dict):
+    """Notify WS clients and Telegram about compaction events."""
+    # WebSocket notification
+    if _ws_loop and _ws_clients:
+        ws_msg = {"type": "compaction", "event": event, **data}
+        asyncio.run_coroutine_threadsafe(_broadcast(ws_msg), _ws_loop)
+
+    # Telegram notification (only for start and done)
+    if event == "start":
+        _tg_notify(f"🔄 Compacting memory: {data.get('messages', 0)} messages (~{data.get('tokens', 0)} tokens)...")
+    elif event == "summary":
+        summary = data.get("summary", "")[:200]
+        _tg_notify(f"🧠 Saved to memory:\n_{summary}_")
+    elif event == "done":
+        _tg_notify(f"✅ Compaction done. {data.get('remaining', 0)} messages remaining.")
+    elif event == "error":
+        _tg_notify(f"⚠️ Compaction error: {data.get('error', '')[:100]}")
+
+
+def _tg_notify(text: str):
+    """Send compaction notification to the active Telegram chat."""
+    if not telegram_bot.is_verified() or not telegram_bot._running:
+        return
+    owner = telegram_bot.get_owner_id()
+    if owner:
+        telegram_bot.send_message(owner, text)
+
+
+_agent.on_compaction(_compaction_callback)
+
 # ── Telegram Bot ──
 import telegram_bot
 
