@@ -73,7 +73,7 @@ PRESETS = {
 
 # Provider capabilities — not all support all features
 CAPABILITIES = {
-    "lmstudio":   {"supports_response_format": True},
+    "lmstudio":   {"supports_response_format": False},  # only supports json_schema, not json_object
     "ollama":     {"supports_response_format": True},
     "openai":     {"supports_response_format": True},
     "openrouter": {"supports_response_format": False},  # varies by model behind it
@@ -287,8 +287,18 @@ def switch(name: str) -> str:
             pass  # can't discover, keep current model
 
     _invalidate()
+    _reset_structured_output_cache()
     _log.info(f"provider switched: {old} → {name} ({p['url']})")
     return f"✓ Switched to {p.get('name', name)} ({p['url']})"
+
+
+def _reset_structured_output_cache():
+    """Reset agent's structured output failure cache on provider switch."""
+    try:
+        import agent
+        agent._structured_output_failed = False
+    except (ImportError, AttributeError):
+        pass
 
 
 def add(name: str, url: str, key: str = "", models: list[str] | None = None) -> str:

@@ -9,6 +9,7 @@ import logger
 _log = logger.get("agent")
 _console = Console()
 _abort_event = threading.Event()  # can be replaced by server
+_structured_output_failed = False  # runtime cache: disable after first 400
 
 
 def _repair_json(raw: str) -> dict:
@@ -75,9 +76,20 @@ def _repair_json(raw: str) -> dict:
 
 def _json_format_extra() -> dict:
     """Return response_format kwarg if provider supports structured output."""
+    if _structured_output_failed:
+        return {}
     if providers.supports("supports_response_format"):
         return {"response_format": {"type": "json_object"}}
     return {}
+
+
+def _mark_structured_failed(error: Exception):
+    """Cache structured output failure to avoid repeated 400s."""
+    global _structured_output_failed
+    err_str = str(error)
+    if "400" in err_str or "response_format" in err_str.lower():
+        _structured_output_failed = True
+        _log.info("structured output disabled for this session (provider returned 400)")
 
 
 def _get_tool_schema(tool_name: str) -> dict | None:
@@ -127,6 +139,7 @@ def _retry_tool_call(client, model: str, tool_name: str,
             break  # parsed but no JSON found, move to attempt 3
         except Exception as e:
             if attempt_extra:  # structured output failed, try without
+                _mark_structured_failed(e)
                 _log.warning(f"retry attempt 2 (structured) failed: {e}, falling back")
                 continue
             _log.warning(f"retry attempt 2 failed: {e}")
@@ -155,6 +168,7 @@ def _retry_tool_call(client, model: str, tool_name: str,
             break
         except Exception as e:
             if attempt_extra:
+                _mark_structured_failed(e)
                 continue
             _log.warning(f"retry attempt 3 failed: {e}")
 
@@ -210,6 +224,7 @@ def _self_check_tool_call(client, model: str, tool_name: str,
                 break
             except Exception as e:
                 if attempt_extra:
+                    _mark_structured_failed(e)
                     _log.warning(f"self-check (structured) failed: {e}, falling back")
                     continue
                 raise

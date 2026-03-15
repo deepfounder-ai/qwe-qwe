@@ -238,6 +238,56 @@ async def status():
     }
 
 
+def _check_version_sync() -> dict:
+    """Check current version vs latest GitHub release (sync, for thread pool)."""
+    import importlib.metadata
+    try:
+        current = importlib.metadata.version("qwe-qwe")
+    except Exception:
+        current = app.version  # fallback to FastAPI version
+
+    # Check cached latest version (avoid hammering GitHub)
+    cached = db.kv_get("version:latest")
+    cached_at = db.kv_get("version:checked_at")
+    now = time.time()
+
+    latest = cached
+    # Re-check every 6 hours
+    if not cached or not cached_at or (now - float(cached_at)) > 21600:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                "https://api.github.com/repos/deepfounder-ai/qwe-qwe/releases/latest",
+                headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "qwe-qwe"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                latest = data.get("tag_name", "").lstrip("v")
+                if latest:
+                    db.kv_set("version:latest", latest)
+                    db.kv_set("version:checked_at", str(now))
+        except Exception as e:
+            _log.debug(f"version check failed: {e}")
+            latest = cached  # use stale cache on error
+
+    update_available = False
+    if latest and current:
+        try:
+            from packaging.version import Version
+            update_available = Version(latest) > Version(current)
+        except Exception:
+            update_available = latest != current and latest > current
+
+    return {"current": current, "latest": latest, "update_available": update_available}
+
+
+@app.get("/api/version")
+async def version_check():
+    """Check current version vs latest GitHub release."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _check_version_sync)
+
+
 @app.get("/api/stats")
 async def stats():
     """Agent reliability and usage stats."""
