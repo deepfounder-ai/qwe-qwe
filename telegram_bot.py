@@ -288,6 +288,7 @@ register_command("memory", "Search agent memory")
 register_command("threads", "List conversation threads")
 register_command("stats", "Session statistics")
 register_command("clear", "Clear conversation in this thread")
+register_command("cron", "List scheduled tasks")
 register_command("thinking", "Toggle thinking mode on/off")
 register_command("doctor", "Run diagnostics on all components")
 register_command("help", "Show available commands")
@@ -395,6 +396,22 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         import db as _db
         _db.clear_history(thread_id=thread_id)
         send_message(chat_id, "🗑 History cleared for this thread.", token, topic_id=topic_id)
+        return True
+
+    if cmd == "cron":
+        import scheduler
+        tasks_list = scheduler.list_tasks()
+        if not tasks_list:
+            send_message(chat_id, "📋 No scheduled tasks.\n\nAsk me to schedule something, e.g.:\n_\"Remind me to stretch every 2h\"_", token, topic_id=topic_id)
+            return True
+        lines = ["📋 **Scheduled tasks:**\n"]
+        for t in tasks_list:
+            status = "🟢" if t["enabled"] else "⚪"
+            repeat = "🔄" if t["repeat"] else "⏱"
+            lines.append(f"{status} #{t['id']} {repeat} **{t['name']}**")
+            lines.append(f"    → {t['next_run']} ({t['schedule']})")
+            lines.append(f"    _{t['task'][:80]}_")
+        send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
         return True
 
     if cmd == "thinking":

@@ -575,15 +575,22 @@ async def _broadcast(msg: dict):
 
 def _cron_callback(name: str, task: str, result: str):
     """Called from scheduler thread when a cron task completes."""
-    if not _ws_loop or not _ws_clients:
-        return
-    msg = {
-        "type": "cron",
-        "name": name,
-        "task": task,
-        "text": result,
-    }
-    asyncio.run_coroutine_threadsafe(_broadcast(msg), _ws_loop)
+    # WebSocket notification
+    if _ws_loop and _ws_clients:
+        msg = {
+            "type": "cron",
+            "name": name,
+            "task": task,
+            "text": result,
+        }
+        asyncio.run_coroutine_threadsafe(_broadcast(msg), _ws_loop)
+
+    # Telegram notification
+    if telegram_bot.is_verified() and telegram_bot._running:
+        owner = telegram_bot.get_owner_id()
+        if owner:
+            truncated = result[:500] + ("..." if len(result) > 500 else "")
+            telegram_bot.send_message(owner, f"⏰ **{name}**\n{truncated}")
 
 
 # Register cron callback
