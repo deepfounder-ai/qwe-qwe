@@ -1,24 +1,33 @@
 """SQLite storage — conversation history, settings, state."""
 
-import sqlite3, json, time
+import sqlite3, json, time, threading
 from pathlib import Path
 import config
 import logger
 
 _log = logger.get("db")
 
-_conn: sqlite3.Connection | None = None
+_local = threading.local()
+_migrated = False
+_migrate_lock = threading.Lock()
 
 
 def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA foreign_keys=ON")
-        _migrate(_conn)
-        _log.info(f"database connected: {config.DB_PATH}")
-    return _conn
+    global _migrated
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _local.conn = conn
+        # Migrate once across all threads
+        with _migrate_lock:
+            if not _migrated:
+                _migrate(conn)
+                _migrated = True
+                _log.info(f"database connected: {config.DB_PATH}")
+    return conn
 
 
 def _migrate(conn: sqlite3.Connection):

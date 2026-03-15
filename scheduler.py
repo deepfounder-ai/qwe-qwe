@@ -225,6 +225,19 @@ def _check_and_run():
     ).fetchall()
 
     for id_, name, task, schedule, repeat in rows:
+        # Pre-reschedule to prevent duplicate execution if task takes >30s
+        if repeat:
+            _, interval = _parse_schedule(schedule)
+            next_run = now + (interval if interval else 3600)
+            conn.execute(
+                "UPDATE scheduled_tasks SET next_run=? WHERE id=?",
+                (next_run, id_)
+            )
+        else:
+            # Disable one-time task before execution
+            conn.execute("UPDATE scheduled_tasks SET enabled=0 WHERE id=?", (id_,))
+        conn.commit()
+
         # Execute task
         _log.info(f"cron firing: #{id_} '{name}' → {task[:80]}")
         result = _execute_task(task)
@@ -237,18 +250,11 @@ def _check_and_run():
             except Exception:
                 _log.warning(f"cron callback error for #{id_}", exc_info=True)
 
+        # Finalize
         if repeat:
-            # Reschedule
-            _, interval = _parse_schedule(schedule)
-            next_run = now + interval if interval else now + 3600
-            conn.execute(
-                "UPDATE scheduled_tasks SET next_run=?, last_run=? WHERE id=?",
-                (next_run, now, id_)
-            )
+            conn.execute("UPDATE scheduled_tasks SET last_run=? WHERE id=?", (now, id_))
         else:
-            # One-time — delete
             conn.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
-
         conn.commit()
 
 

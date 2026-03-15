@@ -1,6 +1,8 @@
 """Web server for qwe-qwe — FastAPI + WebSocket chat."""
 
 import asyncio
+import hashlib
+import hmac
 import json
 import re
 import time
@@ -71,6 +73,10 @@ app = FastAPI(title="qwe-qwe", version="0.2.0", lifespan=lifespan)
 # ── Optional auth (set QWE_PASSWORD env to enable) ──
 _AUTH_PASSWORD = os.environ.get("QWE_PASSWORD", "")
 _AUTH_COOKIE = "qwe_auth"
+_AUTH_TOKEN = hashlib.sha256(f"qwe-auth-{_AUTH_PASSWORD}".encode()).hexdigest()[:32] if _AUTH_PASSWORD else ""
+
+# Max upload size (10 MB)
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 # ── Rate limiting (in-memory, per-IP) ──
 _rate_log: dict[str, list[float]] = {}  # ip -> [timestamps]
@@ -109,15 +115,15 @@ async def auth_and_rate_middleware(request: Request, call_next):
     if _AUTH_PASSWORD:
         # Allow login page
         if path == "/" and request.method == "GET":
-            cookie = request.cookies.get(_AUTH_COOKIE)
-            if cookie != _AUTH_PASSWORD:
+            cookie = request.cookies.get(_AUTH_COOKIE, "")
+            if not hmac.compare_digest(cookie, _AUTH_TOKEN):
                 # Serve login page instead
                 return await call_next(request)
 
         # API/WS require auth cookie
         if path.startswith("/api/") or path.startswith("/ws"):
-            cookie = request.cookies.get(_AUTH_COOKIE)
-            if cookie != _AUTH_PASSWORD:
+            cookie = request.cookies.get(_AUTH_COOKIE, "")
+            if not hmac.compare_digest(cookie, _AUTH_TOKEN):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     return await call_next(request)
@@ -131,9 +137,9 @@ async def login(request: Request):
         return {"ok": True, "message": "no password set"}
     body = await request.json()
     password = body.get("password", "")
-    if password == _AUTH_PASSWORD:
+    if hmac.compare_digest(password, _AUTH_PASSWORD):
         response = JSONResponse({"ok": True})
-        response.set_cookie(_AUTH_COOKIE, _AUTH_PASSWORD,
+        response.set_cookie(_AUTH_COOKIE, _AUTH_TOKEN,
                             max_age=86400, httponly=True, samesite="lax")
         return response
     return JSONResponse({"error": "wrong password"}, status_code=401)
@@ -164,12 +170,16 @@ async def upload_image(request: Request):
         file = form.get("file")
         if not file:
             return JSONResponse({"error": "no file"}, status_code=400)
-        data = await file.read()
+        data = await file.read(_MAX_UPLOAD_BYTES + 1)
+        if len(data) > _MAX_UPLOAD_BYTES:
+            return JSONResponse({"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"}, status_code=413)
         filename = file.filename or "image.png"
     else:
         # Raw base64 JSON: {"data": "base64...", "filename": "image.png"}
         body = await request.json()
         data = base64.b64decode(body.get("data", ""))
+        if len(data) > _MAX_UPLOAD_BYTES:
+            return JSONResponse({"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"}, status_code=413)
         filename = body.get("filename", "image.png")
 
     # Validate it's an image
@@ -182,10 +192,10 @@ async def upload_image(request: Request):
     save_path = UPLOADS_DIR / f"{image_id}{ext}"
     save_path.write_bytes(data)
 
-    # Return base64 for immediate use
+    # Return base64 for immediate use (no absolute path — security)
     b64 = base64.b64encode(data).decode()
     _log.info(f"image uploaded: {image_id} ({len(data)} bytes)")
-    return {"image_id": image_id, "b64": b64, "path": str(save_path)}
+    return {"image_id": image_id, "b64": b64}
 
 
 @app.get("/")
@@ -429,10 +439,15 @@ async def history(limit: int = 20, thread_id: str | None = None):
 @app.get("/api/logs")
 async def logs(file: str = "qwe-qwe.log", lines: int = 50):
     """Tail log files."""
-    log_path = Path(__file__).parent / "logs" / file
+    logs_dir = (Path(__file__).parent / "logs").resolve()
+    log_path = (logs_dir / file).resolve()
+    # Prevent path traversal
+    if not str(log_path).startswith(str(logs_dir)):
+        return JSONResponse({"error": "invalid path"}, status_code=400)
     if not log_path.exists():
         return {"lines": []}
-    all_lines = log_path.read_text().splitlines()
+    # Read only the tail (avoid loading huge files into memory)
+    all_lines = log_path.read_text(errors="replace").splitlines()
     return {"lines": all_lines[-lines:]}
 
 
@@ -736,6 +751,14 @@ async def _ws_send_safe(ws: WebSocket, data: dict) -> bool:
 @app.websocket("/ws")
 async def websocket_chat(ws: WebSocket):
     global _ws_loop
+
+    # Auth check for WebSocket (middleware doesn't cover WS)
+    if _AUTH_PASSWORD:
+        cookie = ws.cookies.get(_AUTH_COOKIE, "")
+        if not hmac.compare_digest(cookie, _AUTH_TOKEN):
+            await ws.close(code=4001, reason="unauthorized")
+            return
+
     await ws.accept()
     _ws_clients.add(ws)
     _ws_loop = asyncio.get_event_loop()
@@ -826,7 +849,7 @@ async def websocket_chat(ws: WebSocket):
 async def _broadcast(msg: dict):
     """Send JSON to all connected WebSocket clients."""
     dead = set()
-    for ws in _ws_clients:
+    for ws in list(_ws_clients):  # copy to avoid mutation during iteration
         if not await _ws_send_safe(ws, msg):
             dead.add(ws)
     _ws_clients -= dead

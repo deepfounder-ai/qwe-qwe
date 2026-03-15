@@ -430,7 +430,13 @@ def _estimate_tokens(messages: list[dict]) -> int:
     total = 0
     for m in messages:
         content = m.get("content") or ""
-        total += len(content) // 4 + 4  # +4 for role/metadata overhead
+        # Handle multimodal content (list of {type, text/image_url})
+        if isinstance(content, list):
+            content_len = sum(len(p.get("text", "")) for p in content if isinstance(p, dict))
+            content_len += sum(250 for p in content if isinstance(p, dict) and p.get("type") == "image_url")
+            total += content_len // 4 + 4
+        else:
+            total += len(content) // 4 + 4  # +4 for role/metadata overhead
         # Tool calls add extra tokens
         if m.get("tool_calls"):
             tc = m["tool_calls"]
@@ -618,6 +624,16 @@ def run(user_input: str, thread_id: str | None = None,
     else:
         _original_model = None
 
+    try:
+        return _run_inner(user_input, thread_id, source, image_b64)
+    finally:
+        if _original_model:
+            providers.set_model(_original_model)
+
+
+def _run_inner(user_input: str, thread_id: str | None,
+               source: str, image_b64: str | None) -> TurnResult:
+    """Inner agent loop — separated so run() can restore model in finally."""
     client = providers.get_client()
     result = TurnResult()
     turn_start = time.time()
@@ -837,7 +853,14 @@ def run(user_input: str, thread_id: str | None = None,
             total_chars = sum(len(str(m.get("content", ""))) for m in messages)
             if total_chars > 24000:
                 system = messages[0]
-                messages = [system] + messages[-6:]
+                tail = messages[-6:]
+                # Ensure we don't start with orphaned tool results
+                while tail and tail[0].get("role") == "tool":
+                    tail.pop(0)
+                # Ensure we don't start with assistant tool_calls without tool responses
+                if tail and tail[0].get("role") == "assistant" and tail[0].get("tool_calls"):
+                    tail.pop(0)
+                messages = [system] + tail
 
             continue
 
@@ -873,13 +896,9 @@ def run(user_input: str, thread_id: str | None = None,
                      json_repairs=result.json_repairs, retries=result.retry_successes,
                      self_checks=result.self_check_fixes, thread=tid or "active")
 
-        if _original_model:
-            providers.set_model(_original_model)
         return result
 
     _log.warning(f"max tool rounds ({max_tool_rounds}) exhausted")
     result.reply = "I've used all my tool rounds for this turn."
     db.save_message("assistant", result.reply, thread_id=tid)
-    if _original_model:
-        providers.set_model(_original_model)
     return result
