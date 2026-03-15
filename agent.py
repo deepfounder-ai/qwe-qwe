@@ -864,6 +864,11 @@ def _run_inner(user_input: str, thread_id: str | None,
 
             rounds += 1
 
+            # Some model templates (Qwen) require messages to end with user role
+            # after tool results, otherwise jinja template fails with "No user query found"
+            if messages[-1]["role"] == "tool":
+                messages.append({"role": "user", "content": "Continue based on the tool results above."})
+
             # Trim context if too large (4 chars ≈ 1 token, keep under ~6k tokens)
             total_chars = sum(len(str(m.get("content", ""))) for m in messages)
             if total_chars > 24000:
