@@ -431,6 +431,64 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
     return False
 
 
+def _to_html(text: str) -> str:
+    """Convert standard Markdown to Telegram HTML format.
+    
+    More reliable than MarkdownV2 for complex content with code blocks.
+    """
+    import re as _re
+    import html as _html
+
+    # Escape HTML entities first
+    # But protect code blocks
+    protected = []
+    counter = [0]
+
+    def _protect(match):
+        idx = counter[0]
+        counter[0] += 1
+        protected.append(match.group(0))
+        return f"\x00HTML{idx}\x00"
+
+    # Protect ```...``` and `...`
+    result = _re.sub(r'```(\w*)\n([\s\S]*?)```', _protect, text)
+    result = _re.sub(r'`([^`]+)`', _protect, result)
+
+    # Escape HTML in remaining text
+    result = _html.escape(result)
+
+    # Convert **bold** → <b>bold</b>
+    result = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', result)
+    # Convert *italic* → <i>italic</i>
+    result = _re.sub(r'\*(.+?)\*', r'<i>\1</i>', result)
+    # Convert [text](url) → <a href="url">text</a>
+    result = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', result)
+
+    # Restore protected blocks
+    for i, p in enumerate(protected):
+        if p.startswith('```'):
+            # Code block → <pre><code>
+            m = _re.match(r'```(\w*)\n([\s\S]*?)```', p)
+            if m:
+                lang = m.group(1)
+                code = _html.escape(m.group(2).rstrip())
+                if lang:
+                    replacement = f'<pre><code class="language-{lang}">{code}</code></pre>'
+                else:
+                    replacement = f'<pre><code>{code}</code></pre>'
+            else:
+                replacement = _html.escape(p)
+        elif p.startswith('`'):
+            # Inline code → <code>
+            code = _html.escape(p.strip('`'))
+            replacement = f'<code>{code}</code>'
+        else:
+            replacement = _html.escape(p)
+        result = result.replace(f"\x00HTML{i}\x00", replacement)
+
+    return result
+
+
 def _to_markdownv2(text: str) -> str:
     """Convert standard Markdown to Telegram MarkdownV2.
     
@@ -685,25 +743,40 @@ def send_message(chat_id: int, text: str, token: str | None = None,
     # Split long messages (Telegram limit: 4096 chars)
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
     for chunk in chunks:
-        # Try MarkdownV2 first, fall back to plain text
-        md2_text = _to_markdownv2(chunk)
-        kwargs = {"chat_id": chat_id, "text": md2_text, "parse_mode": "MarkdownV2"}
+        base_kwargs = {"chat_id": chat_id}
         if reply_to:
-            kwargs["reply_to_message_id"] = reply_to
+            base_kwargs["reply_to_message_id"] = reply_to
         if topic_id:
-            kwargs["message_thread_id"] = topic_id
-        result = _api("sendMessage", token, **kwargs)
-        if not result.get("ok"):
-            # Fallback: send without formatting
-            _log.warning(f"MarkdownV2 failed, falling back to plain: {result.get('description', '')[:100]}")
-            kwargs["text"] = chunk
-            kwargs["parse_mode"] = "Markdown"
-            result = _api("sendMessage", token, **kwargs)
-            if not result.get("ok"):
-                # Last resort: no parse mode
-                kwargs.pop("parse_mode")
-                kwargs["text"] = chunk
-                _api("sendMessage", token, **kwargs)
+            base_kwargs["message_thread_id"] = topic_id
+
+        # Try MarkdownV2 → HTML → Markdown → plain text
+        sent = False
+
+        # 1. MarkdownV2
+        md2_text = _to_markdownv2(chunk)
+        result = _api("sendMessage", token, **base_kwargs, text=md2_text, parse_mode="MarkdownV2")
+        if result.get("ok"):
+            sent = True
+
+        # 2. HTML fallback
+        if not sent:
+            html_text = _to_html(chunk)
+            result = _api("sendMessage", token, **base_kwargs, text=html_text, parse_mode="HTML")
+            if result.get("ok"):
+                sent = True
+                _log.info("sent as HTML fallback")
+
+        # 3. Legacy Markdown
+        if not sent:
+            result = _api("sendMessage", token, **base_kwargs, text=chunk, parse_mode="Markdown")
+            if result.get("ok"):
+                sent = True
+                _log.info("sent as legacy Markdown fallback")
+
+        # 4. Plain text (last resort)
+        if not sent:
+            _api("sendMessage", token, **base_kwargs, text=chunk)
+            _log.warning("sent as plain text (all formatting failed)")
 
 
 def get_me(token: str | None = None) -> dict:
