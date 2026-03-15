@@ -1,6 +1,6 @@
 """Core agent loop — the brain of qwe-qwe."""
 
-import json, re, sys, time, threading
+import json, re, sys, time, threading, base64, io
 from openai import OpenAI
 from rich.console import Console
 import config, db, tools, memory, soul, providers, threads
@@ -8,6 +8,32 @@ import logger
 
 _log = logger.get("agent")
 _console = Console()
+
+
+def _resize_image_b64(b64: str, max_side: int = 512, quality: int = 80) -> str:
+    """Resize image to fit within max_side px and re-encode as JPEG."""
+    try:
+        from PIL import Image
+        raw = base64.b64decode(b64)
+        img = Image.open(io.BytesIO(raw))
+        w, h = img.size
+        if max(w, h) > max_side:
+            ratio = max_side / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        result = base64.b64encode(buf.getvalue()).decode()
+        _log.info(f"image resized: {w}x{h} → {img.size[0]}x{img.size[1]}, "
+                  f"{len(raw)//1024}KB → {buf.tell()//1024}KB")
+        return result
+    except ImportError:
+        _log.warning("Pillow not installed — sending image as-is")
+        return b64
+    except Exception as e:
+        _log.warning(f"image resize failed: {e} — sending as-is")
+        return b64
 _abort_event = threading.Event()  # can be replaced by server
 _structured_output_failed = False  # runtime cache: disable after first 400
 
@@ -410,8 +436,9 @@ def _build_messages(user_input: str, thread_id: str | None = None,
 
     # New user message — multimodal if image provided
     if image_b64:
+        image_b64 = _resize_image_b64(image_b64, max_side=512)
         user_content = [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
             {"type": "text", "text": user_input or "What's in this image?"},
         ]
         msgs.append({"role": "user", "content": user_content})
