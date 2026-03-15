@@ -194,11 +194,11 @@ def _execute_task(task_desc: str) -> str:
     """Run a task through the LLM."""
     import config, tools
 
-    # Simple reminders don't need LLM — just return the text
+    # Simple reminders don't need LLM — just return a clean notification
     reminder_markers = ["remind", "напомни", "напоминание", "напомнить", "выпить", "drink", "stretch", "break"]
     lower_task = task_desc.lower()
     if any(m in lower_task for m in reminder_markers) and len(task_desc) < 200:
-        return task_desc
+        return f"🔔 Reminder: {task_desc}"
 
     client = providers.get_client()
     messages = [

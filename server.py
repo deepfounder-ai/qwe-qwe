@@ -590,7 +590,11 @@ def _cron_callback(name: str, task: str, result: str):
         owner = telegram_bot.get_owner_id()
         if owner:
             truncated = result[:500] + ("..." if len(result) > 500 else "")
-            telegram_bot.send_message(owner, f"⏰ **{name}**\n{truncated}")
+            # If result already has reminder format, send as-is; otherwise wrap with task name
+            if result.startswith("🔔"):
+                telegram_bot.send_message(owner, truncated)
+            else:
+                telegram_bot.send_message(owner, f"⏰ **{name}**\n{truncated}")
 
 
 # Register cron callback
