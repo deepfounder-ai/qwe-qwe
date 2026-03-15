@@ -116,11 +116,17 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         return ""
 
 
-def _build_messages(user_input: str, thread_id: str | None = None) -> list[dict]:
+def _build_messages(user_input: str, thread_id: str | None = None, source: str = "cli") -> list[dict]:
     """Build minimal context: soul + auto-context + recent history + user message."""
     # Soul → compact system prompt
     agent_soul = soul.load()
     system_text = soul.to_prompt(agent_soul)
+
+    # Add source context
+    if source == "telegram":
+        system_text += "\nYou are chatting via Telegram. Your replies are sent directly as Telegram messages. You CAN send messages — just reply normally."
+    elif source == "web":
+        system_text += "\nYou are chatting via the web UI."
 
     # Auto-retrieve from Qdrant (thread-scoped + global)
     context = _auto_context(user_input, thread_id=thread_id)
@@ -341,8 +347,12 @@ def _get_thread_model(tid: str | None) -> str | None:
     return None
 
 
-def run(user_input: str, thread_id: str | None = None) -> TurnResult:
-    """Run one agent turn: user input → (tool loops) → final response."""
+def run(user_input: str, thread_id: str | None = None, source: str = "cli") -> TurnResult:
+    """Run one agent turn: user input → (tool loops) → final response.
+    
+    Args:
+        source: "cli", "web", or "telegram" — tells the agent where it's running
+    """
     # Check thread-specific model override
     thread_model = _get_thread_model(thread_id)
     if thread_model:
@@ -367,7 +377,7 @@ def run(user_input: str, thread_id: str | None = None) -> TurnResult:
     # Save user message
     db.save_message("user", user_input, thread_id=tid)
 
-    messages = _build_messages(user_input, thread_id=tid)
+    messages = _build_messages(user_input, thread_id=tid, source=source)
 
     # Touch thread timestamp
     threads.touch(tid)

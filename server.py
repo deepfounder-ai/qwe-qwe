@@ -632,7 +632,7 @@ def _telegram_handler(chat_id: int, text: str, user_id: int, username: str, thre
     """Handle incoming Telegram message → agent → response."""
     import agent
     tid = thread_id or db.kv_get("telegram:thread_id") or None
-    result = agent.run(text, thread_id=tid)
+    result = agent.run(text, thread_id=tid, source="telegram")
 
     # Also broadcast to WebSocket
     if _ws_loop and _ws_clients:
