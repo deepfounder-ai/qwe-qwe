@@ -74,6 +74,8 @@ qwe-qwe --web --port 8080      # custom port
 ```
 Dark-themed chat with WebSocket streaming, soul sliders, model picker, thread management, and settings page.
 
+**LAN Access**: toggle LAN broadcasting from the Settings page — access your agent from any device on your local network (phone, tablet, another PC). When enabled, the web UI is available at `http://<your-ip>:7860`.
+
 ### Telegram Bot
 Full-featured Telegram integration with slash commands, topic-to-thread mapping, and formatted messages. [Setup guide →](#telegram-bot)
 
