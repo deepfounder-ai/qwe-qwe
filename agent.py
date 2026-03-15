@@ -685,6 +685,7 @@ def run(user_input: str, thread_id: str | None = None,
 
             for tc in tool_calls_data.values():
                 result.tool_calls_made.append(tc["name"])
+                db.kv_inc("stats:tool_calls_total")
 
                 # Parse tool call arguments (with repair + retry for small models)
                 try:
@@ -694,6 +695,7 @@ def run(user_input: str, thread_id: str | None = None,
                     args = _repair_json(tc["arguments"])
                     if args:
                         result.json_repairs += 1
+                        db.kv_inc("stats:json_repairs")
                         _log.info(f"json repair succeeded for {tc['name']}")
                     else:
                         # Retry: ask model to regenerate the JSON
@@ -707,6 +709,7 @@ def run(user_input: str, thread_id: str | None = None,
                             if retried:
                                 args = retried
                                 result.retry_successes += 1
+                                db.kv_inc("stats:retry_successes")
                                 _console.print(f"  [green]✓ retry succeeded[/]")
                             else:
                                 args = {}
@@ -720,6 +723,7 @@ def run(user_input: str, thread_id: str | None = None,
                     if not ok and fixed:
                         args = fixed
                         result.self_check_fixes += 1
+                        db.kv_inc("stats:self_check_fixes")
                         _console.print(f"  [yellow]🔍 self-check corrected args[/]")
 
                 try:
@@ -739,6 +743,7 @@ def run(user_input: str, thread_id: str | None = None,
 
                 # Detect repeated failures
                 if tool_result.startswith("Error"):
+                    db.kv_inc("stats:tool_errors")
                     _log.warning(f"tool error: {tc['name']} → {tool_result[:200]}")
                     if tc["name"] == last_failed_tool:
                         fail_count += 1

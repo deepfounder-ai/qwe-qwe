@@ -141,3 +141,25 @@ def kv_get(key: str) -> str | None:
     conn = _get_conn()
     row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
+
+
+def kv_inc(key: str, delta: int = 1) -> int:
+    """Atomically increment a counter. Creates if not exists."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO kv (key, value, ts) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT), ts = ?",
+        (key, str(delta), time.time(), delta, time.time())
+    )
+    conn.commit()
+    row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    return int(row[0]) if row else delta
+
+
+def kv_get_prefix(prefix: str) -> dict[str, str]:
+    """Get all kv pairs where key starts with prefix."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT key, value FROM kv WHERE key LIKE ? || '%'", (prefix,)
+    ).fetchall()
+    return {k: v for k, v in rows}

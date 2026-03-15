@@ -228,6 +228,13 @@ async def status():
     }
 
 
+@app.get("/api/stats")
+async def stats():
+    """Agent reliability and usage stats."""
+    raw = db.kv_get_prefix("stats:")
+    return {k.replace("stats:", ""): int(v) for k, v in raw.items()}
+
+
 @app.get("/api/discover")
 async def discover_servers():
     """Auto-discover LLM servers on localhost."""
