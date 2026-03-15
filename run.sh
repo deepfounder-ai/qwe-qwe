@@ -3,8 +3,9 @@
 cd "$(dirname "$0")"
 source .venv/bin/activate
 
-export QWE_LLM_URL="http://192.168.0.49:1234/v1"
-export QWE_EMBED_URL="http://192.168.0.49:1234/v1"
+# Set QWE_LLM_URL and QWE_EMBED_URL if your LLM server is not on localhost
+# export QWE_LLM_URL="http://your-ip:1234/v1"
+# export QWE_EMBED_URL="http://your-ip:1234/v1"
 
 while true; do
     echo "[$(date)] Starting qwe-qwe --web..."
