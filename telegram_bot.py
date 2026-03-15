@@ -457,12 +457,17 @@ def _to_html(text: str) -> str:
     # Escape HTML in remaining text
     result = _html.escape(result)
 
+    # Convert ~~strikethrough~~ → <s>
+    result = _re.sub(r'~~(.+?)~~', r'<s>\1</s>', result)
     # Convert **bold** → <b>bold</b>
     result = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', result)
-    # Convert *italic* → <i>italic</i>
+    # Convert *italic* and _italic_ → <i>italic</i>
     result = _re.sub(r'\*(.+?)\*', r'<i>\1</i>', result)
+    result = _re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<i>\1</i>', result)
     # Convert [text](url) → <a href="url">text</a>
     result = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', result)
+    # Convert > blockquote
+    result = _re.sub(r'^&gt;\s*(.+)$', r'<blockquote>\1</blockquote>', result, flags=_re.MULTILINE)
 
     # Restore protected blocks
     for i, p in enumerate(protected):
@@ -535,8 +540,19 @@ def _to_markdownv2(text: str) -> str:
 
     result = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _protect_link, result)
 
+    # Protect ~~strikethrough~~
+    strike_parts = []
+    def _protect_strike(m):
+        idx = len(strike_parts)
+        strike_parts.append(m.group(1))
+        return f"\x04STRIKE{idx}\x04"
+
+    result = _re.sub(r'~~(.+?)~~', _protect_strike, result)
+
     result = _re.sub(r'\*\*(.+?)\*\*', _protect_bold, result)
+    # Handle both *italic* and _italic_
     result = _re.sub(r'\*(.+?)\*', _protect_italic, result)
+    result = _re.sub(r'(?<!\w)_(.+?)_(?!\w)', _protect_italic, result)
 
     # Escape MarkdownV2 special chars in plain text
     special = r'_[]()~>#+-=|{}.!'
@@ -567,6 +583,16 @@ def _to_markdownv2(text: str) -> str:
             else:
                 esc_it += ch
         result = result.replace(f"\x02ITALIC{i}\x02", f"_{esc_it}_")
+
+    # Restore strikethrough → ~escaped_text~
+    for i, s in enumerate(strike_parts):
+        esc_s = ""
+        for ch in s:
+            if ch in special:
+                esc_s += "\\" + ch
+            else:
+                esc_s += ch
+        result = result.replace(f"\x04STRIKE{i}\x04", f"~{esc_s}~")
 
     # Restore links → [escaped_text](url)
     for i, (link_text, link_url) in enumerate(link_parts):
