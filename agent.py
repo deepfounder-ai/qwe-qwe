@@ -73,6 +73,13 @@ def _repair_json(raw: str) -> dict:
         return {}
 
 
+def _json_format_extra() -> dict:
+    """Return response_format kwarg if provider supports structured output."""
+    if providers.supports("supports_response_format"):
+        return {"response_format": {"type": "json_object"}}
+    return {}
+
+
 def _get_tool_schema(tool_name: str) -> dict | None:
     """Get the JSON schema for a tool by name."""
     for t in tools.TOOLS:
@@ -95,56 +102,61 @@ def _retry_tool_call(client, model: str, tool_name: str,
     props = schema.get("properties", {}) if schema else {}
     schema_hint = ", ".join(f'{k}: {v.get("type", "string")}' for k, v in props.items())
 
-    # Attempt 2: ask model to reformat
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You fix broken JSON. Reply with ONLY valid JSON, nothing else."},
-                {"role": "user", "content": (
-                    f"This JSON for tool '{tool_name}' is broken:\n{raw_args[:500]}\n\n"
-                    f"Required params: {schema_hint}\n"
-                    f"Reply with corrected JSON object only."
-                )},
-            ],
-            temperature=0.1,
-            max_tokens=256,
-            stream=False,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        # Extract JSON from response (model might wrap in ```json...```)
-        m = re.search(r'\{.*\}', text, re.DOTALL)
-        if m:
-            result = json.loads(m.group())
-            _log.info(f"retry attempt 2 succeeded for {tool_name}")
-            return result
-    except Exception as e:
-        _log.warning(f"retry attempt 2 failed: {e}")
+    # Attempt 2: ask model to reformat (with structured output if available)
+    retry_msgs = [
+        {"role": "system", "content": "You fix broken JSON. Reply with ONLY valid JSON, nothing else."},
+        {"role": "user", "content": (
+            f"This JSON for tool '{tool_name}' is broken:\n{raw_args[:500]}\n\n"
+            f"Required params: {schema_hint}\n"
+            f"Reply with corrected JSON object only."
+        )},
+    ]
+    for attempt_extra in [_json_format_extra(), {}]:  # try with structured output, fallback without
+        try:
+            resp = client.chat.completions.create(
+                model=model, messages=retry_msgs,
+                temperature=0.1, max_tokens=256, stream=False,
+                **attempt_extra,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            m = re.search(r'\{.*\}', text, re.DOTALL)
+            if m:
+                result = json.loads(m.group())
+                _log.info(f"retry attempt 2 succeeded for {tool_name}")
+                return result
+            break  # parsed but no JSON found, move to attempt 3
+        except Exception as e:
+            if attempt_extra:  # structured output failed, try without
+                _log.warning(f"retry attempt 2 (structured) failed: {e}, falling back")
+                continue
+            _log.warning(f"retry attempt 2 failed: {e}")
 
     # Attempt 3: minimal prompt
-    try:
-        params_desc = ", ".join(f'"{k}"' for k in required)
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": (
-                    f'{{"'
-                    f'Generate JSON for {tool_name}. Keys: {params_desc}. '
-                    f'Original (broken): {raw_args[:300]}'
-                )},
-            ],
-            temperature=0.0,
-            max_tokens=256,
-            stream=False,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        m = re.search(r'\{.*\}', text, re.DOTALL)
-        if m:
-            result = json.loads(m.group())
-            _log.info(f"retry attempt 3 succeeded for {tool_name}")
-            return result
-    except Exception as e:
-        _log.warning(f"retry attempt 3 failed: {e}")
+    params_desc = ", ".join(f'"{k}"' for k in required)
+    minimal_msgs = [
+        {"role": "user", "content": (
+            f'Generate JSON for {tool_name}. Keys: {params_desc}. '
+            f'Original (broken): {raw_args[:300]}'
+        )},
+    ]
+    for attempt_extra in [_json_format_extra(), {}]:
+        try:
+            resp = client.chat.completions.create(
+                model=model, messages=minimal_msgs,
+                temperature=0.0, max_tokens=256, stream=False,
+                **attempt_extra,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            m = re.search(r'\{.*\}', text, re.DOTALL)
+            if m:
+                result = json.loads(m.group())
+                _log.info(f"retry attempt 3 succeeded for {tool_name}")
+                return result
+            break
+        except Exception as e:
+            if attempt_extra:
+                continue
+            _log.warning(f"retry attempt 3 failed: {e}")
 
     _log.error(f"all retry attempts failed for {tool_name}")
     return None
@@ -166,39 +178,67 @@ def _self_check_tool_call(client, model: str, tool_name: str,
         schema = _get_tool_schema(tool_name)
         required = schema.get("required", []) if schema else []
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": (
-                    "Check this tool call. If arguments are correct, reply ONLY 'OK'. "
-                    "If wrong, reply with corrected JSON only."
-                )},
-                {"role": "user", "content": (
-                    f"Tool: {tool_name}\n"
-                    f"Required: {required}\n"
-                    f"Arguments: {args_json}"
-                )},
-            ],
-            temperature=0.1,
-            max_tokens=256,
-            stream=False,
-        )
-        text = _strip_thinking(resp.choices[0].message.content or "").strip()
+        use_structured = bool(_json_format_extra())
+        if use_structured:
+            system_msg = (
+                'Check this tool call. Reply as JSON: {"status": "ok"} if correct, '
+                'or {"status": "fix", "args": {corrected args}} if wrong.'
+            )
+        else:
+            system_msg = (
+                "Check this tool call. If arguments are correct, reply ONLY 'OK'. "
+                "If wrong, reply with corrected JSON only."
+            )
+
+        check_msgs = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": (
+                f"Tool: {tool_name}\n"
+                f"Required: {required}\n"
+                f"Arguments: {args_json}"
+            )},
+        ]
+
+        for attempt_extra in [_json_format_extra(), {}]:
+            try:
+                resp = client.chat.completions.create(
+                    model=model, messages=check_msgs,
+                    temperature=0.1, max_tokens=256, stream=False,
+                    **attempt_extra,
+                )
+                text = _strip_thinking(resp.choices[0].message.content or "").strip()
+                break
+            except Exception as e:
+                if attempt_extra:
+                    _log.warning(f"self-check (structured) failed: {e}, falling back")
+                    continue
+                raise
+
+        # Parse response
+        if use_structured:
+            try:
+                parsed = json.loads(text)
+                if parsed.get("status") == "ok":
+                    return True, None
+                if parsed.get("status") == "fix" and parsed.get("args"):
+                    _log.info(f"self-check corrected {tool_name}: {args} → {parsed['args']}")
+                    return False, parsed["args"]
+            except json.JSONDecodeError:
+                pass  # fall through to text parsing
 
         if text.upper().startswith("OK"):
             return True, None
 
-        # Try to parse corrected JSON
         m = re.search(r'\{.*\}', text, re.DOTALL)
         if m:
             corrected = json.loads(m.group())
             _log.info(f"self-check corrected {tool_name}: {args} → {corrected}")
             return False, corrected
 
-        return True, None  # couldn't parse correction, assume OK
+        return True, None
     except Exception as e:
         _log.warning(f"self-check failed for {tool_name}: {e}")
-        return True, None  # on error, don't block execution
+        return True, None
 
 
 def _strip_thinking(text: str) -> str:

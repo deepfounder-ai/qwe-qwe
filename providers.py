@@ -71,6 +71,23 @@ PRESETS = {
     },
 }
 
+# Provider capabilities — not all support all features
+CAPABILITIES = {
+    "lmstudio":   {"supports_response_format": True},
+    "ollama":     {"supports_response_format": True},
+    "openai":     {"supports_response_format": True},
+    "openrouter": {"supports_response_format": False},  # varies by model behind it
+    "groq":       {"supports_response_format": True},
+    "together":   {"supports_response_format": True},
+    "deepseek":   {"supports_response_format": True},
+}
+
+
+def supports(capability: str) -> bool:
+    """Check if active provider supports a capability."""
+    name = get_active_name()
+    return CAPABILITIES.get(name, {}).get(capability, False)
+
 
 # ── Core functions ──
 
