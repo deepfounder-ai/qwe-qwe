@@ -274,7 +274,7 @@ async def update_user_profile(request: Request):
 @app.get("/api/heartbeat")
 async def get_heartbeat():
     """Get heartbeat config and items."""
-    enabled = db.kv_get("heartbeat:enabled") == "1"
+    enabled = db.kv_get("heartbeat:enabled") != "0"  # on by default
     interval = config.get("heartbeat_interval_min")
     raw = db.kv_get("heartbeat:items")
     items = json.loads(raw) if raw else []
@@ -309,7 +309,7 @@ async def update_heartbeat(request: Request):
         return JSONResponse({"error": "invalid index"}, status_code=400)
 
     if action == "toggle":
-        current = db.kv_get("heartbeat:enabled") == "1"
+        current = db.kv_get("heartbeat:enabled") != "0"  # on by default
         new_val = not current
         db.kv_set("heartbeat:enabled", "1" if new_val else "0")
         if new_val:

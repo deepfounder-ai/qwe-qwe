@@ -136,7 +136,8 @@ HEARTBEAT_TASK_NAME = "__heartbeat__"
 
 def _register_heartbeat():
     """Auto-register heartbeat cron task if enabled and not already registered."""
-    if db.kv_get("heartbeat:enabled") != "1":
+    val = db.kv_get("heartbeat:enabled")
+    if val == "0":  # enabled by default (None or "1" → enabled)
         return
     _ensure_table()
     conn = db._get_conn()

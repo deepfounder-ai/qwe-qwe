@@ -428,7 +428,7 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         import scheduler
         if not args:
             # Show status and items
-            enabled = db.kv_get("heartbeat:enabled") == "1"
+            enabled = db.kv_get("heartbeat:enabled") != "0"  # on by default
             raw = db.kv_get("heartbeat:items")
             items = json.loads(raw) if raw else []
             status_icon = "🟢" if enabled else "⚪"
