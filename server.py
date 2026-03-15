@@ -715,6 +715,18 @@ async def delete_thread(thread_id: str):
 
 # ── WebSocket chat ──
 
+async def _ws_send_safe(ws: WebSocket, data: dict) -> bool:
+    """Send JSON to a WebSocket, returning False if the connection is dead."""
+    try:
+        await ws.send_json(data)
+        return True
+    except (WebSocketDisconnect, ConnectionResetError, RuntimeError, OSError):
+        return False
+    except Exception:
+        _log.debug("ws send failed", exc_info=True)
+        return False
+
+
 @app.websocket("/ws")
 async def websocket_chat(ws: WebSocket):
     global _ws_loop
@@ -762,8 +774,9 @@ async def websocket_chat(ws: WebSocket):
                 except Exception:
                     pass
 
-            # Send status
-            await ws.send_json({"type": "status", "text": loading_msg or "thinking..."})
+            # Send status — abort if client disconnected
+            if not await _ws_send_safe(ws, {"type": "status", "text": loading_msg or "thinking..."}):
+                break
 
             try:
                 # Run agent in thread pool (it's blocking)
@@ -774,8 +787,8 @@ async def websocket_chat(ws: WebSocket):
                                             thread_id, image_b64=image_b64)
                 )
 
-                # Send reply
-                await ws.send_json({
+                # Send reply — abort if client disconnected
+                if not await _ws_send_safe(ws, {
                     "type": "reply",
                     "text": result["reply"],
                     "thinking": result.get("thinking", ""),
@@ -783,18 +796,23 @@ async def websocket_chat(ws: WebSocket):
                     "duration_ms": result["duration_ms"],
                     "context_hits": result["context_hits"],
                     "thread_id": result["thread_id"],
-                })
+                }):
+                    break
 
             except Exception as e:
                 _log.error(f"ws agent error: {e}", exc_info=True)
-                await ws.send_json({"type": "error", "text": str(e)})
+                if not await _ws_send_safe(ws, {"type": "error", "text": str(e)}):
+                    break
 
     except WebSocketDisconnect:
+        pass
+    except (ConnectionResetError, RuntimeError, OSError):
+        _log.debug("websocket connection reset")
+    except Exception as e:
+        _log.error(f"websocket error: {e}", exc_info=True)
+    finally:
         _ws_clients.discard(ws)
         _log.info(f"websocket client disconnected ({len(_ws_clients)} left)")
-    except Exception as e:
-        _ws_clients.discard(ws)
-        _log.error(f"websocket error: {e}", exc_info=True)
 
 
 # ── Broadcast to WS clients ──
@@ -803,9 +821,7 @@ async def _broadcast(msg: dict):
     """Send JSON to all connected WebSocket clients."""
     dead = set()
     for ws in _ws_clients:
-        try:
-            await ws.send_json(msg)
-        except Exception:
+        if not await _ws_send_safe(ws, msg):
             dead.add(ws)
     _ws_clients -= dead
 
