@@ -837,9 +837,15 @@ body {
       <p style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;">Chat with your agent from Telegram. You can set this up later in Settings.</p>
       <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-key"></i> Bot Token</label>
       <input id="obTgToken" type="password" placeholder="Paste token from @BotFather" style="width:100%; padding:10px 12px; background:var(--msg-user); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; margin:8px 0 8px; box-sizing:border-box;">
-      <p style="color:var(--text-dim); font-size:11px; margin:0 0 16px; opacity:0.7;"><i class="ph ph-lightbulb"></i> Open <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent);">@BotFather</a> → /newbot → paste token here</p>
+      <p style="color:var(--text-dim); font-size:11px; margin:0 0 8px; opacity:0.7;"><i class="ph ph-lightbulb"></i> Open <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent);">@BotFather</a> → /newbot → paste token here</p>
+      <button id="obTgConnect" onclick="obConnectTelegram()" style="width:100%; padding:10px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; font-size:13px; color:var(--text); cursor:pointer; font-family:var(--sans); margin-bottom:12px;"><i class="ph ph-plug"></i> Connect bot</button>
+      <div id="obTgVerify" style="display:none; background:var(--surface2); border-radius:8px; padding:16px; margin-bottom:12px; text-align:center;">
+        <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">Send this code to your bot in Telegram:</p>
+        <div id="obTgCode" style="font-size:32px; font-weight:700; color:var(--accent); letter-spacing:4px; font-family:var(--mono); margin:8px 0; cursor:pointer;" onclick="navigator.clipboard.writeText(this.textContent)" title="Click to copy"></div>
+        <p id="obTgStatus" style="color:var(--text-dim); font-size:11px; margin:8px 0 0;">Waiting for verification...</p>
+      </div>
       <div style="display:flex; gap:8px;">
-        <button onclick="obFinish()" style="flex:1; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);"><i class="ph ph-lightning"></i> Start chatting</button>
+        <button id="obTgFinish" onclick="obFinish()" style="flex:1; padding:12px; background:var(--accent); color:#000; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; font-family:var(--sans);"><i class="ph ph-lightning"></i> Start chatting</button>
         <button onclick="obSkipTelegram()" style="padding:12px 16px; background:none; border:1px solid var(--border); border-radius:8px; font-size:13px; color:var(--text-dim); cursor:pointer; font-family:var(--sans);">Skip</button>
       </div>
     </div>
@@ -932,7 +938,48 @@ function obNextToTelegram() {
 }
 
 function obSkipTelegram() {
+  if (window._obTgPollTimer) clearInterval(window._obTgPollTimer);
   obFinish();
+}
+
+let _obTgConnected = false;
+async function obConnectTelegram() {
+  const token = document.getElementById('obTgToken').value.trim();
+  if (!token) return alert('Paste bot token first');
+  document.getElementById('obTgConnect').textContent = 'Connecting...';
+  document.getElementById('obTgConnect').disabled = true;
+  try {
+    // Save token & enable
+    const res = await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token})});
+    const data = await res.json();
+    if (!data.ok) { alert('Invalid token'); document.getElementById('obTgConnect').textContent = 'Connect bot'; document.getElementById('obTgConnect').disabled = false; return; }
+    await fetch('/api/telegram/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:true})});
+    // Generate activation code
+    const actRes = await fetch('/api/telegram/activate', {method:'POST'});
+    const actData = await actRes.json();
+    if (!actData.ok) { document.getElementById('obTgConnect').textContent = '✅ Already verified'; _obTgConnected = true; return; }
+    // Show code
+    document.getElementById('obTgCode').textContent = actData.code;
+    document.getElementById('obTgVerify').style.display = 'block';
+    document.getElementById('obTgConnect').style.display = 'none';
+    // Poll for verification
+    window._obTgPollTimer = setInterval(async () => {
+      try {
+        const st = await fetch('/api/telegram/status');
+        const sd = await st.json();
+        if (sd.verified) {
+          clearInterval(window._obTgPollTimer);
+          document.getElementById('obTgStatus').innerHTML = '✅ <b>Verified!</b> You can now chat via Telegram.';
+          document.getElementById('obTgCode').style.color = 'var(--green)';
+          _obTgConnected = true;
+        }
+      } catch(e) {}
+    }, 3000);
+  } catch(e) {
+    alert('Connection failed: ' + e.message);
+    document.getElementById('obTgConnect').textContent = 'Connect bot';
+    document.getElementById('obTgConnect').disabled = false;
+  }
 }
 
 async function obFinish() {
@@ -962,17 +1009,20 @@ async function obFinish() {
     console.log('Setup saved:', data);
     if (!data.ok) { console.error('Setup failed:', data); }
   } catch(e) { console.error('Setup error:', e); }
-  // Telegram bot token (optional)
-  const tgToken = document.getElementById('obTgToken')?.value?.trim();
-  if (tgToken) {
-    try {
-      const tgRes = await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token: tgToken})});
-      const tgData = await tgRes.json();
-      if (tgData.ok) {
-        await fetch('/api/telegram/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled: true})});
-      }
-    } catch(e) { console.error('TG setup:', e); }
+  // Telegram — only save if not already connected via obConnectTelegram()
+  if (!_obTgConnected) {
+    const tgToken = document.getElementById('obTgToken')?.value?.trim();
+    if (tgToken) {
+      try {
+        const tgRes = await fetch('/api/telegram/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token: tgToken})});
+        const tgData = await tgRes.json();
+        if (tgData.ok) {
+          await fetch('/api/telegram/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled: true})});
+        }
+      } catch(e) { console.error('TG setup:', e); }
+    }
   }
+  if (window._obTgPollTimer) clearInterval(window._obTgPollTimer);
 
   document.getElementById('onboardingOverlay').style.display = 'none';
   loadStatus();
@@ -1096,10 +1146,13 @@ async function loadSettingsProviders() {
       <div class="provider-dot ${p.has_key ? 'has-key' : 'no-key'}"></div>
       <div class="provider-info">
         <div class="provider-name">${p.display || p.name}</div>
-        <div class="provider-url">${p.url}</div>
+        <div class="provider-url" id="provUrl_${p.name}">${p.url}</div>
         ${p.models.length ? `<div class="provider-models">${p.models.length} models</div>` : ''}
       </div>
-      <button class="s-btn" onclick="event.stopPropagation();setProviderKey('${p.name}')">${p.has_key ? '<i class="ph ph-key"></i> Change key' : '<i class="ph ph-key"></i> Set key'}</button>
+      <div style="display:flex; gap:4px; flex-direction:column;">
+        <button class="s-btn" onclick="event.stopPropagation();editProviderUrl('${p.name}','${p.url}')" style="font-size:11px;"><i class="ph ph-pencil-simple"></i> URL</button>
+        <button class="s-btn" onclick="event.stopPropagation();setProviderKey('${p.name}')" style="font-size:11px;">${p.has_key ? '<i class="ph ph-key"></i> Key' : '<i class="ph ph-key"></i> Key'}</button>
+      </div>
     `;
     card.onclick = (e) => { if (e.target.tagName !== 'BUTTON') switchProvider(p.name); };
     container.appendChild(card);
@@ -1141,6 +1194,12 @@ async function refreshModels() {
   const status = await sRes.json();
   renderModels(status.model);
   await loadSettingsProviders();
+}
+function editProviderUrl(name, currentUrl) {
+  const url = prompt(`API URL for ${name}:`, currentUrl);
+  if (!url || url === currentUrl) return;
+  fetch('/api/provider', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, url}) })
+    .then(() => loadSettingsProviders());
 }
 function setProviderKey(name) {
   const key = prompt(`API key for ${name}:`);
