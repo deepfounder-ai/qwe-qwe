@@ -1833,7 +1833,9 @@ function connect() {
     removeStatus();
     if (data.type === 'reply') {
       addMessage('assistant', data.text, data);
-      setGenerating(false); loadThreads(); loadThreadStats(); loadStatus();
+      setGenerating(false); loadThreadStats(); loadStatus();
+      // Refresh thread list without reloading history (preserves inline images)
+      fetch('/api/threads').then(r=>r.json()).then(t=>{threadsList=t;renderTabs();}).catch(()=>{});
     } else if (data.type === 'error') {
       addMessage('error', data.text); setGenerating(false);
     } else if (data.type === 'cron') {
