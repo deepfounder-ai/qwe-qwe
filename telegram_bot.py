@@ -288,6 +288,7 @@ register_command("memory", "Search agent memory")
 register_command("threads", "List conversation threads")
 register_command("stats", "Session statistics")
 register_command("clear", "Clear conversation in this thread")
+register_command("doctor", "Run diagnostics on all components")
 register_command("help", "Show available commands")
 
 
@@ -393,6 +394,17 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         import db as _db
         _db.clear_history(thread_id=thread_id)
         send_message(chat_id, "🗑 History cleared for this thread.", token, topic_id=topic_id)
+        return True
+
+    if cmd == "doctor":
+        send_message(chat_id, "🔍 Running diagnostics...", token, topic_id=topic_id)
+        import threading
+
+        def _run_doctor():
+            results = _run_doctor_checks()
+            send_message(chat_id, results, token, topic_id=topic_id)
+
+        threading.Thread(target=_run_doctor, daemon=True).start()
         return True
 
     if cmd == "help":
@@ -515,6 +527,153 @@ def _to_markdownv2(text: str) -> str:
         result = result.replace(f"\x00PROTECTED{i}\x00", p)
 
     return result
+
+
+def _run_doctor_checks() -> str:
+    """Run all diagnostics, return formatted string for Telegram."""
+    import time as _time
+    import config
+    import providers
+    import memory as mem
+    import soul
+    import skills
+    import threads
+    import db as _db
+
+    lines = ["⚡ *qwe-qwe doctor*\n"]
+    passed = failed = warns = 0
+
+    def ok(name, msg=""):
+        nonlocal passed; passed += 1
+        lines.append(f"✅ {name}: {msg}" if msg else f"✅ {name}")
+    def warn(name, msg=""):
+        nonlocal warns; warns += 1
+        lines.append(f"⚠️ {name}: {msg}" if msg else f"⚠️ {name}")
+    def fail(name, msg=""):
+        nonlocal failed; failed += 1
+        lines.append(f"❌ {name}: {msg}" if msg else f"❌ {name}")
+
+    # SQLite
+    try:
+        conn = _db._get_conn()
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        ok("SQLite", f"{msg_count} messages")
+    except Exception as e:
+        fail("SQLite", str(e)[:60])
+
+    # Qdrant
+    try:
+        count = mem.count()
+        ok("Qdrant", f"{count} memories")
+    except Exception as e:
+        fail("Qdrant", str(e)[:60])
+
+    # LLM connection
+    try:
+        import requests as _req
+        url = providers.get_url().rstrip("/")
+        r = _req.get(f"{url}/models", timeout=5)
+        if r.ok:
+            models = [m["id"] for m in r.json().get("data", [])]
+            ok("LLM API", f"{len(models)} models")
+        else:
+            fail("LLM API", f"HTTP {r.status_code}")
+    except Exception as e:
+        fail("LLM API", str(e)[:60])
+
+    # Model loaded
+    try:
+        active = providers.get_active_name()
+        model = providers.get_model()
+        if active in ("lmstudio", "ollama"):
+            import requests as _req
+            api_base = providers.get_url().rstrip("/").replace("/v1", "")
+            r = _req.get(f"{api_base}/api/v1/models", timeout=5)
+            if r.ok:
+                loaded = any(
+                    m.get("key") == model and m.get("loaded_instances")
+                    for m in r.json().get("models", [])
+                )
+                if loaded:
+                    ok("Model", f"`{model}` loaded")
+                else:
+                    warn("Model", f"`{model}` not loaded (auto-loads on use)")
+            else:
+                warn("Model", "could not check")
+        else:
+            ok("Model", f"`{model}` @ {active}")
+    except Exception as e:
+        warn("Model", str(e)[:60])
+
+    # Embeddings
+    try:
+        import requests as _req
+        r = _req.get(f"{config.EMBED_BASE_URL}/models", timeout=5)
+        if r.ok:
+            ids = [m["id"] for m in r.json().get("data", [])]
+            if config.EMBED_MODEL in ids:
+                ok("Embeddings", f"`{config.EMBED_MODEL}`")
+            else:
+                warn("Embeddings", f"`{config.EMBED_MODEL}` not found")
+        else:
+            fail("Embeddings", f"HTTP {r.status_code}")
+    except Exception as e:
+        fail("Embeddings", str(e)[:60])
+
+    # Inference
+    try:
+        providers.ensure_model_loaded()
+        client = providers.get_client()
+        t0 = _time.time()
+        resp = client.chat.completions.create(
+            model=providers.get_model(),
+            messages=[{"role": "user", "content": "Say 'ok'"}],
+            max_tokens=10, temperature=0,
+        )
+        elapsed = _time.time() - t0
+        reply = (resp.choices[0].message.content or "").strip()[:20]
+        ok("Inference", f"'{reply}' in {elapsed:.1f}s")
+    except Exception as e:
+        fail("Inference", str(e)[:60])
+
+    # Telegram
+    s = status()
+    if s["verified"]:
+        ok("Telegram", f"@{s['username']}")
+    elif s["running"]:
+        warn("Telegram", "running but not verified")
+    elif s["has_token"]:
+        warn("Telegram", "not running")
+    else:
+        warn("Telegram", "no token")
+
+    # Threads & Skills
+    all_t = threads.list_all()
+    ok("Threads", f"{len(all_t)}")
+    active_skills = skills.get_active()
+    ok("Skills", f"{len(active_skills)} active")
+
+    # Disk
+    try:
+        import shutil
+        _, _, free = shutil.disk_usage(".")
+        free_gb = free / (1024**3)
+        if free_gb < 1:
+            warn("Disk", f"{free_gb:.1f}GB free")
+        else:
+            ok("Disk", f"{free_gb:.1f}GB free")
+    except Exception:
+        warn("Disk", "unknown")
+
+    # Summary
+    total = passed + failed + warns
+    lines.append("")
+    if failed == 0 and warns == 0:
+        lines.append(f"*All {total} checks passed!* ⚡")
+    else:
+        lines.append(f"*{passed}* passed, *{failed}* failed, *{warns}* warnings")
+
+    return "\n".join(lines)
 
 
 def send_message(chat_id: int, text: str, token: str | None = None,

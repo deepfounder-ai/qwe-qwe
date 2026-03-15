@@ -735,16 +735,227 @@ def handle_telegram(args: str):
     console.print(f"  [dim]Unknown: /telegram {cmd}[/]")
 
 
+def doctor():
+    """Run diagnostics on all qwe-qwe components."""
+    import time as _time
+
+    console.print("\n  [bold yellow]⚡ qwe-qwe doctor[/]\n")
+    passed = 0
+    failed = 0
+    warnings = 0
+
+    def check(name, fn):
+        nonlocal passed, failed, warnings
+        try:
+            result = fn()
+            if result is True or (isinstance(result, str) and result.startswith("✓")):
+                msg = result if isinstance(result, str) else "✓"
+                console.print(f"  [green]✓[/] {name}: {msg}")
+                passed += 1
+            elif isinstance(result, str) and result.startswith("⚠"):
+                console.print(f"  [yellow]⚠[/] {name}: {result}")
+                warnings += 1
+            else:
+                console.print(f"  [red]✗[/] {name}: {result}")
+                failed += 1
+        except Exception as e:
+            console.print(f"  [red]✗[/] {name}: {str(e)[:100]}")
+            failed += 1
+
+    # ── 1. Python & Dependencies ──
+    console.print("  [dim]── Core ──[/]")
+    import sys
+    check("Python", lambda: f"✓ {sys.version.split()[0]}")
+
+    def _check_deps():
+        missing = []
+        for mod in ["openai", "qdrant_client", "fastapi", "uvicorn", "rich", "requests"]:
+            try:
+                __import__(mod)
+            except ImportError:
+                missing.append(mod)
+        if missing:
+            return f"missing: {', '.join(missing)}"
+        return True
+    check("Dependencies", _check_deps)
+
+    # ── 2. Database ──
+    console.print("  [dim]── Storage ──[/]")
+    def _check_db():
+        conn = db._get_conn()
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        kv_count = conn.execute("SELECT COUNT(*) FROM kv").fetchone()[0]
+        return f"✓ {len(tables)} tables, {msg_count} messages, {kv_count} settings"
+    check("SQLite", _check_db)
+
+    # ── 3. Qdrant ──
+    def _check_qdrant():
+        import memory as mem
+        count = mem.count()
+        return f"✓ {count} memories ({config.QDRANT_MODE} mode)"
+    check("Qdrant", _check_qdrant)
+
+    # ── 4. LLM Provider ──
+    console.print("  [dim]── LLM ──[/]")
+    def _check_provider():
+        p = providers.get_active_name()
+        model = providers.get_model()
+        url = providers.get_url()
+        return f"✓ {model} @ {p} ({url})"
+    check("Provider", _check_provider)
+
+    def _check_llm_connection():
+        import requests as _req
+        url = providers.get_url().rstrip("/")
+        try:
+            r = _req.get(f"{url}/models", timeout=5)
+            if r.ok:
+                models = r.json().get("data", [])
+                return f"✓ {len(models)} models available"
+            return f"HTTP {r.status_code}"
+        except _req.ConnectionError:
+            return "connection refused — is LM Studio running?"
+        except Exception as e:
+            return str(e)[:80]
+    check("LLM API", _check_llm_connection)
+
+    def _check_model_loaded():
+        active = providers.get_active_name()
+        if active not in ("lmstudio", "ollama"):
+            return "✓ cloud provider (always available)"
+        import requests as _req
+        url = providers.get_url().rstrip("/").replace("/v1", "")
+        model = providers.get_model()
+        try:
+            r = _req.get(f"{url}/api/v1/models", timeout=5)
+            if r.ok:
+                for m in r.json().get("models", []):
+                    if m.get("key") == model and m.get("loaded_instances"):
+                        return f"✓ {model} loaded in memory"
+                return f"⚠ {model} downloaded but NOT loaded (will auto-load on first request)"
+        except Exception:
+            pass
+        return f"⚠ could not check model status"
+    check("Model loaded", _check_model_loaded)
+
+    # ── 5. Embeddings ──
+    def _check_embeddings():
+        import requests as _req
+        try:
+            r = _req.get(f"{config.EMBED_BASE_URL}/models", timeout=5)
+            if r.ok:
+                models = [m["id"] for m in r.json().get("data", [])]
+                if config.EMBED_MODEL in models:
+                    return f"✓ {config.EMBED_MODEL}"
+                return f"⚠ {config.EMBED_MODEL} not found (available: {', '.join(models[:3])})"
+            return f"HTTP {r.status_code}"
+        except Exception as e:
+            return str(e)[:80]
+    check("Embeddings", _check_embeddings)
+
+    # ── 6. Inference test ──
+    def _check_inference():
+        t0 = _time.time()
+        try:
+            client = providers.get_client()
+            providers.ensure_model_loaded()
+            resp = client.chat.completions.create(
+                model=providers.get_model(),
+                messages=[{"role": "user", "content": "Say 'ok' and nothing else."}],
+                max_tokens=10,
+                temperature=0,
+            )
+            elapsed = _time.time() - t0
+            reply = (resp.choices[0].message.content or "").strip()
+            tokens = resp.usage.completion_tokens if resp.usage else "?"
+            return f"✓ replied '{reply[:20]}' in {elapsed:.1f}s ({tokens} tokens)"
+        except Exception as e:
+            return str(e)[:100]
+    check("Inference", _check_inference)
+
+    # ── 7. Telegram ──
+    console.print("  [dim]── Integrations ──[/]")
+    def _check_telegram():
+        import telegram_bot as tb
+        s = tb.status()
+        if not s["has_token"]:
+            return "⚠ no token configured"
+        if not s["running"]:
+            return "⚠ not running (enable in settings)"
+        if not s["verified"]:
+            return f"⚠ running as @{s['username']} but not verified"
+        return f"✓ @{s['username']} (owner: @{s['owner_username']})"
+    check("Telegram", _check_telegram)
+
+    # ── 8. Threads ──
+    def _check_threads():
+        all_t = threads.list_all()
+        active = threads.get_active_id()
+        return f"✓ {len(all_t)} threads, active: {active}"
+    check("Threads", _check_threads)
+
+    # ── 9. Skills ──
+    def _check_skills():
+        active = skills.get_active()
+        all_s = skills.list_all()
+        return f"✓ {len(active)}/{len(all_s)} active"
+    check("Skills", _check_skills)
+
+    # ── 10. Tools ──
+    def _check_tools():
+        import tools as t
+        all_tools = t.get_all_tools()
+        return f"✓ {len(all_tools)} tools registered"
+    check("Tools", _check_tools)
+
+    # ── 11. Disk ──
+    console.print("  [dim]── System ──[/]")
+    def _check_disk():
+        import shutil
+        total, used, free = shutil.disk_usage(".")
+        free_gb = free / (1024**3)
+        if free_gb < 1:
+            return f"⚠ only {free_gb:.1f}GB free"
+        return f"✓ {free_gb:.1f}GB free"
+    check("Disk", _check_disk)
+
+    # ── 12. Logs ──
+    def _check_logs():
+        from pathlib import Path
+        log_path = Path("logs/qwe-qwe.log")
+        if not log_path.exists():
+            return "⚠ no log file"
+        size_kb = log_path.stat().st_size / 1024
+        return f"✓ {size_kb:.0f}KB"
+    check("Logs", _check_logs)
+
+    # ── Summary ──
+    console.print()
+    total = passed + failed + warnings
+    if failed == 0 and warnings == 0:
+        console.print(f"  [bold green]All {total} checks passed! ⚡[/]")
+    elif failed == 0:
+        console.print(f"  [bold yellow]{passed} passed, {warnings} warnings[/]")
+    else:
+        console.print(f"  [bold red]{passed} passed, {failed} failed, {warnings} warnings[/]")
+    console.print()
+    return failed == 0
+
+
 def main_entry():
     """Unified entry point: `qwe-qwe` for CLI, `qwe-qwe --web` for web server."""
     import argparse
     parser = argparse.ArgumentParser(description="qwe-qwe — offline AI agent")
     parser.add_argument("--web", action="store_true", help="Start web server instead of CLI")
+    parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
     parser.add_argument("--host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=7860, help="Web server port (default: 7860)")
     args = parser.parse_args()
 
-    if args.web:
+    if args.doctor:
+        doctor()
+    elif args.web:
         import server
         server.start(host=args.host, port=args.port)
     else:
