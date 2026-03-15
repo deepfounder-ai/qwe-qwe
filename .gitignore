@@ -18,3 +18,12 @@ memory/
 .DS_Store
 config.local.py
 uploads/
+data/
+history/
+*.sqlite
+example.txt
+weekly_stats.py
+soul.json
+user.md
+heartbeat.md
+memory/collection/
