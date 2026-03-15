@@ -145,6 +145,83 @@ def get_instruction(tool_name: str) -> str | None:
     return None
 
 
+def validate_skill(skill_path: str) -> tuple[bool, list[str]]:
+    """Validate a skill file for correctness before use.
+
+    Checks: syntax, required attributes, execute() signature, db API usage.
+    Returns (is_valid, errors_list).
+    """
+    import ast, inspect
+
+    errors = []
+    path = Path(skill_path)
+
+    if not path.exists():
+        return False, [f"File not found: {skill_path}"]
+
+    # 1. Syntax check
+    source = path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return False, [f"Syntax error: {e}"]
+
+    # 2. Required attributes: DESCRIPTION, TOOLS, execute()
+    top_names = {node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 else node.targets[0].id if isinstance(node, ast.Assign) and node.targets and isinstance(node.targets[0], ast.Name)
+                 else None
+                 for node in ast.iter_child_nodes(tree)}
+    top_names.discard(None)
+
+    for attr in ("DESCRIPTION", "TOOLS"):
+        if attr not in top_names:
+            errors.append(f"Missing required attribute: {attr}")
+
+    if "execute" not in top_names:
+        errors.append("Missing required function: execute()")
+
+    # 3. Check execute() signature: must accept (name, args)
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "execute":
+            arg_names = [a.arg for a in node.args.args]
+            if len(arg_names) < 2:
+                errors.append(f"execute() must accept (name, args), got ({', '.join(arg_names)})")
+            break
+
+    # 4. Check db API usage — only allowed methods
+    _DB_WHITELIST = {
+        "_get_conn", "kv_get", "kv_set", "kv_get_prefix", "kv_inc",
+        "save_message", "get_recent_messages",
+    }
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "db" and node.attr not in _DB_WHITELIST:
+                errors.append(f"Forbidden db method: db.{node.attr}() — use only: {', '.join(sorted(_DB_WHITELIST))}")
+
+    # 5. Try importing (catches runtime import errors)
+    if not errors:
+        try:
+            mod_name = f"_validate_{path.stem}"
+            spec = importlib.util.spec_from_file_location(mod_name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            # Verify TOOLS is a list of dicts with function.name
+            skill_tools = getattr(mod, "TOOLS", None)
+            if not isinstance(skill_tools, list):
+                errors.append("TOOLS must be a list")
+            elif skill_tools:
+                for i, t in enumerate(skill_tools):
+                    fn = t.get("function", {}) if isinstance(t, dict) else {}
+                    if not fn.get("name"):
+                        errors.append(f"TOOLS[{i}] missing function.name")
+        except Exception as e:
+            errors.append(f"Import failed: {e}")
+
+    return (len(errors) == 0, errors)
+
+
 def execute(tool_name: str, args: dict) -> str:
     """Execute a tool from active skills. Returns result or None if not found."""
     active = get_active()

@@ -1,13 +1,24 @@
-"""Skill Creator — a sub-agent that generates new skills."""
+"""Skill Creator — generates new skills with scaffold template + validation."""
 
 DESCRIPTION = "Create new skills by describing what they should do"
+
+INSTRUCTION = """When creating skills, use ONLY these db functions:
+- db._get_conn() → returns sqlite3.Connection (thread-local, DO NOT close it)
+- db.kv_get(key) → str or None
+- db.kv_set(key, value) → None
+- db.kv_get_prefix(prefix) → dict[str, str]
+- db.kv_inc(key, delta=1) → int
+DO NOT use: db.cursor(), db.connect(), db.close(), db.execute(), db.datetime
+Always import inside execute(): json, datetime
+Always create tables with CREATE TABLE IF NOT EXISTS inside execute().
+Return strings from execute(). Handle errors with try/except."""
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "create_skill",
-            "description": "Create a new skill by describing what it should do. A sub-agent will generate the code and save it as a new skill file.",
+            "description": "Create a new skill. Provide name, description, tools JSON, and execute body logic.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -17,7 +28,7 @@ TOOLS = [
                     },
                     "description": {
                         "type": "string",
-                        "description": "Detailed description of what the skill should do, what tools it needs, and how they should work",
+                        "description": "Detailed description of what the skill should do, what tools it needs",
                     },
                 },
                 "required": ["name", "description"],
@@ -34,53 +45,58 @@ TOOLS = [
     },
 ]
 
-SUBAGENT_PROMPT = '''You are a skill generator for the qwe-qwe agent framework.
+SKILL_TEMPLATE = '''"""{docstring}"""
 
-Generate a Python skill file based on the user's description.
+DESCRIPTION = "{short_description}"
 
-RULES:
-1. Output ONLY valid Python code, nothing else. No markdown, no explanation.
-2. Follow this exact structure:
+INSTRUCTION = """{instruction}"""
 
-"""One-line module docstring."""
+TOOLS = {tools_json}
 
-DESCRIPTION = "Short description for the skill list"
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "tool_name",
-            "description": "What this tool does",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "param": {"type": "string", "description": "Param desc"},
-                },
-                "required": ["param"],
-            },
-        },
-    },
-]
 
 def execute(name: str, args: dict) -> str:
-    if name == "tool_name":
-        # implementation
-        return "result"
-    return f"Unknown tool: {name}"
+    """Handle tool calls for this skill."""
+    import json
+    from datetime import datetime
+    import db
 
-3. Tool names must be unique and descriptive (snake_case)
-4. Keep it simple — one file, no external dependencies beyond stdlib
-5. For SQLite storage: `import db` then `conn = db._get_conn()` — this returns the shared connection
-   - Create tables with `conn.execute("CREATE TABLE IF NOT EXISTS ...")`; `conn.commit()`
-   - NEVER use `db.cursor()` or `db.execute()` — always `db._get_conn()` first
-   - Always create table in a `_ensure_table()` function called at the start of execute()
-6. Always return strings from execute()
-7. Handle errors gracefully with try/except
-8. If you need HTTP requests, use `requests` library (installed) or urllib.request
-9. For datetime: `from datetime import datetime` — NEVER `db.datetime`
-10. No print() statements at module level — only inside functions
+    conn = db._get_conn()
+
+    # Ensure tables exist
+{table_ddl}
+    conn.commit()
+
+{execute_body}
+
+    return f"Unknown tool: {{name}}"
 '''
+
+SUBAGENT_PROMPT = '''You are a skill code generator for the qwe-qwe agent framework.
+
+Generate ONLY the parts needed to fill a skill template. Reply as JSON with these keys:
+{
+    "docstring": "One-line module description",
+    "short_description": "Short description for skill list (max 80 chars)",
+    "instruction": "Instructions for the agent on how to use this skill (when to call which tool, what to avoid)",
+    "tools": [array of OpenAI-format tool definitions],
+    "table_ddl": "SQL CREATE TABLE IF NOT EXISTS statements (one per table, separated by newlines)",
+    "execute_body": "Python code for the if/elif chain inside execute(). Use 4-space indent. Start with 'if name == ...'."
+}
+
+RULES:
+1. Output ONLY valid JSON. No markdown, no explanation, no code fences.
+2. Tool names must be snake_case, unique and descriptive.
+3. In execute_body:
+   - Access args with args.get("key", default) or args["key"]
+   - Use `conn` variable (already available from template)
+   - Always return strings
+   - Handle errors with try/except
+   - Use json.loads/dumps for JSON data
+   - Use datetime for dates (already imported)
+4. For table_ddl: plain SQL, each CREATE TABLE on its own line, indented with 4 spaces.
+5. In tools array: follow OpenAI function calling format exactly.
+6. DO NOT use: db.cursor(), db.connect(), db.close(), print()
+7. The template already imports json, datetime, db and calls db._get_conn().'''
 
 
 def execute(name: str, args: dict) -> str:
@@ -92,10 +108,11 @@ def execute(name: str, args: dict) -> str:
 
 
 def _create_skill(skill_name: str, description: str) -> str:
-    """Spawn a sub-agent to generate skill code."""
+    """Generate skill via sub-agent, fill template, validate."""
+    import json, re, ast
     from pathlib import Path
     from openai import OpenAI
-    import config
+    import config, providers
 
     # Validate name
     skill_name = skill_name.lower().replace(" ", "_").replace("-", "_")
@@ -107,12 +124,13 @@ def _create_skill(skill_name: str, description: str) -> str:
     if target.exists():
         return f"Error: skill '{skill_name}' already exists at {target}"
 
-    # Sub-agent: call LLM with specialized prompt
-    client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
+    # Sub-agent: generate template parts as JSON
+    client = providers.get_client()
+    model = providers.get_model()
 
     try:
         resp = client.chat.completions.create(
-            model=config.LLM_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": SUBAGENT_PROMPT},
                 {"role": "user", "content": f"Create a skill called '{skill_name}'.\n\nDescription: {description}"},
@@ -121,66 +139,121 @@ def _create_skill(skill_name: str, description: str) -> str:
             max_tokens=4096,
         )
 
-        code = resp.choices[0].message.content or ""
+        raw = resp.choices[0].message.content or ""
 
         # Strip thinking tags
-        import re
-        code = re.sub(r"<think>.*?</think>\s*", "", code, flags=re.DOTALL).strip()
+        raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL).strip()
 
         # Strip markdown code fences if present
-        if code.startswith("```"):
-            lines = code.split("\n")
-            lines = lines[1:]  # remove ```python
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            lines = lines[1:]
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
-            code = "\n".join(lines)
+            raw = "\n".join(lines)
 
-        # Validate it's parseable Python
-        import ast
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if not json_match:
+            return f"Sub-agent didn't return valid JSON.\n\nRaw output:\n{raw[:500]}"
+
+        try:
+            parts = json.loads(json_match.group())
+        except json.JSONDecodeError as e:
+            # Try repair
+            from agent import _repair_json
+            parts = _repair_json(json_match.group())
+            if not parts:
+                return f"Sub-agent returned broken JSON: {e}\n\nRaw:\n{raw[:500]}"
+
+        # Validate required keys
+        required_keys = ["docstring", "short_description", "tools", "execute_body"]
+        missing = [k for k in required_keys if k not in parts]
+        if missing:
+            return f"Sub-agent output missing keys: {missing}\n\nGot: {list(parts.keys())}"
+
+        # Format table DDL with proper indentation
+        table_ddl = parts.get("table_ddl", "").strip()
+        if table_ddl:
+            # Ensure each statement is properly indented and wrapped in conn.execute()
+            ddl_lines = []
+            for stmt in re.split(r';\s*', table_ddl):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                # Wrap in conn.execute() if not already
+                if not stmt.startswith("conn.execute"):
+                    ddl_lines.append(f'    conn.execute("""{stmt}""")')
+                else:
+                    ddl_lines.append(f"    {stmt}")
+            table_ddl = "\n".join(ddl_lines)
+        else:
+            table_ddl = "    pass  # No tables needed"
+
+        # Format execute body with proper indentation
+        execute_body = parts.get("execute_body", "").strip()
+        # Ensure 4-space indent
+        body_lines = execute_body.split("\n")
+        formatted_body = []
+        for line in body_lines:
+            stripped = line.lstrip()
+            if not stripped:
+                formatted_body.append("")
+                continue
+            # Calculate current indent level
+            current_indent = len(line) - len(stripped)
+            # Ensure minimum 4-space indent (top-level inside execute)
+            if current_indent < 4:
+                formatted_body.append("    " + stripped)
+            else:
+                formatted_body.append(line)
+        execute_body = "\n".join(formatted_body)
+
+        # Format tools JSON
+        tools_list = parts.get("tools", [])
+        tools_json = json.dumps(tools_list, indent=4, ensure_ascii=False)
+
+        # Fill template
+        code = SKILL_TEMPLATE.format(
+            docstring=parts.get("docstring", f"{skill_name} skill"),
+            short_description=parts.get("short_description", description[:80]),
+            instruction=parts.get("instruction", f"Use {skill_name} tools as needed."),
+            tools_json=tools_json,
+            table_ddl=table_ddl,
+            execute_body=execute_body,
+        )
+
+        # Validate Python syntax before saving
         try:
             ast.parse(code)
         except SyntaxError as e:
-            return f"Sub-agent generated invalid Python: {e}\n\nCode:\n{code[:500]}"
+            return f"Generated code has syntax error: {e}\n\nCode:\n{code[:800]}"
 
-        # Check it has required components
-        if "TOOLS" not in code or "def execute" not in code:
-            return f"Sub-agent output missing TOOLS or execute(). Code:\n{code[:500]}"
-
-        # Save
+        # Save file
         target.write_text(code, encoding="utf-8")
 
-        # Verify it loads
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(f"skill_{skill_name}", target)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            tool_count = len(getattr(mod, "TOOLS", []))
-            desc = getattr(mod, "DESCRIPTION", "")
-        except Exception as e:
-            target.unlink()
-            return f"Generated skill failed to load: {e}"
+        # Part 3: Auto-validate
+        from skills import validate_skill, enable
+        valid, validation_errors = validate_skill(str(target))
 
-        # Quick smoke test — try calling first tool with empty/dummy args
-        test_result = ""
-        if tool_count > 0:
-            first_tool = getattr(mod, "TOOLS", [])[0]
-            tool_name = first_tool["function"]["name"]
-            try:
-                # Just check it doesn't crash on import/init
-                test_result = f"\n  Smoke test: {tool_name}() — OK"
-            except Exception as e:
-                test_result = f"\n  ⚠ Smoke test failed: {e}"
+        if not valid:
+            error_list = "\n".join(f"  - {e}" for e in validation_errors)
+            return (
+                f"⚠️ Skill '{skill_name}' created but has validation errors:\n{error_list}\n"
+                f"File: {target}\n"
+                f"Fix with write_file tool."
+            )
 
-        # Auto-enable the new skill
-        from skills import enable
+        # Auto-enable
         enable(skill_name)
 
+        # Count tools
+        tool_count = len(tools_list)
         return (
             f"✓ Skill '{skill_name}' created and enabled!\n"
             f"  File: {target}\n"
             f"  Tools: {tool_count}\n"
-            f"  Description: {desc}{test_result}"
+            f"  Description: {parts.get('short_description', '')}"
         )
 
     except Exception as e:
