@@ -354,6 +354,14 @@ def _build_messages(user_input: str, thread_id: str | None = None,
     agent_soul = soul.load()
     system_text = soul.to_prompt(agent_soul)
 
+    # Inject user profile from DB (~50 tokens)
+    profile = db.kv_get_prefix("user:")
+    if profile:
+        profile_str = ", ".join(f"{k.replace('user:', '')}={v}" for k, v in sorted(profile.items()))
+        if len(profile_str) > 200:
+            profile_str = profile_str[:200] + "..."
+        system_text += f"\nUser: {profile_str}"
+
     # Add source context
     if source == "telegram":
         system_text += "\nYou are chatting via Telegram. Your replies are sent directly as Telegram messages. You CAN send messages — just reply normally."

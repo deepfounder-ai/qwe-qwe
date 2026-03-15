@@ -292,6 +292,7 @@ register_command("settings", "View/edit agent settings")
 register_command("cron", "List scheduled tasks")
 register_command("thinking", "Toggle thinking mode on/off")
 register_command("doctor", "Run diagnostics on all components")
+register_command("profile", "View/edit user profile")
 register_command("help", "Show available commands")
 
 
@@ -399,8 +400,31 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         send_message(chat_id, "🗑 History cleared for this thread.", token, topic_id=topic_id)
         return True
 
+    if cmd == "profile":
+        if args and args.startswith("set "):
+            # /profile set key value
+            set_parts = args[4:].strip().split(None, 1)
+            if len(set_parts) == 2:
+                key = set_parts[0].strip().lower().replace(" ", "_")
+                val = set_parts[1].strip()
+                db.kv_set(f"user:{key}", val)
+                send_message(chat_id, f"✅ Profile: `{key}` = {val}", token, topic_id=topic_id)
+            else:
+                send_message(chat_id, "Usage: `/profile set <key> <value>`", token, topic_id=topic_id)
+        else:
+            profile = db.kv_get_prefix("user:")
+            if not profile:
+                send_message(chat_id, "👤 No profile data yet.\n\nSet with: `/profile set name Кирилл`", token, topic_id=topic_id)
+            else:
+                lines = ["👤 *Profile:*"]
+                for k, v in sorted(profile.items()):
+                    lines.append(f"• {k.replace('user:', '')}: {v}")
+                lines.append(f"\nEdit: `/profile set <key> <value>`")
+                send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        return True
+
     if cmd == "settings":
-        parts = cmd_args.split(None, 1) if cmd_args else []
+        parts = args.split(None, 1) if args else []
         if len(parts) == 2:
             # /settings key value
             key, val = parts

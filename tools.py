@@ -215,6 +215,30 @@ TOOLS = [
             },
         },
     },
+    # User profile tools
+    {
+        "type": "function",
+        "function": {
+            "name": "user_profile_update",
+            "description": "Save a NEW fact about the user (name, timezone, preferences). Only call when you learn something new.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Fact key (e.g. 'name', 'timezone', 'language', 'tech_stack')"},
+                    "value": {"type": "string", "description": "Fact value"},
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "user_profile_get",
+            "description": "Show the user's saved profile.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
     # RAG tools
     {
         "type": "function",
@@ -380,6 +404,20 @@ def execute(name: str, args: dict) -> str:
         elif name == "secret_delete":
             import vault
             return vault.delete(args["key"])
+
+        elif name == "user_profile_update":
+            import db
+            key = args["key"].strip().lower().replace(" ", "_")
+            db.kv_set(f"user:{key}", args["value"])
+            return f"Profile updated: {key} = {args['value']}"
+
+        elif name == "user_profile_get":
+            import db
+            profile = db.kv_get_prefix("user:")
+            if not profile:
+                return "No profile data yet."
+            lines = [f"- {k.replace('user:', '')}: {v}" for k, v in sorted(profile.items())]
+            return "\n".join(lines)
 
         elif name == "rag_index":
             import rag

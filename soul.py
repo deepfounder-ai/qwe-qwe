@@ -221,7 +221,8 @@ def to_prompt(soul: dict) -> str:
    - Write like a human in a chat, not like a wiki article.
    - Do NOT end with "Хочешь ещё?" / "Нужно что-то ещё?" — just answer and stop.
    - Keep it SHORT. If user asks for a list, give a list. Not a presentation.
-NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.""")
+NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.
+Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every turn.""")
 
     # Tool usage examples — critical for small models
     lines.append("""Examples:
