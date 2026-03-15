@@ -247,6 +247,145 @@ def _api(method: str, token: str, **kwargs) -> dict:
         return {"ok": False, "description": str(e)}
 
 
+# ── Slash commands ──
+
+BOT_COMMANDS = [
+    {"command": "chatid", "description": "Show chat ID and topic ID"},
+    {"command": "status", "description": "Agent status (model, provider, memory)"},
+    {"command": "soul", "description": "Show personality traits"},
+    {"command": "model", "description": "Show current model and provider"},
+    {"command": "skills", "description": "List active skills"},
+    {"command": "memory", "description": "Search agent memory"},
+    {"command": "threads", "description": "List conversation threads"},
+    {"command": "stats", "description": "Session statistics"},
+    {"command": "clear", "description": "Clear conversation in this thread"},
+    {"command": "help", "description": "Show available commands"},
+]
+
+
+def _register_commands(token: str):
+    """Register slash commands with Telegram for predictive input."""
+    result = _api("setMyCommands", token, commands=BOT_COMMANDS)
+    if result.get("ok"):
+        _log.info(f"registered {len(BOT_COMMANDS)} slash commands")
+    else:
+        _log.warning(f"failed to register commands: {result}")
+
+
+def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
+                        token: str, topic_id: int | None = None,
+                        thread_id: str | None = None) -> bool:
+    """Handle built-in bot commands. Returns True if handled."""
+    import providers, soul, skills, threads as thr
+
+    if cmd == "chatid":
+        info = f"📋 Chat ID: `{chat_id}`"
+        if topic_id:
+            info += f"\nTopic ID: `{topic_id}`"
+        send_message(chat_id, info, token, topic_id=topic_id)
+        return True
+
+    if cmd == "status":
+        s = soul.load()
+        model = providers.get_model()
+        prov = providers.get_active_name()
+        active_skills = skills.get_active()
+        import memory as mem
+        mem_count = 0
+        try:
+            mem_count = mem.count()
+        except Exception:
+            pass
+        msg = (
+            f"⚡ *{s['name']}*\n"
+            f"Model: `{model}` @ {prov}\n"
+            f"Skills: {', '.join(sorted(active_skills)) or 'none'}\n"
+            f"Memories: {mem_count}"
+        )
+        send_message(chat_id, msg, token, topic_id=topic_id)
+        return True
+
+    if cmd == "soul":
+        s = soul.load()
+        lines = [f"🎭 *{s.get('name', 'Agent')}* ({s.get('language', '?')})"]
+        for k, v in s.items():
+            if k not in ("name", "language"):
+                lines.append(f"  {k}: {'█' * v}{'░' * (10-v)} {v}/10")
+        send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        return True
+
+    if cmd == "model":
+        model = providers.get_model()
+        prov = providers.get_active_name()
+        send_message(chat_id, f"🤖 Model: `{model}`\nProvider: {prov}", token, topic_id=topic_id)
+        return True
+
+    if cmd == "skills":
+        active = skills.get_active()
+        all_skills = skills.list_all()
+        lines = []
+        for s in all_skills:
+            mark = "✅" if s["name"] in active else "◻️"
+            lines.append(f"{mark} {s['name']}")
+        send_message(chat_id, "🧩 *Skills*\n" + "\n".join(lines), token, topic_id=topic_id)
+        return True
+
+    if cmd == "memory":
+        if not args:
+            send_message(chat_id, "Usage: `/memory <query>`", token, topic_id=topic_id)
+            return True
+        import memory as mem
+        results = mem.search(args, limit=3)
+        if results:
+            lines = ["🧠 *Memory search:*"]
+            for r in results:
+                text = r.get("text", "")[:200]
+                score = r.get("score", 0)
+                lines.append(f"• ({score:.2f}) {text}")
+            send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        else:
+            send_message(chat_id, "Nothing found.", token, topic_id=topic_id)
+        return True
+
+    if cmd == "threads":
+        all_t = thr.list_all()
+        active_id = thr.get_active_id()
+        lines = ["🧵 *Threads:*"]
+        for t in all_t[:10]:
+            mark = "→" if t["id"] == (thread_id or active_id) else " "
+            lines.append(f"{mark} {t['name']} ({t['messages']} msgs)")
+        send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        return True
+
+    if cmd == "stats":
+        import db as _db
+        turns = _db.kv_get("session_turns") or "0"
+        prompt_t = int(_db.kv_get("session_prompt_tokens") or "0")
+        compl_t = int(_db.kv_get("session_completion_tokens") or "0")
+        msg = (
+            f"📊 *Stats*\n"
+            f"Turns: {turns}\n"
+            f"Tokens: {prompt_t + compl_t} (prompt: {prompt_t}, completion: {compl_t})"
+        )
+        send_message(chat_id, msg, token, topic_id=topic_id)
+        return True
+
+    if cmd == "clear":
+        import db as _db
+        _db.clear_history(thread_id=thread_id)
+        send_message(chat_id, "🗑 History cleared for this thread.", token, topic_id=topic_id)
+        return True
+
+    if cmd == "help":
+        lines = ["📖 *Commands:*"]
+        for c in BOT_COMMANDS:
+            lines.append(f"/{c['command']} — {c['description']}")
+        send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        return True
+
+    return False
+
+
 def send_message(chat_id: int, text: str, token: str | None = None,
                  reply_to: int | None = None, topic_id: int | None = None):
     """Send a message to a Telegram chat."""
@@ -320,6 +459,9 @@ def _poll_loop(token: str):
     bot_username = me.get("username", "")
     _log.info(f"connected as @{bot_username}")
     db.kv_set("telegram:bot_username", bot_username)
+
+    # Register slash commands for predictive input
+    _register_commands(token)
 
     while _running:
         try:
@@ -403,15 +545,22 @@ def _handle_update(update: dict, token: str, bot_username: str):
                 _log.info(f"wrong code from @{username} ({user_id}), attempt {attempts}/{MAX_ATTEMPTS}")
             return
 
-    # ── Built-in commands (work for owner in any chat, bypass group mode) ──
+    # ── Slash commands (work for owner in any chat, bypass group mode) ──
     owner_id = get_owner_id()
-    clean_text = text.strip().split("@")[0].strip()  # handle "/chatid@botname"
-    if clean_text == "/chatid" and user_id == owner_id:
-        info = f"📋 Chat ID: `{chat_id}`\nType: {chat_type}"
-        if topic_id:
-            info += f"\nTopic ID: `{topic_id}`"
-        send_message(chat_id, info, token, topic_id=topic_id)
-        return
+    if text.strip().startswith("/") and user_id == owner_id:
+        # Parse: "/cmd@botname args" → cmd, args
+        parts = text.strip().split(None, 1)
+        cmd_part = parts[0].lstrip("/").split("@")[0].lower()
+        cmd_args = parts[1] if len(parts) > 1 else ""
+
+        # Determine thread_id for this context
+        cmd_thread = None
+        if topic_id and chat_type in ("group", "supergroup") and is_topics_enabled():
+            cmd_thread = get_thread_for_topic(chat_id, topic_id)
+
+        if _handle_bot_command(cmd_part, cmd_args, chat_id, user_id, token,
+                               topic_id=topic_id, thread_id=cmd_thread):
+            return
 
     # ── Private chat ──
     if chat_type == "private":
