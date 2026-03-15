@@ -419,21 +419,132 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
     return False
 
 
+def _to_markdownv2(text: str) -> str:
+    """Convert standard Markdown to Telegram MarkdownV2.
+    
+    Handles: **bold**, *italic*, `code`, ```codeblocks```, [links](url)
+    Escapes special chars outside of formatted regions.
+    """
+    import re as _re
+
+    # Protect code blocks and inline code first
+    protected = []
+    counter = [0]
+
+    def _protect(match):
+        idx = counter[0]
+        counter[0] += 1
+        protected.append(match.group(0))
+        return f"\x00PROTECTED{idx}\x00"
+
+    # Protect ```...``` and `...`
+    result = _re.sub(r'```[\s\S]*?```', _protect, text)
+    result = _re.sub(r'`[^`]+`', _protect, result)
+
+    # Convert **bold** → *bold* (MarkdownV2 bold)
+    # But first protect existing *italic*
+    # Strategy: **text** → \x01bold\x01, then *text* → \x02italic\x02
+    bold_parts = []
+    def _protect_bold(m):
+        idx = len(bold_parts)
+        bold_parts.append(m.group(1))
+        return f"\x01BOLD{idx}\x01"
+
+    italic_parts = []
+    def _protect_italic(m):
+        idx = len(italic_parts)
+        italic_parts.append(m.group(1))
+        return f"\x02ITALIC{idx}\x02"
+
+    # Protect [text](url) links
+    link_parts = []
+    def _protect_link(m):
+        idx = len(link_parts)
+        link_parts.append((m.group(1), m.group(2)))
+        return f"\x03LINK{idx}\x03"
+
+    result = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _protect_link, result)
+
+    result = _re.sub(r'\*\*(.+?)\*\*', _protect_bold, result)
+    result = _re.sub(r'\*(.+?)\*', _protect_italic, result)
+
+    # Escape MarkdownV2 special chars in plain text
+    special = r'_[]()~>#+-=|{}.!'
+    escaped = ""
+    for ch in result:
+        if ch in special:
+            escaped += "\\" + ch
+        else:
+            escaped += ch
+    result = escaped
+
+    # Restore bold → *escaped_text*
+    for i, b in enumerate(bold_parts):
+        esc_b = ""
+        for ch in b:
+            if ch in special:
+                esc_b += "\\" + ch
+            else:
+                esc_b += ch
+        result = result.replace(f"\x01BOLD{i}\x01", f"*{esc_b}*")
+
+    # Restore italic → _escaped_text_
+    for i, it in enumerate(italic_parts):
+        esc_it = ""
+        for ch in it:
+            if ch in special:
+                esc_it += "\\" + ch
+            else:
+                esc_it += ch
+        result = result.replace(f"\x02ITALIC{i}\x02", f"_{esc_it}_")
+
+    # Restore links → [escaped_text](url)
+    for i, (link_text, link_url) in enumerate(link_parts):
+        esc_lt = ""
+        for ch in link_text:
+            if ch in special:
+                esc_lt += "\\" + ch
+            else:
+                esc_lt += ch
+        # URL: escape only ) and \
+        esc_url = link_url.replace("\\", "\\\\").replace(")", "\\)")
+        result = result.replace(f"\x03LINK{i}\x03", f"[{esc_lt}]({esc_url})")
+
+    # Restore protected code blocks (no escaping inside)
+    for i, p in enumerate(protected):
+        result = result.replace(f"\x00PROTECTED{i}\x00", p)
+
+    return result
+
+
 def send_message(chat_id: int, text: str, token: str | None = None,
                  reply_to: int | None = None, topic_id: int | None = None):
-    """Send a message to a Telegram chat."""
+    """Send a message to a Telegram chat with MarkdownV2 formatting."""
     token = token or get_token()
     if not token:
         return
     # Split long messages (Telegram limit: 4096 chars)
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
     for chunk in chunks:
-        kwargs = {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}
+        # Try MarkdownV2 first, fall back to plain text
+        md2_text = _to_markdownv2(chunk)
+        kwargs = {"chat_id": chat_id, "text": md2_text, "parse_mode": "MarkdownV2"}
         if reply_to:
             kwargs["reply_to_message_id"] = reply_to
         if topic_id:
             kwargs["message_thread_id"] = topic_id
-        _api("sendMessage", token, **kwargs)
+        result = _api("sendMessage", token, **kwargs)
+        if not result.get("ok"):
+            # Fallback: send without formatting
+            _log.warning(f"MarkdownV2 failed, falling back to plain: {result.get('description', '')[:100]}")
+            kwargs["text"] = chunk
+            kwargs["parse_mode"] = "Markdown"
+            result = _api("sendMessage", token, **kwargs)
+            if not result.get("ok"):
+                # Last resort: no parse mode
+                kwargs.pop("parse_mode")
+                kwargs["text"] = chunk
+                _api("sendMessage", token, **kwargs)
 
 
 def get_me(token: str | None = None) -> dict:
