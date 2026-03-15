@@ -288,6 +288,7 @@ register_command("memory", "Search agent memory")
 register_command("threads", "List conversation threads")
 register_command("stats", "Session statistics")
 register_command("clear", "Clear conversation in this thread")
+register_command("thinking", "Toggle thinking mode on/off")
 register_command("doctor", "Run diagnostics on all components")
 register_command("help", "Show available commands")
 
@@ -394,6 +395,14 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         import db as _db
         _db.clear_history(thread_id=thread_id)
         send_message(chat_id, "🗑 History cleared for this thread.", token, topic_id=topic_id)
+        return True
+
+    if cmd == "thinking":
+        current = db.kv_get("thinking_enabled") == "true"
+        new_val = not current
+        db.kv_set("thinking_enabled", "true" if new_val else "false")
+        status_text = "💭 Thinking: **ON**\nМодель будет размышлять перед ответом" if new_val else "💭 Thinking: **OFF**\nБыстрые ответы без размышлений"
+        send_message(chat_id, status_text, token, topic_id=topic_id)
         return True
 
     if cmd == "doctor":
