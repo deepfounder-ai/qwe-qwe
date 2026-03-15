@@ -73,6 +73,134 @@ def _repair_json(raw: str) -> dict:
         return {}
 
 
+def _get_tool_schema(tool_name: str) -> dict | None:
+    """Get the JSON schema for a tool by name."""
+    for t in tools.TOOLS:
+        if t["function"]["name"] == tool_name:
+            return t["function"].get("parameters", {})
+    return None
+
+
+def _retry_tool_call(client, model: str, tool_name: str,
+                     raw_args: str, max_retries: int = 3) -> dict | None:
+    """Retry broken tool call JSON with progressively clearer prompts.
+
+    Attempt 1: _repair_json() — already done by caller.
+    Attempt 2: Ask model to reformat with schema hint.
+    Attempt 3: Minimal prompt — "just give me the JSON".
+    Returns parsed args dict or None if all retries fail.
+    """
+    schema = _get_tool_schema(tool_name)
+    required = schema.get("required", []) if schema else []
+    props = schema.get("properties", {}) if schema else {}
+    schema_hint = ", ".join(f'{k}: {v.get("type", "string")}' for k, v in props.items())
+
+    # Attempt 2: ask model to reformat
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You fix broken JSON. Reply with ONLY valid JSON, nothing else."},
+                {"role": "user", "content": (
+                    f"This JSON for tool '{tool_name}' is broken:\n{raw_args[:500]}\n\n"
+                    f"Required params: {schema_hint}\n"
+                    f"Reply with corrected JSON object only."
+                )},
+            ],
+            temperature=0.1,
+            max_tokens=256,
+            stream=False,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        # Extract JSON from response (model might wrap in ```json...```)
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+            _log.info(f"retry attempt 2 succeeded for {tool_name}")
+            return result
+    except Exception as e:
+        _log.warning(f"retry attempt 2 failed: {e}")
+
+    # Attempt 3: minimal prompt
+    try:
+        params_desc = ", ".join(f'"{k}"' for k in required)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": (
+                    f'{{"'
+                    f'Generate JSON for {tool_name}. Keys: {params_desc}. '
+                    f'Original (broken): {raw_args[:300]}'
+                )},
+            ],
+            temperature=0.0,
+            max_tokens=256,
+            stream=False,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+            _log.info(f"retry attempt 3 succeeded for {tool_name}")
+            return result
+    except Exception as e:
+        _log.warning(f"retry attempt 3 failed: {e}")
+
+    _log.error(f"all retry attempts failed for {tool_name}")
+    return None
+
+
+# Tools where self-check is applied before execution
+_SELF_CHECK_TOOLS = {"shell", "write_file"}
+
+
+def _self_check_tool_call(client, model: str, tool_name: str,
+                          args: dict) -> tuple[bool, dict | None]:
+    """Ask model to validate tool arguments before execution.
+
+    Returns (is_ok, corrected_args). If is_ok=True, args are fine.
+    If is_ok=False and corrected_args is not None, use corrected version.
+    """
+    try:
+        args_json = json.dumps(args, ensure_ascii=False)
+        schema = _get_tool_schema(tool_name)
+        required = schema.get("required", []) if schema else []
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": (
+                    "Check this tool call. If arguments are correct, reply ONLY 'OK'. "
+                    "If wrong, reply with corrected JSON only."
+                )},
+                {"role": "user", "content": (
+                    f"Tool: {tool_name}\n"
+                    f"Required: {required}\n"
+                    f"Arguments: {args_json}"
+                )},
+            ],
+            temperature=0.1,
+            max_tokens=256,
+            stream=False,
+        )
+        text = _strip_thinking(resp.choices[0].message.content or "").strip()
+
+        if text.upper().startswith("OK"):
+            return True, None
+
+        # Try to parse corrected JSON
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            corrected = json.loads(m.group())
+            _log.info(f"self-check corrected {tool_name}: {args} → {corrected}")
+            return False, corrected
+
+        return True, None  # couldn't parse correction, assume OK
+    except Exception as e:
+        _log.warning(f"self-check failed for {tool_name}: {e}")
+        return True, None  # on error, don't block execution
+
+
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks from model output."""
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
@@ -227,7 +355,8 @@ def _build_messages(user_input: str, thread_id: str | None = None,
 class TurnResult:
     """Result of one agent turn with debug info."""
     __slots__ = ("reply", "thinking", "prompt_tokens", "completion_tokens", "total_tokens",
-                 "tool_calls_made", "model", "auto_context_hits", "json_repairs")
+                 "tool_calls_made", "model", "auto_context_hits", "json_repairs",
+                 "retry_successes", "self_check_fixes")
 
     def __init__(self):
         self.reply = ""
@@ -239,6 +368,8 @@ class TurnResult:
         self.model = providers.get_model()
         self.auto_context_hits = 0
         self.json_repairs = 0
+        self.retry_successes = 0
+        self.self_check_fixes = 0
 
 
 def _estimate_tokens(messages: list[dict]) -> int:
@@ -555,7 +686,7 @@ def run(user_input: str, thread_id: str | None = None,
             for tc in tool_calls_data.values():
                 result.tool_calls_made.append(tc["name"])
 
-                # Parse tool call arguments (with repair for small models)
+                # Parse tool call arguments (with repair + retry for small models)
                 try:
                     args = json.loads(tc["arguments"])
                 except Exception:
@@ -564,6 +695,33 @@ def run(user_input: str, thread_id: str | None = None,
                     if args:
                         result.json_repairs += 1
                         _log.info(f"json repair succeeded for {tc['name']}")
+                    else:
+                        # Retry: ask model to regenerate the JSON
+                        retry_max = config.get("tool_retry_max")
+                        if retry_max > 0:
+                            _console.print(f"  [yellow]🔄 retrying {tc['name']} (broken JSON)...[/]")
+                            retried = _retry_tool_call(
+                                client, providers.get_model(),
+                                tc["name"], tc["arguments"], max_retries=retry_max
+                            )
+                            if retried:
+                                args = retried
+                                result.retry_successes += 1
+                                _console.print(f"  [green]✓ retry succeeded[/]")
+                            else:
+                                args = {}
+                                _console.print(f"  [red]✗ retry failed, using empty args[/]")
+
+                # Self-check for critical tools (shell, write_file)
+                if args and tc["name"] in _SELF_CHECK_TOOLS and config.get("self_check_enabled"):
+                    ok, fixed = _self_check_tool_call(
+                        client, providers.get_model(), tc["name"], args
+                    )
+                    if not ok and fixed:
+                        args = fixed
+                        result.self_check_fixes += 1
+                        _console.print(f"  [yellow]🔍 self-check corrected args[/]")
+
                 try:
                     args_short = json.dumps(args, ensure_ascii=False)
                     if len(args_short) > 80:
@@ -645,7 +803,8 @@ def run(user_input: str, thread_id: str | None = None,
         logger.event("turn_complete", duration_ms=turn_ms, rounds=rounds,
                      tools_used=result.tool_calls_made, reply_len=len(result.reply),
                      est_tokens=est_tokens, context_hits=result.auto_context_hits,
-                     thread=tid or "active")
+                     json_repairs=result.json_repairs, retries=result.retry_successes,
+                     self_checks=result.self_check_fixes, thread=tid or "active")
 
         if _original_model:
             providers.set_model(_original_model)

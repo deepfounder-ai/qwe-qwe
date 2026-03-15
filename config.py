@@ -52,6 +52,8 @@ EDITABLE_SETTINGS = {
     "max_tool_rounds":      ("setting:max_tool_rounds",      int, 10, "Max tool call rounds", 1, 30),
     "compaction_threshold": ("setting:compaction_threshold",  int, 20, "Auto-compact after N messages", 5, 100),
     "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 4000, 60000),
+    "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, 5),
+    "self_check_enabled":   ("setting:self_check_enabled",    int, 1,     "Self-check before shell/write_file (0=off, 1=on)", 0, 1),
 }
 
 
