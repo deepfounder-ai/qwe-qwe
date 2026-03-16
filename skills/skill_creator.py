@@ -89,7 +89,7 @@ Output ONLY valid JSON, no markdown, no explanation:
     "tools": ["tool_name: brief description of what it does"]
 }}
 
-Keep it simple. Max 5 tools. Max 3 tables."""
+Keep it simple. IMPORTANT: Max 3 tools only! Max 2 tables. Fewer = better."""
 
 STEP2_TOOLS = """You are a tool definition generator. Given a plan, output OpenAI function tool definitions as a JSON array.
 
@@ -114,27 +114,28 @@ Output ONLY a valid JSON array, no markdown:
 
 Rules: snake_case names, clear descriptions, correct JSON types."""
 
-STEP3_CODE = """You are a Python code generator. Generate the execute() body for a skill.
+STEP3_CODE = """Generate Python code for a skill's execute() function body.
 
-Available variables (already in scope):
-- `name` (str): tool name being called
-- `args` (dict): tool arguments
-- `conn`: sqlite3 connection (from db._get_conn())
-- `json`: already imported
-- `datetime`: already imported
-- `db`: already imported (db.kv_get, db.kv_set, db.kv_get_prefix, db.kv_inc)
+Variables already available: name (str), args (dict), conn (sqlite3 connection), json, datetime, db.
 
-Rules:
-1. Output ONLY Python code, no markdown, no explanation
-2. Start with: if name == "first_tool":
-3. Use elif for each subsequent tool
-4. Each branch MUST return a string
-5. Use conn.execute() for SQL
-6. Use args.get("key", default) to read arguments
-7. Handle errors with try/except
-8. Use 4-space indentation consistently
-9. DO NOT use: db.cursor(), db.connect(), print()
-10. Keep it simple — straightforward CRUD logic"""
+Output ONLY the if/elif code block. No markdown. No explanation. No thinking.
+
+Example for a "notes" skill with tools add_note and list_notes:
+
+    if name == "add_note":
+        text = args.get("text", "")
+        conn.execute("INSERT INTO notes (text, created) VALUES (?, ?)", (text, datetime.now().isoformat()))
+        conn.commit()
+        return f"Note saved: {text[:50]}"
+
+    elif name == "list_notes":
+        rows = conn.execute("SELECT id, text, created FROM notes ORDER BY id DESC LIMIT 10").fetchall()
+        if not rows:
+            return "No notes yet."
+        lines = [f"#{r[0]}: {r[1]} ({r[2]})" for r in rows]
+        return "\\n".join(lines)
+
+Now generate code following this exact pattern. Use 4-space indent. Each branch returns a string."""
 
 
 def execute(name: str, args: dict) -> str:
@@ -231,9 +232,34 @@ def _extract_json(raw: str):
 
 def _extract_code(raw: str) -> str:
     """Extract Python code from LLM output."""
-    # Strip markdown fences
+    # Strip thinking tags and thinking blocks
+    raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL).strip()
+
+    # Strip everything before first 'if name' or 'if ' line
+    lines = raw.split("\n")
+    code_start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("if name ==") or stripped.startswith("if name=="):
+            code_start = i
+            break
+        # Also catch markdown-fenced code
+        if stripped.startswith("```"):
+            continue
+
+    if code_start is not None:
+        # Take everything from first 'if name' line
+        code_lines = []
+        in_fence = False
+        for line in lines[code_start:]:
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            code_lines.append(line)
+        return "\n".join(code_lines)
+
+    # Fallback: strip markdown fences
     if "```" in raw:
-        lines = raw.split("\n")
         clean = []
         in_fence = False
         for line in lines:
@@ -245,12 +271,7 @@ def _extract_code(raw: str) -> str:
         if clean:
             return "\n".join(clean)
 
-    # If starts with 'if name' — it's raw code
-    stripped = raw.strip()
-    if stripped.startswith("if ") or stripped.startswith("# "):
-        return stripped
-
-    return stripped
+    return raw.strip()
 
 
 def _fix_indentation(code: str) -> str:
@@ -434,6 +455,10 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
                 table_ddl=table_ddl,
                 execute_body=execute_body,
             )
+
+            # Save for debugging
+            debug_path = Path(__file__).parent.parent / "logs" / f"skill_debug_{skill_name}_{attempt}.py"
+            debug_path.write_text(code, encoding="utf-8")
 
             # Validate syntax
             try:
