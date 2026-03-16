@@ -936,17 +936,60 @@ def doctor():
     return failed == 0
 
 
+def _run_update_cli():
+    """Run update from CLI with Rich progress output."""
+    import updater
+
+    console.print("\n  [bold yellow]⚡ qwe-qwe update[/]\n")
+
+    status_icons = {
+        "checking": "🔍", "running": "⏳", "stashing": "📦",
+        "ok": "[green]✓[/]", "error": "[red]✗[/]",
+        "warning": "[yellow]⚠[/]", "skipped": "[dim]–[/]",
+    }
+    step_names = {
+        "preflight": "Preflight", "fetch": "Check updates", "conflicts": "Skill conflicts",
+        "backup": "Backup database", "pull": "Pull code", "deps": "Dependencies",
+        "migrate": "Migrations", "done": "Complete",
+    }
+
+    def on_progress(step, status, detail=""):
+        icon = status_icons.get(status, "·")
+        name = step_names.get(step, step)
+        if detail:
+            console.print(f"  {icon} {name}: {detail}")
+        else:
+            console.print(f"  {icon} {name}")
+
+    result = updater.perform_update(on_progress=on_progress)
+    console.print()
+
+    if result["success"]:
+        if result["restart_needed"]:
+            console.print(f"  [bold green]⚡ Updated: v{result['old_version']} → v{result['new_version']}[/]")
+            console.print(f"  [dim]Restart qwe-qwe to use the new version.[/]\n")
+        else:
+            console.print(f"  [green]Already up to date (v{result['new_version']})[/]\n")
+    else:
+        console.print(f"  [bold red]Update failed:[/] {result.get('error', 'Unknown error')}\n")
+
+    sys.exit(0 if result["success"] else 1)
+
+
 def main_entry():
     """Unified entry point: `qwe-qwe` for CLI, `qwe-qwe --web` for web server."""
     import argparse
     parser = argparse.ArgumentParser(description="qwe-qwe — offline AI agent")
     parser.add_argument("--web", action="store_true", help="Start web server instead of CLI")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
+    parser.add_argument("--update", action="store_true", help="Update to latest version")
     parser.add_argument("--host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=7860, help="Web server port (default: 7860)")
     args = parser.parse_args()
 
-    if args.doctor:
+    if args.update:
+        _run_update_cli()
+    elif args.doctor:
         doctor()
     elif args.web:
         import server

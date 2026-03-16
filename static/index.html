@@ -753,6 +753,23 @@ body {
           <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">Fine-tune agent behavior. Changes take effect immediately.</p>
           <div id="agentSettings">Loading...</div>
         </div>
+        <div class="s-card" id="updateCard">
+          <div class="s-card-title"><i class="ph ph-download-simple"></i> Update</div>
+          <div class="s-row">
+            <span class="s-row-label">Current version</span>
+            <span class="s-row-value" id="updateCurrentVer">—</span>
+          </div>
+          <div class="s-row" id="updateLatestRow" style="display:none">
+            <span class="s-row-label">Latest version</span>
+            <span class="s-row-value" id="updateLatestVer" style="color:#4ade80">—</span>
+          </div>
+          <div id="updateProgress" style="display:none; margin-top:12px; padding:10px; background:var(--surface); border-radius:8px; font-size:12px; font-family:var(--mono);"></div>
+          <div class="s-btn-row" style="margin-top:12px">
+            <button class="s-btn" id="updateCheckBtn" onclick="checkForUpdate()"><i class="ph ph-magnifying-glass"></i> Check</button>
+            <button class="s-btn primary" id="updateNowBtn" onclick="runUpdate()" style="display:none"><i class="ph ph-download-simple"></i> Update Now</button>
+            <button class="s-btn" id="updateRestartBtn" onclick="restartAfterUpdate()" style="display:none"><i class="ph ph-arrow-clockwise"></i> Restart</button>
+          </div>
+        </div>
         <div class="s-card">
           <div class="s-card-title"><i class="ph ph-scroll"></i> Logs</div>
           <div class="s-btn-row" style="margin-top:0;margin-bottom:12px">
@@ -1785,11 +1802,14 @@ function renderCronList(crons) {
 function renderTaskResults(data) {
   const container = document.getElementById('taskResults');
   const parts = [];
-  if (data.pending > 0) parts.push(`<div style="color:var(--accent);margin-bottom:8px">⏳ ${data.pending} task(s) running...</div>`);
   if (data.results?.length) {
     for (const r of data.results) {
-      const icon = r.status === 'done' ? '<i class="ph ph-check-circle"></i>' : '<i class="ph ph-x-circle"></i>';
-      parts.push(`<div style="margin-bottom:6px">${icon} <strong>#${r.id}</strong> ${r.task.substring(0,60)}<br><span style="font-size:12px;color:var(--text-dim)">${r.result.substring(0,200)}</span></div>`);
+      if (r.status === 'running') {
+        parts.push(`<div style="margin-bottom:6px;padding:6px 10px;background:rgba(99,102,241,0.1);border-radius:6px"><i class="ph ph-spinner" style="color:var(--accent)"></i> <strong>#${r.id}</strong> ${r.task.substring(0,80)}<br><span style="font-size:12px;color:var(--accent)">${r.result || 'Starting...'}</span></div>`);
+      } else {
+        const icon = r.status === 'done' ? '<i class="ph ph-check-circle" style="color:#4ade80"></i>' : '<i class="ph ph-x-circle" style="color:var(--error)"></i>';
+        parts.push(`<div style="margin-bottom:6px">${icon} <strong>#${r.id}</strong> ${r.task.substring(0,80)}<br><span style="font-size:12px;color:var(--text-dim)">${r.result.substring(0,200)}</span></div>`);
+      }
     }
   }
   container.innerHTML = parts.join('') || '<span class="s-row-label">No background tasks</span>';
@@ -1844,6 +1864,18 @@ function connect() {
       chat.scrollTop = chat.scrollHeight;
     } else if (data.type === 'status') {
       showStatus(data.text);
+    } else if (data.type === 'update_progress') {
+      _onUpdateProgress(data.step, data.status, data.detail);
+    } else if (data.type === 'update_done') {
+      _onUpdateDone(data);
+    } else if (data.type === 'task_update') {
+      // Auto-refresh background tasks section if cron tab is active
+      if (document.getElementById('cronPage')?.style.display !== 'none') loadCron();
+      // Also show a chat notification for completed tasks
+      if (data.text.startsWith('✅') || data.text.startsWith('❌') || data.text.startsWith('⚠️')) {
+        addMessage('assistant', `🔧 **${data.name}**: ${data.text}`, {});
+        chat.scrollTop = chat.scrollHeight;
+      }
     }
   };
 }
@@ -2126,7 +2158,88 @@ async function checkVersion() {
       el.title = 'Up to date';
     }
     el.style.display = '';
+    // Also update settings card
+    const cv = document.getElementById('updateCurrentVer');
+    if (cv) cv.textContent = `v${v.current}`;
+    if (v.update_available) {
+      const lr = document.getElementById('updateLatestRow');
+      const lv = document.getElementById('updateLatestVer');
+      if (lr) lr.style.display = '';
+      if (lv) lv.textContent = `v${v.latest}`;
+      const btn = document.getElementById('updateNowBtn');
+      if (btn) btn.style.display = '';
+    }
   } catch(e) {}
+}
+
+// ── Update system ──
+async function checkForUpdate() {
+  const btn = document.getElementById('updateCheckBtn');
+  btn.disabled = true; btn.innerHTML = '<i class="ph ph-spinner"></i> Checking...';
+  try {
+    const res = await fetch('/api/update/check');
+    const d = await res.json();
+    document.getElementById('updateCurrentVer').textContent = `v${d.current}`;
+    if (d.available) {
+      document.getElementById('updateLatestRow').style.display = '';
+      document.getElementById('updateLatestVer').textContent = `v${d.latest} (${d.commits_behind} commits)`;
+      document.getElementById('updateNowBtn').style.display = '';
+    } else {
+      document.getElementById('updateLatestRow').style.display = 'none';
+      document.getElementById('updateNowBtn').style.display = 'none';
+      btn.innerHTML = '<i class="ph ph-check"></i> Up to date';
+    }
+    if (d.error) btn.innerHTML = `<i class="ph ph-warning"></i> ${d.error}`;
+  } catch(e) {
+    btn.innerHTML = '<i class="ph ph-warning"></i> Check failed';
+  } finally { btn.disabled = false; }
+}
+
+async function runUpdate() {
+  const btn = document.getElementById('updateNowBtn');
+  btn.disabled = true; btn.innerHTML = '<i class="ph ph-spinner"></i> Updating...';
+  document.getElementById('updateCheckBtn').style.display = 'none';
+  const prog = document.getElementById('updateProgress');
+  prog.style.display = 'block'; prog.innerHTML = '⏳ Starting update...\n';
+  try { await fetch('/api/update', {method:'POST'}); }
+  catch(e) { prog.innerHTML += `\n❌ ${e.message}`; btn.disabled = false; }
+}
+
+function _onUpdateProgress(step, status, detail) {
+  const prog = document.getElementById('updateProgress');
+  if (!prog) return;
+  const icons = {checking:'🔍', running:'⏳', stashing:'📦', ok:'✅', error:'❌', warning:'⚠️', skipped:'⏭️'};
+  const icon = icons[status] || '·';
+  prog.innerHTML += `${icon} ${step}: ${detail || status}\n`;
+  prog.scrollTop = prog.scrollHeight;
+}
+
+function _onUpdateDone(data) {
+  const btn = document.getElementById('updateNowBtn');
+  btn.style.display = 'none';
+  if (data.success && data.restart_needed) {
+    document.getElementById('updateRestartBtn').style.display = '';
+    const prog = document.getElementById('updateProgress');
+    prog.innerHTML += `\n🎉 Updated to v${data.new_version}! Click Restart to apply.`;
+  } else if (data.success) {
+    const prog = document.getElementById('updateProgress');
+    prog.innerHTML += `\n✅ Already up to date.`;
+    document.getElementById('updateCheckBtn').style.display = '';
+  } else {
+    const prog = document.getElementById('updateProgress');
+    prog.innerHTML += `\n❌ ${data.error || 'Unknown error'}`;
+    document.getElementById('updateCheckBtn').style.display = '';
+  }
+}
+
+async function restartAfterUpdate() {
+  const btn = document.getElementById('updateRestartBtn');
+  btn.disabled = true; btn.innerHTML = '<i class="ph ph-spinner"></i> Restarting...';
+  try { await fetch('/api/update/restart', {method:'POST'}); }
+  catch(e) {}
+  // Server will restart — wait and reconnect
+  document.getElementById('updateProgress').innerHTML += '\n🔄 Server restarting... page will reload.';
+  setTimeout(() => location.reload(), 3000);
 }
 
 // ── Markdown ──

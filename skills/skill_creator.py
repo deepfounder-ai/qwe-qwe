@@ -160,14 +160,18 @@ def _create_skill_async(skill_name: str, description: str) -> str:
     if target.exists():
         return f"Error: skill '{skill_name}' already exists at {target}"
 
+    # Register in background tasks registry
+    import tasks
+    task_id = tasks.register(f"skill:{skill_name}", f"Creating skill '{skill_name}': {description[:100]}")
+
     # Launch background thread
     t = threading.Thread(
         target=_generate_skill_pipeline,
-        args=(skill_name, description, target),
+        args=(skill_name, description, target, task_id),
         daemon=True,
     )
     t.start()
-    _log.info(f"skill generation started in background: {skill_name}")
+    _log.info(f"skill generation started in background: {skill_name} (task #{task_id})")
 
     return (
         f"⏳ Skill '{skill_name}' generation started in background.\n"
@@ -346,6 +350,19 @@ def _notify(skill_name: str, message: str):
     _log = logger.get("skill_creator")
     _log.info(f"[{skill_name}] {message}")
 
+    # Try to notify via WebSocket (for web UI auto-refresh)
+    try:
+        import asyncio
+        # Import _broadcast and _ws_loop from server if available
+        from server import _broadcast, _ws_loop, _ws_clients
+        if _ws_loop and _ws_clients:
+            asyncio.run_coroutine_threadsafe(
+                _broadcast({"type": "task_update", "name": skill_name, "text": message}),
+                _ws_loop
+            )
+    except Exception:
+        pass
+
     # Try to notify via telegram
     try:
         import telegram_bot
@@ -401,18 +418,24 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
     return errors
 
 
-def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
+def _generate_skill_pipeline(skill_name: str, description: str, target: Path, task_id: int = 0):
     """Multi-step skill generation pipeline running in background."""
     import logger
+    import tasks
     _log = logger.get("skill_creator")
     start = time.time()
     max_attempts = 3
+
+    def _progress(step: str):
+        if task_id:
+            tasks.update(task_id, "running", step)
 
     for attempt in range(1, max_attempts + 1):
         _log.info(f"[{skill_name}] attempt {attempt}/{max_attempts}")
 
         try:
             # ── Step 1: Plan ──
+            _progress(f"Step 1/5: planning (attempt {attempt})")
             _log.info(f"[{skill_name}] step 1: planning")
             plan_raw = _llm_call(
                 STEP1_PLAN,
@@ -427,6 +450,7 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
             _log.info(f"[{skill_name}] step 1 done: {len(plan.get('tools', []))} tools planned")
 
             # ── Step 2: Tool definitions ──
+            _progress(f"Step 2/5: generating tools (attempt {attempt})")
             _log.info(f"[{skill_name}] step 2: generating tool definitions")
             tools_raw = _llm_call(
                 STEP2_TOOLS,
@@ -453,6 +477,7 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
             _log.info(f"[{skill_name}] step 2 done: {len(tools_list)} tools")
 
             # ── Step 3: Generate execute body ──
+            _progress(f"Step 3/5: generating code (attempt {attempt})")
             _log.info(f"[{skill_name}] step 3: generating code")
             tool_names = [t["function"]["name"] for t in tools_list]
             tool_descriptions = "\n".join(
@@ -477,6 +502,7 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
             execute_body = _fix_empty_blocks(execute_body)
 
             # ── Step 4: Generate table DDL ──
+            _progress(f"Step 4/5: building tables (attempt {attempt})")
             table_ddl_lines = []
             for table_spec in plan.get("tables", []):
                 # Support formats:
@@ -509,6 +535,7 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
             table_ddl = "\n".join(table_ddl_lines) if table_ddl_lines else "    pass  # No tables needed"
 
             # ── Step 5: Assemble & validate ──
+            _progress(f"Step 5/5: validating (attempt {attempt})")
             _log.info(f"[{skill_name}] step 5: assembling and validating")
             tools_json = json.dumps(tools_list, indent=4, ensure_ascii=False)
 
@@ -563,7 +590,10 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
                     target.unlink(missing_ok=True)  # retry will overwrite anyway
                     continue
                 # Last attempt — keep file, notify with errors
-                _notify(skill_name, f"⚠️ Created with errors: {'; '.join(errors)}. Fix with write_file.")
+                msg = f"⚠️ Created with errors: {'; '.join(errors)}. Fix with write_file."
+                if task_id:
+                    tasks.update(task_id, "error", msg)
+                _notify(skill_name, msg)
                 return
 
             # Smoke test: try calling execute() with each tool
@@ -573,14 +603,20 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
                 if attempt < max_attempts:
                     target.unlink(missing_ok=True)
                     continue
-                _notify(skill_name, f"⚠️ Created but smoke test failed: {'; '.join(smoke_errors)}")
+                msg = f"⚠️ Created but smoke test failed: {'; '.join(smoke_errors)}"
+                if task_id:
+                    tasks.update(task_id, "error", msg)
+                _notify(skill_name, msg)
                 return
 
             # Enable
             enable(skill_name)
 
             elapsed = int(time.time() - start)
-            _notify(skill_name, f"✅ Created and enabled! ({len(tools_list)} tools, {elapsed}s)")
+            msg = f"✅ Created and enabled! ({len(tools_list)} tools, {elapsed}s)"
+            if task_id:
+                tasks.update(task_id, "done", msg)
+            _notify(skill_name, msg)
             _log.info(f"[{skill_name}] SUCCESS in {elapsed}s, attempt {attempt}")
             return
 
@@ -590,7 +626,10 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
 
     # All attempts failed
     elapsed = int(time.time() - start)
-    _notify(skill_name, f"❌ Failed after {max_attempts} attempts ({elapsed}s). Try simpler description.")
+    msg = f"❌ Failed after {max_attempts} attempts ({elapsed}s). Try simpler description."
+    if task_id:
+        tasks.update(task_id, "error", msg)
+    _notify(skill_name, msg)
     _log.error(f"[{skill_name}] FAILED after {max_attempts} attempts")
 
 

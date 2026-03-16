@@ -78,6 +78,13 @@ def _run_task(task_id: int, task_desc: str):
 
 def _save_result(task_id: int, task_desc: str, status: str, result: str):
     with _lock:
+        # Update existing entry if present (for registered tasks)
+        for r in _results:
+            if r["id"] == task_id:
+                r["status"] = status
+                r["result"] = result
+                r["ts"] = time.time()
+                return
         _results.append({
             "id": task_id,
             "task": task_desc,
@@ -125,10 +132,41 @@ def get_results(clear: bool = True) -> list[dict]:
     return results
 
 
+def register(name: str, description: str = "") -> int:
+    """Register an external background task (not via queue). Returns task id.
+    Use update() to change status/result when done."""
+    global _task_counter
+    with _lock:
+        _task_counter += 1
+        task_id = _task_counter
+        _results.append({
+            "id": task_id,
+            "task": description or name,
+            "name": name,
+            "status": "running",
+            "result": "",
+            "ts": time.time(),
+        })
+    return task_id
+
+
+def update(task_id: int, status: str, result: str = ""):
+    """Update status/result of a registered task."""
+    with _lock:
+        for r in _results:
+            if r["id"] == task_id:
+                r["status"] = status
+                r["result"] = result
+                r["ts"] = time.time()
+                return
+
+
 def pending_count() -> int:
-    return _task_queue.qsize()
+    with _lock:
+        running = sum(1 for r in _results if r.get("status") == "running")
+    return _task_queue.qsize() + running
 
 
 def completed_count() -> int:
     with _lock:
-        return len(_results)
+        return sum(1 for r in _results if r.get("status") != "running")

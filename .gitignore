@@ -19,6 +19,7 @@ memory/
 config.local.py
 uploads/
 data/
+backups/
 history/
 *.sqlite
 example.txt

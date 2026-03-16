@@ -70,6 +70,17 @@ def _friendly_error(e: Exception) -> str:
 
 # ── Agent runner in thread pool (agent.run is sync/blocking) ──
 
+def _emit_agent_status(text: str):
+    """Broadcast live status update from agent thread to WS clients."""
+    if _ws_loop and _ws_clients:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _broadcast({"type": "status", "text": text}), _ws_loop
+            )
+        except Exception:
+            pass
+
+
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
                     image_path: str | None = None) -> dict:
@@ -79,6 +90,8 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
     agent._abort_event = _abort_event  # share abort flag with agent
     # Pass image_path so agent can store it in user message meta
     agent._pending_image_path = image_path
+    # Set live status callback for tool progress
+    agent._status_callback = _emit_agent_status
     t0 = time.time()
     result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
@@ -326,6 +339,80 @@ async def version_check():
     """Check current version vs latest GitHub release."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _check_version_sync)
+
+
+# ── Update ──
+
+_update_status = {"running": False, "result": None}
+
+@app.get("/api/update/check")
+async def update_check():
+    """Check if update is available (uses git fetch)."""
+    import updater
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, updater.check)
+
+
+@app.post("/api/update")
+async def trigger_update():
+    """Trigger a full update. Progress broadcast via WebSocket."""
+    if _update_status["running"]:
+        return JSONResponse({"error": "Update already in progress"}, status_code=409)
+
+    import updater
+
+    def _run():
+        _update_status["running"] = True
+        _update_status["result"] = None
+
+        def on_progress(step, status, detail=""):
+            if _ws_loop and _ws_clients:
+                msg = {"type": "update_progress", "step": step, "status": status, "detail": detail}
+                try:
+                    asyncio.run_coroutine_threadsafe(_broadcast(msg), _ws_loop)
+                except Exception:
+                    pass
+
+        try:
+            result = updater.perform_update(on_progress=on_progress)
+            _update_status["result"] = result
+        except Exception as e:
+            _update_status["result"] = {"success": False, "error": str(e)}
+        finally:
+            _update_status["running"] = False
+
+        # Broadcast final result
+        if _ws_loop and _ws_clients:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _broadcast({"type": "update_done", **(_update_status["result"] or {})}),
+                    _ws_loop
+                )
+            except Exception:
+                pass
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/api/update/status")
+async def update_status():
+    """Get current update status."""
+    return {"running": _update_status["running"], "result": _update_status["result"]}
+
+
+@app.post("/api/update/restart")
+async def trigger_restart():
+    """Restart the server process after update."""
+    import updater
+
+    async def _delayed_restart():
+        await asyncio.sleep(1)  # let response reach client
+        updater.restart_process()
+
+    asyncio.ensure_future(_delayed_restart())
+    return {"restarting": True}
 
 
 @app.get("/api/stats")

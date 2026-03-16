@@ -9,6 +9,18 @@ import logger
 _log = logger.get("agent")
 _console = Console()
 
+# Status callback: set by server.py to push live updates to WebSocket
+_status_callback: callable = None  # (text: str) -> None
+
+
+def _emit_status(text: str):
+    """Emit a status update to connected clients (if callback set)."""
+    if _status_callback:
+        try:
+            _status_callback(text)
+        except Exception:
+            pass
+
 
 def _resize_image_b64(b64: str, max_side: int = 512, quality: int = 80) -> str:
     """Resize image to fit within max_side px and re-encode as JPEG."""
@@ -765,6 +777,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                     in_think = True
                     if not think_shown:
                         _console.print("  [dim]💭 thinking...[/]")
+                        _emit_status("💭 thinking...")
                         think_shown = True
                 if "</think>" in text:
                     in_think = False
@@ -818,6 +831,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                         retry_max = config.get("tool_retry_max")
                         if retry_max > 0:
                             _console.print(f"  [yellow]🔄 retrying {tc['name']} (broken JSON)...[/]")
+                            _emit_status(f"🔄 retrying {tc['name']}...")
                             retried = _retry_tool_call(
                                 client, providers.get_model(),
                                 tc["name"], tc["arguments"], max_retries=retry_max
@@ -850,6 +864,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                     args_short = str(args)[:80]
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
+                _emit_status(f"🔧 {tc['name']}")
 
                 # Lazy skill instruction injection (append to system msg, not insert new one)
                 import skills
@@ -940,6 +955,7 @@ def _run_inner(user_input: str, thread_id: str | None,
             continue
 
         # No tool calls — final response
+        _emit_status("✍️ writing reply...")
         result.thinking = _extract_thinking(full_content) or ""
         raw_reply = _strip_thinking(full_content)
 

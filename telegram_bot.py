@@ -234,6 +234,23 @@ def _get_or_create_thread_for_topic(chat_id: int, topic_id: int, topic_name: str
     return t["id"]
 
 
+def _get_or_create_dm_thread(chat_id: int) -> str:
+    """Get or create a dedicated thread for Telegram DM (private chat).
+    This ensures Telegram private messages never mix with web UI threads."""
+    import threads
+    kv_key = f"telegram:dm_thread:{chat_id}"
+    tid = db.kv_get(kv_key)
+    if tid:
+        t = threads.get(tid)
+        if t:
+            return tid
+    # Create new thread for this DM
+    t = threads.create("Telegram DM", meta={"telegram_chat_id": chat_id, "telegram_dm": True})
+    db.kv_set(kv_key, t["id"])
+    _log.info(f"created DM thread ({t['id']}) for chat {chat_id}")
+    return t["id"]
+
+
 # ── API calls ──
 
 def _api(method: str, token: str, **kwargs) -> dict:
@@ -1103,6 +1120,10 @@ def _handle_update(update: dict, token: str, bot_username: str):
         cmd_thread = None
         if topic_id and chat_type in ("group", "supergroup") and is_topics_enabled():
             cmd_thread = get_thread_for_topic(chat_id, topic_id)
+        elif chat_type == "private":
+            cmd_thread = _get_or_create_dm_thread(chat_id)
+        elif chat_type in ("group", "supergroup"):
+            cmd_thread = _get_or_create_dm_thread(chat_id)
 
         if _handle_bot_command(cmd_part, cmd_args, chat_id, user_id, token,
                                topic_id=topic_id, thread_id=cmd_thread):
@@ -1113,8 +1134,10 @@ def _handle_update(update: dict, token: str, bot_username: str):
         if user_id != owner_id:
             _log.warning(f"blocked DM from non-owner {user_id} (@{username})")
             return
+        # Use dedicated Telegram DM thread (never share with web UI active thread)
+        dm_thread = _get_or_create_dm_thread(chat_id)
         _process_message(chat_id, text, user_id, username, message_id, token,
-                         topic_id=None, thread_id=None, image_b64=image_b64)
+                         topic_id=None, thread_id=dm_thread, image_b64=image_b64)
         return
 
     # ── Group/supergroup ──
@@ -1151,6 +1174,9 @@ def _handle_update(update: dict, token: str, bot_username: str):
             topic_name = ""
             # Try to get topic name from reply
             thread_id = _get_or_create_thread_for_topic(chat_id, topic_id, topic_name)
+        else:
+            # Group without topics — use dedicated group thread (never share with web UI)
+            thread_id = _get_or_create_dm_thread(chat_id)
 
         _process_message(chat_id, text, user_id, username, message_id, token,
                          topic_id=topic_id, thread_id=thread_id,
