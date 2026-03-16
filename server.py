@@ -44,6 +44,30 @@ import threads
 
 _log = logger.get("server")
 
+# ── Error formatting ──
+
+def _friendly_error(e: Exception) -> str:
+    """Convert raw exceptions to user-friendly messages."""
+    err = str(e).lower()
+    if "connection" in err and ("refused" in err or "failed" in err or "error" in err):
+        return "⚠️ Cannot connect to LLM server. Make sure LM Studio or Ollama is running."
+    if "timeout" in err:
+        return "⚠️ LLM server timed out. The model may still be loading — try again in a moment."
+    if "401" in err or "unauthorized" in err or "authentication" in err:
+        return "⚠️ Authentication failed. Check your API key in Settings → Provider."
+    if "404" in err and "model" in err:
+        return "⚠️ Model not found. Load the model in LM Studio or check the model name in Settings."
+    if "rate" in err and "limit" in err:
+        return "⚠️ Rate limit exceeded. Wait a moment and try again."
+    if "context" in err and ("length" in err or "too long" in err):
+        return "⚠️ Message too long for model context. Try a shorter message or clear history."
+    # Fallback: show first 200 chars of the error
+    msg = str(e)
+    if len(msg) > 200:
+        msg = msg[:200] + "…"
+    return f"⚠️ Error: {msg}"
+
+
 # ── Agent runner in thread pool (agent.run is sync/blocking) ──
 
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
@@ -83,7 +107,7 @@ async def lifespan(app: FastAPI):
 
 # ── App ──
 
-app = FastAPI(title="qwe-qwe", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="qwe-qwe", version="0.3.0", lifespan=lifespan)
 
 # ── Optional auth (set QWE_PASSWORD env to enable) ──
 _AUTH_PASSWORD = os.environ.get("QWE_PASSWORD", "")
@@ -916,7 +940,8 @@ async def websocket_chat(ws: WebSocket):
 
             except Exception as e:
                 _log.error(f"ws agent error: {e}", exc_info=True)
-                if not await _ws_send_safe(ws, {"type": "error", "text": str(e)}):
+                user_msg = _friendly_error(e)
+                if not await _ws_send_safe(ws, {"type": "error", "text": user_msg}):
                     break
 
     except WebSocketDisconnect:

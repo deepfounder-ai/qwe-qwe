@@ -29,7 +29,7 @@ _client_key: str | None = None  # "url|key" — to detect when to recreate
 PRESETS = {
     "lmstudio": {
         "name": "LM Studio",
-        "url": "http://192.168.0.49:1234/v1",
+        "url": "http://localhost:1234/v1",
         "key": "lm-studio",
         "models": [],  # auto-detected
     },

@@ -12,7 +12,7 @@ import os
 _env = os.environ.get
 
 # LLM
-LLM_BASE_URL = _env("QWE_LLM_URL", "http://192.168.0.49:1234/v1")
+LLM_BASE_URL = _env("QWE_LLM_URL", "http://localhost:1234/v1")
 LLM_MODEL = _env("QWE_LLM_MODEL", "qwen/qwen3.5-9b")
 LLM_API_KEY = _env("QWE_LLM_KEY", "lm-studio")
 

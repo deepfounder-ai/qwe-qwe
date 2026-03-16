@@ -19,7 +19,16 @@
   <a href="#diagnostics">Doctor</a>
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
+  <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
+  <img src="https://img.shields.io/badge/runs-100%25_offline-purple" alt="offline">
+</p>
+
 ---
+
+<!-- TODO: hero GIF — 15-20 sec screencast showing: open web UI → type message → agent responds with tool call → result appears. File: docs/hero.gif, recommended size: 800x500 -->
 
 ## What is qwe-qwe?
 
@@ -27,17 +36,7 @@ A personal AI agent designed to squeeze maximum capability out of **small local 
 
 Optimized for **Qwen 3.5 9B** running on a single consumer GPU (8GB VRAM). Cloud providers supported as fallback, but the architecture, prompts, and tool system are built for the constraints of small models.
 
-## Philosophy
-
-Most AI agent frameworks assume GPT or Claude — unlimited context, perfect instruction following, cheap API calls. Real life is different:
-
-- **Small models get confused** with too many tools → we cap the tool set and keep descriptions minimal
-- **Context is expensive** at 9B scale → system prompt is ~250 tokens (vs 24k in cloud agents)
-- **JSON output is unreliable** → built-in JSON repair handles trailing commas, unclosed brackets, single quotes
-- **Models overthink** with chain-of-thought → thinking mode is off by default, toggle when needed
-- **Retry loops are dangerous** → 2 identical errors = hard stop (no infinite tool-call spirals)
-
-The result: a snappy agent that responds in 1-5 seconds on an RTX 4070, fully offline.
+> **Philosophy**: don't make the 9B model smarter — make the system around it smarter. Retry loops, JSON repair, self-checks, and consensus mechanisms compensate for what the model lacks.
 
 ## Why Small Models
 
@@ -51,6 +50,52 @@ The result: a snappy agent that responds in 1-5 seconds on an RTX 4070, fully of
 | **Reliability** | API outages, rate limits | Always available |
 
 qwe-qwe makes the trade-off worth it by working *with* the model's limitations instead of fighting them.
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- [LM Studio](https://lmstudio.ai) or [Ollama](https://ollama.ai) with a loaded model
+- **Recommended model:** Qwen 3.5 9B Q4_K_M (~5.5GB GGUF) — best quality/speed at 8GB VRAM
+- **Embedding model:** nomic-embed-text-v1.5 (768 dim)
+
+### Install
+
+**One-line install:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/deepfounder-ai/qwe-qwe/main/install.sh | bash
+```
+
+**Or manually:**
+```bash
+git clone https://github.com/deepfounder-ai/qwe-qwe.git && cd qwe-qwe
+./setup.sh
+source .venv/bin/activate
+```
+
+### Run
+
+```bash
+qwe-qwe              # terminal chat
+qwe-qwe --web        # web UI at http://localhost:7860
+qwe-qwe --doctor     # check everything works
+```
+
+LM Studio / Ollama are auto-detected on localhost during setup. If your server is on another machine, set:
+```bash
+export QWE_LLM_URL=http://<your-ip>:1234/v1
+```
+
+### Recommended hardware
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| GPU | 6GB VRAM (7B Q4) | 8GB VRAM (9B Q4_K_M) |
+| RAM | 8GB | 16GB |
+| Storage | 10GB | 20GB (models + memory) |
+
+Works on: gaming laptops, desktop GPUs (RTX 3060+), Mac M1+ (via Ollama).
 
 ## Architecture
 
@@ -74,99 +119,63 @@ Telegram bot    ←──┘    Loop   ├── Tools (32 built-in)
 - **Compact system prompt** (~250 tokens) — every token counts at 9B
 - **JSON repair engine** — fixes malformed tool calls (trailing commas, unclosed brackets, single quotes, BOM chars)
 - **Tool budget** — small models degrade with >9 tools visible; skill system keeps the active set minimal
-- **Retry protection** — 2 identical errors → hard stop (prevents infinite loops)
+- **Retry with self-check** — validates tool calls before execution, retries on parse failure
 - **Smart compaction** — summarizes old messages when context fills up, saves to memory
 - **Thinking toggle** — chain-of-thought off by default (Qwen overthinks with 622x token ratio); enable for complex tasks
-
-## Quick Start
-
-**One-line install:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/deepfounder-ai/qwe-qwe/main/install.sh | bash
-```
-
-**Or manually:**
-```bash
-git clone https://github.com/deepfounder-ai/qwe-qwe.git && cd qwe-qwe
-./setup.sh
-source .venv/bin/activate
-qwe-qwe              # terminal chat
-qwe-qwe --web        # web UI at http://localhost:7860
-qwe-qwe --doctor     # check everything works
-```
-
-**Docker:**
-```bash
-docker compose up
-```
-
-### Prerequisites
-
-- Python 3.11+
-- [LM Studio](https://lmstudio.ai) or [Ollama](https://ollama.ai) with a loaded model
-- **Recommended:** Qwen 3.5 9B Q4_K_M (~5.5GB GGUF) — best quality/speed at 8GB VRAM
-- **Embedding:** nomic-embed-text-v1.5 (768 dim)
-
-LM Studio / Ollama are auto-detected on localhost during setup.
-
-### Recommended hardware
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| GPU | 6GB VRAM (7B Q4) | 8GB VRAM (9B Q4_K_M) |
-| RAM | 8GB | 16GB |
-| Storage | 10GB | 20GB (models + memory) |
-
-Works on: gaming laptops, desktop GPUs (RTX 3060+), Mac M1+ (via Ollama).
+- **Structured output caching** — auto-disables response_format after first 400 error (LM Studio compat)
 
 ## Interfaces
 
+### Web UI
+
+```bash
+qwe-qwe --web
+```
+
+<!-- TODO: screenshot — web UI chat with a tool call visible (tool tags, thinking block). File: docs/web-ui.png -->
+
+Dark-themed chat with:
+- WebSocket streaming with real-time status
+- Thread management (create, switch, rename, branch)
+- Image upload & vision
+- Soul personality editor (low / moderate / high toggles)
+- Model picker with provider switching
+- Settings page (all agent parameters)
+- Version update indicator in header
+
+**LAN Access**: toggle LAN broadcasting from Settings — access your agent from phone, tablet, or another PC at `http://<your-ip>:7860`.
+
 ### Terminal (CLI)
+
 ```bash
 qwe-qwe
 ```
-Rich-formatted terminal chat with `/soul` editor, `/skills` toggle, `/memory` search, `/logs` viewer, and more.
 
-### Web UI
-```bash
-qwe-qwe --web                  # default: 0.0.0.0:7860
-qwe-qwe --web --port 8080      # custom port
-```
-Dark-themed chat with WebSocket streaming, image upload, soul sliders, model picker, thread management, and settings page.
+<!-- TODO: screenshot — terminal with rich formatting, tool call, colored output. File: docs/cli.png -->
 
-**LAN Access**: toggle LAN broadcasting from the Settings page — access your agent from any device on your local network (phone, tablet, another PC). When enabled, the web UI is available at `http://<your-ip>:7860`.
-
-**API endpoints:**
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Chat UI |
-| `GET /api/status` | Agent stats |
-| `GET /api/discover` | Auto-discover LLM servers |
-| `POST /api/upload` | Upload image for vision |
-| `POST /api/login` | Authenticate (if password set) |
-| `GET /api/history` | Chat history |
-| `GET /api/soul` | Soul config |
-| `POST /api/soul` | Update traits |
-| `WS /ws` | Chat WebSocket |
+Rich-formatted terminal chat with `/soul` editor, `/skills` toggle, `/memory` search, `/logs` viewer, and 20+ slash commands.
 
 ### Telegram Bot
-Full mobile access to your agent via Telegram — slash commands, topic-to-thread mapping, image support, formatted messages. [Setup guide →](#telegram-bot)
+
+<!-- TODO: screenshot — Telegram chat showing agent response with formatted text. File: docs/telegram.png -->
+
+Full mobile access — slash commands, topic-to-thread mapping, image support, formatted messages. [Setup guide →](#telegram-bot-setup)
 
 ## Providers
 
-The primary target is **local models via LM Studio or Ollama**. Cloud providers are supported as fallback or for occasional use:
+Primary target is **local models via LM Studio or Ollama**. Cloud providers supported as fallback:
 
 | Provider | Type | Notes |
 |----------|------|-------|
 | **LM Studio** | Local ⭐ | Primary target. Auto-loads models |
 | **Ollama** | Local ⭐ | Standard Ollama API |
-| **OpenAI** | Cloud | GPT, etc. |
+| **OpenAI** | Cloud | GPT-4o, GPT-4.1, etc. |
 | **OpenRouter** | Cloud | Multi-model gateway |
 | **Groq** | Cloud | Fast inference |
 | **Together** | Cloud | Open-source models |
 | **DeepSeek** | Cloud | DeepSeek models |
 
-Switch on the fly via `/model` (CLI/Telegram) or Settings (Web UI). Auto-switches model name when changing providers.
+Switch on the fly via `/model` (CLI/Telegram) or Settings (Web UI). Auto-discovers available models.
 
 ## Memory
 
@@ -201,18 +210,35 @@ Thread-scoped semantic memory powered by Qdrant:
 
 Pluggable skill system — drop a `.py` file in `skills/` and toggle with `/skills`:
 
-- `weather` — weather reports via wttr.in
-- `finance` — expense/income tracking
-- `notes` — note management with search
-- `timer` — timers and alarms
-- `soul_editor` — AI-assisted personality tuning
-- `skill_creator` — create new skills from chat
+| Skill | Description |
+|-------|-------------|
+| `weather` | Weather reports via wttr.in |
+| `notes` | Note management with search |
+| `timer` | Timers and alarms |
+| `soul_editor` | AI-assisted personality tuning |
+| `skill_creator` | **Create new skills from chat** — multi-step pipeline with validation |
 
-Skills keep the active tool count manageable for small models while allowing extensibility.
+### Creating skills from chat
+
+Ask the agent to create a skill and it generates one in background:
+
+```
+You: create a skill for tracking my daily habits
+Agent: ⏳ Skill 'habit_tracker' generation started...
+       plan → tools → code → validate → ✅ Created and enabled! (3 tools, 45s)
+```
+
+The skill creator:
+1. Plans the skill architecture (tables, tools)
+2. Generates OpenAI-compatible tool definitions
+3. Writes the execute() logic from a template
+4. Validates syntax, imports, db API usage
+5. Runs smoke test on every tool
+6. Auto-enables on success
 
 ## Scheduler
 
-Cron-like task scheduling with flexible syntax:
+Cron-like task scheduling with natural syntax:
 
 ```
 "in 5m"        → run once in 5 minutes
@@ -226,11 +252,7 @@ Cron-like task scheduling with flexible syntax:
 - Complex tasks run through the agent with full tool access
 - Manage via `/cron` (CLI & Telegram) or Web UI
 
-## Telegram Bot
-
-Full mobile access to your agent via Telegram.
-
-### Setup
+## Telegram Bot Setup
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) → copy the token
 2. Set the token: `/telegram token <TOKEN>` (CLI) or Settings → Telegram (Web)
@@ -261,16 +283,14 @@ Full mobile access to your agent via Telegram.
 | `/thinking` | Toggle thinking mode |
 | `/doctor` | Run diagnostics |
 | `/clear` | Clear conversation |
-| `/chatid` | Show chat/topic IDs |
 | `/help` | Command list |
 
-### Features
+### Telegram Features
 
-- **Topic isolation**: supergroup topics map to separate threads with isolated memory
+- **Topic isolation**: supergroup topics → separate threads with isolated memory
 - **Formatted messages**: MarkdownV2 with HTML fallback
 - **Continuous typing**: indicator stays active while model generates
 - **Image support**: send images for vision analysis
-- **Compaction notifications**: delivered to the same topic
 - **Cron results**: scheduled task output delivered to your chat
 
 ## Personality (Soul)
@@ -278,12 +298,14 @@ Full mobile access to your agent via Telegram.
 Customize your agent's personality with adjustable traits:
 
 - **Name** and **language**
-- **Creativity** (0-10) — maps to LLM temperature
-- **Verbosity** (0-10) — response length guidance
-- **Formality** (0-10) — casual to formal
+- **Creativity** (low / moderate / high) — maps to LLM temperature
+- **Verbosity** (low / moderate / high) — response length guidance
+- **Formality** (low / moderate / high) — casual to formal
 - **Custom traits** — add any personality dimension
 
 Edit via `/soul` (CLI), Settings page (Web), or `/soul` (Telegram).
+
+<!-- TODO: screenshot — soul editor in web UI showing the 3-button toggles. File: docs/soul-editor.png -->
 
 ## Threads
 
@@ -335,7 +357,7 @@ QWE_EMBED_URL=                          # Embedding server (defaults to LLM URL)
 QWE_EMBED_MODEL=text-embedding-nomic-embed-text-v1.5
 QWE_DB_PATH=qwe_qwe.db                 # SQLite database path
 QWE_QDRANT_MODE=disk                    # memory | disk | server
-QWE_PASSWORD=                           # Web UI authentication
+QWE_PASSWORD=                           # Web UI authentication (optional)
 ```
 
 ## Docker
@@ -355,12 +377,12 @@ Persistent data in `./data/` (memory, logs, skills, database).
 ├── server.py        # FastAPI web server + WebSocket + auth
 ├── agent.py         # Core loop + JSON repair + compaction
 ├── config.py        # Settings (env-configurable)
-├── db.py            # SQLite storage (WAL mode)
+├── db.py            # SQLite storage (WAL mode, thread-local)
 ├── memory.py        # Qdrant semantic memory
 ├── rag.py           # RAG file indexing & search
 ├── discovery.py     # Auto-discover LLM servers
 ├── providers.py     # Multi-provider LLM management
-├── soul.py          # Personality system
+├── soul.py          # Personality system (low/moderate/high)
 ├── tools.py         # Tool definitions + execution
 ├── tasks.py         # Background task runner
 ├── scheduler.py     # Cron-like scheduler
@@ -378,3 +400,9 @@ Persistent data in `./data/` (memory, logs, skills, database).
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  Built with ❤️ by <a href="https://deepfounder.ai">DeepFounder</a>
+</p>
