@@ -117,6 +117,9 @@ else
     step "PATH already configured"
 fi
 
+# Make qwe-qwe available immediately in this session
+export PATH="$BIN_DIR:$PATH"
+
 # ── LM Studio / Ollama auto-discovery ─────────────────────
 echo ""
 info "Searching for LLM servers..."
@@ -150,12 +153,16 @@ echo -e "  ${GREEN}${BOLD}⚡ qwe-qwe installed!${NC}"
 echo ""
 if $ADDED_PATH; then
     echo -e "  Restart your shell or run:"
-    echo -e "    ${DIM}source ~/${SHELL_NAME}rc${NC}"
+    echo -e "    ${DIM}source ~/.${SHELL_NAME}rc${NC}"
     echo ""
 fi
-echo -e "  Then:"
+echo -e "  Quick start:"
 echo -e "    ${BOLD}qwe-qwe${NC}              # terminal chat"
 echo -e "    ${BOLD}qwe-qwe --web${NC}        # web UI"
+echo -e "    ${BOLD}qwe-qwe --doctor${NC}     # verify setup"
+echo ""
+echo -e "  ${DIM}If 'qwe-qwe' is not found, run:${NC}"
+echo -e "    ${DIM}${INSTALL_DIR}/.venv/bin/qwe-qwe --web${NC}"
 echo ""
 echo -e "  ${DIM}Docs: https://github.com/deepfounder-ai/qwe-qwe${NC}"
 echo ""
