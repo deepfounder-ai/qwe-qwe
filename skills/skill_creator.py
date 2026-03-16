@@ -275,44 +275,46 @@ def _extract_code(raw: str) -> str:
 
 
 def _fix_indentation(code: str) -> str:
-    """Fix common indentation issues from small models."""
+    """Fix indentation by detecting the offset and normalizing to 4-space base.
+
+    Strategy: find the first `if name ==` line, measure its indent,
+    then shift ALL lines so that line sits at exactly 4 spaces.
+    Preserves relative indentation within blocks.
+    """
     lines = code.split("\n")
+
+    # Find anchor: first `if name ==` line
+    anchor_indent = None
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("if name ==") or stripped.startswith("if name=="):
+            anchor_indent = len(line) - len(stripped)
+            break
+
+    if anchor_indent is None:
+        # No anchor found — just ensure minimum 4-space indent
+        fixed = []
+        for line in lines:
+            if not line.strip():
+                fixed.append("")
+                continue
+            current = len(line) - len(line.lstrip())
+            if current < 4:
+                fixed.append("    " + line.lstrip())
+            else:
+                fixed.append(line)
+        return "\n".join(fixed)
+
+    # Shift everything so anchor is at indent=4
+    shift = 4 - anchor_indent
     fixed = []
     for line in lines:
         if not line.strip():
             fixed.append("")
             continue
-        # Ensure minimum 4-space indent for top-level
-        stripped = line.lstrip()
-        current_indent = len(line) - len(stripped)
-        if current_indent < 4 and (
-            stripped.startswith("if ") or
-            stripped.startswith("elif ") or
-            stripped.startswith("else:") or
-            stripped.startswith("return ") or
-            stripped.startswith("try:") or
-            stripped.startswith("except ") or
-            stripped.startswith("finally:")
-        ):
-            fixed.append("    " + stripped)
-        elif current_indent < 8 and not (
-            stripped.startswith("if ") or
-            stripped.startswith("elif ") or
-            stripped.startswith("else:") or
-            stripped.startswith("return ") or
-            stripped.startswith("try:") or
-            stripped.startswith("except ") or
-            stripped.startswith("finally:") or
-            stripped.startswith("for ") or
-            stripped.startswith("while ") or
-            stripped.startswith("#")
-        ) and current_indent >= 4:
-            fixed.append(line)
-        else:
-            if current_indent < 4:
-                fixed.append("    " + stripped)
-            else:
-                fixed.append(line)
+        current = len(line) - len(line.lstrip())
+        new_indent = max(4, current + shift)
+        fixed.append(" " * new_indent + line.lstrip())
 
     return "\n".join(fixed)
 
@@ -353,6 +355,50 @@ def _notify(skill_name: str, message: str):
                 telegram_bot.send_message(owner, f"🔧 Skill '{skill_name}': {message}")
     except Exception:
         pass
+
+
+def _cleanup_debug_logs(logs_dir: Path, keep: int = 5):
+    """Remove old skill_debug_* files, keeping only the most recent."""
+    debug_files = sorted(logs_dir.glob("skill_debug_*.py"), key=lambda f: f.stat().st_mtime)
+    for f in debug_files[:-keep]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
+    """Try importing the skill and calling execute() with empty args for each tool.
+
+    Catches crashes on import or basic call — NOT functional correctness.
+    Returns list of error strings (empty = OK).
+    """
+    errors = []
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(f"_smoke_{skill_path.stem}", skill_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        return [f"Import failed: {e}"]
+
+    for t in tools_list:
+        tool_name = t.get("function", {}).get("name", "")
+        if not tool_name:
+            continue
+        try:
+            result = mod.execute(tool_name, {})
+            if not isinstance(result, str):
+                errors.append(f"{tool_name}: execute() returned {type(result).__name__}, expected str")
+        except Exception as e:
+            err_str = str(e)
+            # Some errors are expected with empty args (e.g. missing required param)
+            # Only flag actual crashes, not "missing argument" type errors
+            if "NOT NULL" in err_str or "required" in err_str.lower() or "missing" in err_str.lower():
+                continue  # Expected with empty args
+            errors.append(f"{tool_name}: {e}")
+
+    return errors
 
 
 def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
@@ -433,14 +479,33 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
             # ── Step 4: Generate table DDL ──
             table_ddl_lines = []
             for table_spec in plan.get("tables", []):
-                # Parse "table_name: col1 TYPE, col2 TYPE"
-                if ":" in table_spec:
-                    tname, cols = table_spec.split(":", 1)
+                # Support formats:
+                #   "table_name: col1 TYPE, col2 TYPE"
+                #   "table_name (col1 TYPE, col2 TYPE)"
+                #   "CREATE TABLE IF NOT EXISTS table_name (...)"
+                spec = table_spec.strip()
+                if spec.upper().startswith("CREATE TABLE"):
+                    # Already a DDL statement
+                    table_ddl_lines.append(f'    conn.execute("""{spec}""")')
+                elif ":" in spec:
+                    tname, cols = spec.split(":", 1)
                     tname = tname.strip()
                     cols = cols.strip()
                     table_ddl_lines.append(
-                        f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} ({cols})""")'
+                        f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} (\n'
+                        f'        id INTEGER PRIMARY KEY AUTOINCREMENT,\n'
+                        f'        {cols},\n'
+                        f'        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n'
+                        f'    )""")'
                     )
+                elif "(" in spec:
+                    # "table_name (col1 TYPE, col2 TYPE)"
+                    match = re.match(r'(\w+)\s*\((.+)\)', spec)
+                    if match:
+                        tname, cols = match.group(1), match.group(2).strip()
+                        table_ddl_lines.append(
+                            f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} ({cols})""")'
+                        )
             table_ddl = "\n".join(table_ddl_lines) if table_ddl_lines else "    pass  # No tables needed"
 
             # ── Step 5: Assemble & validate ──
@@ -456,9 +521,12 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
                 execute_body=execute_body,
             )
 
-            # Save for debugging
-            debug_path = Path(__file__).parent.parent / "logs" / f"skill_debug_{skill_name}_{attempt}.py"
+            # Save for debugging (keep only last 5 debug files)
+            logs_dir = Path(__file__).parent.parent / "logs"
+            logs_dir.mkdir(exist_ok=True)
+            debug_path = logs_dir / f"skill_debug_{skill_name}_{attempt}.py"
             debug_path.write_text(code, encoding="utf-8")
+            _cleanup_debug_logs(logs_dir, keep=5)
 
             # Validate syntax
             try:
@@ -490,8 +558,23 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path):
 
             if not valid:
                 _log.warning(f"[{skill_name}] validation errors: {errors}")
-                target.unlink(missing_ok=True)
-                continue
+                # Keep file for manual fix, but don't enable
+                if attempt < max_attempts:
+                    target.unlink(missing_ok=True)  # retry will overwrite anyway
+                    continue
+                # Last attempt — keep file, notify with errors
+                _notify(skill_name, f"⚠️ Created with errors: {'; '.join(errors)}. Fix with write_file.")
+                return
+
+            # Smoke test: try calling execute() with each tool
+            smoke_errors = _smoke_test(target, tools_list)
+            if smoke_errors:
+                _log.warning(f"[{skill_name}] smoke test errors: {smoke_errors}")
+                if attempt < max_attempts:
+                    target.unlink(missing_ok=True)
+                    continue
+                _notify(skill_name, f"⚠️ Created but smoke test failed: {'; '.join(smoke_errors)}")
+                return
 
             # Enable
             enable(skill_name)
