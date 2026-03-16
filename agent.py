@@ -36,6 +36,7 @@ def _resize_image_b64(b64: str, max_side: int = 512, quality: int = 80) -> str:
         return b64
 _abort_event = threading.Event()  # can be replaced by server
 _structured_output_failed = False  # runtime cache: disable after first 400
+_pending_image_path: str | None = None  # set by server before run() for image persistence
 
 
 def _repair_json(raw: str) -> dict:
@@ -689,8 +690,11 @@ def _run_inner(user_input: str, thread_id: str | None,
     # Auto-compact if history is too long
     _maybe_compact(thread_id=tid)
 
-    # Save user message
-    db.save_message("user", user_input, thread_id=tid)
+    # Save user message (with image path if present)
+    user_meta = None
+    if image_b64 and _pending_image_path:
+        user_meta = {"image_path": _pending_image_path}
+    db.save_message("user", user_input, thread_id=tid, meta=user_meta)
 
     messages = _build_messages(user_input, thread_id=tid, source=source, image_b64=image_b64)
 

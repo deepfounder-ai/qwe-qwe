@@ -47,11 +47,14 @@ _log = logger.get("server")
 # ── Agent runner in thread pool (agent.run is sync/blocking) ──
 
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
-                    image_b64: str | None = None) -> dict:
+                    image_b64: str | None = None,
+                    image_path: str | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
     _abort_event.clear()
     agent._abort_event = _abort_event  # share abort flag with agent
+    # Pass image_path so agent can store it in user message meta
+    agent._pending_image_path = image_path
     t0 = time.time()
     result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
@@ -166,6 +169,7 @@ if STATIC_DIR.exists():
 # Uploads directory
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
 # ── Routes ──
@@ -849,6 +853,18 @@ async def websocket_chat(ws: WebSocket):
             if not user_input and not image_b64:
                 continue
 
+            # Save image to uploads/ so it persists in history
+            image_path = None
+            if image_b64:
+                try:
+                    import uuid as _uuid
+                    img_id = str(_uuid.uuid4())[:8]
+                    img_file = UPLOADS_DIR / f"{img_id}.png"
+                    img_file.write_bytes(base64.b64decode(image_b64))
+                    image_path = f"/uploads/{img_id}.png"
+                except Exception as e:
+                    _log.warning(f"failed to save ws image: {e}")
+
             _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}" +
                        (" [+image]" if image_b64 else ""))
 
@@ -882,7 +898,8 @@ async def websocket_chat(ws: WebSocket):
                 import functools
                 result = await loop.run_in_executor(
                     None, functools.partial(_run_agent_sync, user_input,
-                                            thread_id, image_b64=image_b64)
+                                            thread_id, image_b64=image_b64,
+                                            image_path=image_path)
                 )
 
                 # Send reply — abort if client disconnected
