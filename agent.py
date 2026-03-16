@@ -847,12 +847,12 @@ def _run_inner(user_input: str, thread_id: str | None,
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
 
-                # Lazy skill instruction injection
+                # Lazy skill instruction injection (append to system msg, not insert new one)
                 import skills
                 instruction = skills.get_instruction(tc["name"])
                 if instruction and tc["name"] not in _injected_instructions:
                     _injected_instructions.add(tc["name"])
-                    messages.insert(1, {"role": "system", "content": instruction})
+                    messages[0]["content"] += f"\n\n[Skill: {tc['name']}]\n{instruction}"
                     _log.info(f"lazy-injected instruction for skill tool: {tc['name']}")
 
                 tool_start = time.time()

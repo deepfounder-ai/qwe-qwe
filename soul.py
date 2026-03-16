@@ -254,14 +254,16 @@ def to_prompt(soul: dict) -> str:
    - Do NOT end with "Want more?" / "Need anything else?" — just answer and stop.
    - Keep it SHORT. If user asks for a list, give a list. Not a presentation.
 NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.
-Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every turn.""")
+Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every turn.
+12. To create NEW skills/features: ALWAYS use the create_skill tool. NEVER write skill files manually with write_file.""")
 
     # Tool usage examples — critical for small models
     lines.append("""Examples:
 "install httpie" → shell({"command":"pip install httpie","timeout":120})
 "what files here" → shell({"command":"ls -la"})
 "remember I like python" → memory_save({"text":"User prefers Python","tag":"user"})
-"read config.py" → read_file({"path":"config.py"})""")
+"read config.py" → read_file({"path":"config.py"})
+"make a workout tracker" → create_skill({"name":"workout","description":"Track workouts, exercises, sets, reps..."})""")
 
     return "\n".join(lines)
 
