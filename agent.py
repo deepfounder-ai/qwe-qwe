@@ -862,6 +862,30 @@ def _run_inner(user_input: str, thread_id: str | None,
                 tool_start = time.time()
                 tool_result = tools.execute(tc["name"], args)
                 tool_ms = int((time.time() - tool_start) * 1000)
+
+                # Context guard: check if tool result would blow the budget
+                budget = config.get("context_budget")
+                current_tokens = _estimate_tokens(messages)
+                result_tokens = len(tool_result) // 4
+                headroom = budget - current_tokens - 500  # reserve 500 for response
+
+                if result_tokens > headroom and headroom > 0:
+                    # Truncate tool result to fit
+                    max_chars = headroom * 4
+                    original_len = len(tool_result)
+                    tool_result = tool_result[:max_chars] + (
+                        f"\n\n⚠️ OUTPUT TRUNCATED ({original_len} chars → {max_chars} chars). "
+                        f"Context budget: {budget} tokens, used: {current_tokens}. "
+                        f"Try a more specific query or work with smaller chunks."
+                    )
+                    _log.warning(f"tool result truncated: {original_len} → {max_chars} chars (budget: {budget})")
+                elif headroom <= 0:
+                    tool_result = (
+                        f"⚠️ CONTEXT FULL — cannot fit tool output ({result_tokens} tokens needed, "
+                        f"{budget} budget used up). Summarize what you have or start fresh."
+                    )
+                    _log.warning(f"context full, tool result dropped: {tc['name']}")
+
                 logger.event("tool_call", tool=tc["name"], args_preview=args_short,
                              result_len=len(tool_result), duration_ms=tool_ms)
 

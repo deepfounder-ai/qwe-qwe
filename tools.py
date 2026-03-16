@@ -311,8 +311,15 @@ def execute(name: str, args: dict) -> str:
             if not p.exists():
                 return f"Error: not found: {p}"
             text = p.read_text(encoding="utf-8", errors="replace")
-            if len(text) > 8000:
-                text = text[:8000] + f"\n... (truncated, {len(text)} chars total)"
+            total_len = len(text)
+            if total_len > 8000:
+                text = text[:8000] + f"\n... (truncated, {total_len} chars total)"
+            if total_len > 4000:
+                text += (
+                    f"\n⚠️ Large file ({total_len} chars). "
+                    f"To modify: edit ONLY the specific part, don't rewrite the whole file. "
+                    f"Use shell('sed ...') or write only the changed section."
+                )
             return text
 
         elif name == "write_file":
