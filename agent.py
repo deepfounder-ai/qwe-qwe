@@ -383,8 +383,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
-    except Exception:
-        _log.warning("auto_context failed", exc_info=True)
+    except BaseException as e:
+        _log.warning(f"auto_context failed ({type(e).__name__}): {e}", exc_info=True)
         return ""
 
 

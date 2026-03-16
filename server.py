@@ -1,5 +1,17 @@
 """Web server for qwe-qwe — FastAPI + WebSocket chat."""
 
+import faulthandler, sys, signal
+faulthandler.enable(file=sys.stderr)
+
+def _signal_handler(signum, frame):
+    import traceback, logger as _lg
+    _l = _lg.get("server")
+    _l.error(f"SIGNAL {signum} received!")
+    _l.error("".join(traceback.format_stack(frame)))
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
+
 import asyncio
 import hashlib
 import hmac

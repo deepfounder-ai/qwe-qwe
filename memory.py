@@ -62,8 +62,13 @@ def _get_embed() -> OpenAI:
 def _embed(text: str) -> list[float]:
     # Sanitize surrogates that can appear in WSL terminals
     text = text.encode("utf-8", errors="replace").decode("utf-8")
-    resp = _get_embed().embeddings.create(input=text, model=config.EMBED_MODEL)
-    return resp.data[0].embedding
+    try:
+        resp = _get_embed().embeddings.create(input=text, model=config.EMBED_MODEL)
+        return resp.data[0].embedding
+    except Exception as e:
+        _log = __import__("logger").get("memory")
+        _log.warning(f"embedding failed: {e}")
+        raise
 
 
 def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
@@ -78,7 +83,16 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
     
     Returns [{text, tag, thread_id, score, ts, ...}]
     """
-    qc = _get_qdrant()
+    try:
+        embedding = _embed(query)
+    except Exception:
+        return []  # embeddings unavailable, return empty gracefully
+
+    try:
+        qc = _get_qdrant()
+    except Exception:
+        return []  # qdrant unavailable
+
     conditions = []
     if tag:
         conditions.append(FieldCondition(key="tag", match=MatchValue(value=tag)))
@@ -88,7 +102,7 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
 
     results = qc.query_points(
         config.QDRANT_COLLECTION,
-        query=_embed(query),
+        query=embedding,
         limit=limit,
         query_filter=filt,
     )
