@@ -494,8 +494,15 @@ async def network_toggle(request: Request):
 async def history(limit: int = 20, thread_id: str | None = None):
     """Recent conversation history for a thread."""
     msgs = db.get_recent_messages(limit=limit, thread_id=thread_id)
-    return [{"role": m["role"], "content": m.get("content", "")} for m in msgs
-            if m["role"] in ("user", "assistant") and m.get("content")]
+    result = []
+    for m in msgs:
+        if m["role"] not in ("user", "assistant") or not m.get("content"):
+            continue
+        entry = {"role": m["role"], "content": m["content"]}
+        if m.get("meta"):
+            entry["meta"] = m["meta"]
+        result.append(entry)
+    return result
 
 
 @app.get("/api/logs")

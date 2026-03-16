@@ -927,16 +927,24 @@ def _run_inner(user_input: str, thread_id: str | None,
             continue
 
         result.reply = _clean_response(raw_reply)
-        db.save_message("assistant", result.reply, thread_id=tid)
 
         # Track session tokens (estimate from content length since streaming doesn't give usage)
         est_tokens = len(full_content) // 4
+        turn_ms = int((time.time() - turn_start) * 1000)
+
+        # Save with metadata for history restore
+        msg_meta = {
+            "tools": result.tool_calls_made,
+            "duration_ms": turn_ms,
+            "context_hits": result.auto_context_hits,
+            "thinking": result.thinking or "",
+        }
+        db.save_message("assistant", result.reply, thread_id=tid, meta=msg_meta)
         prev = int(db.kv_get("session_completion_tokens") or "0")
         db.kv_set("session_completion_tokens", str(prev + est_tokens))
         prev = int(db.kv_get("session_turns") or "0")
         db.kv_set("session_turns", str(prev + 1))
 
-        turn_ms = int((time.time() - turn_start) * 1000)
         logger.event("turn_complete", duration_ms=turn_ms, rounds=rounds,
                      tools_used=result.tool_calls_made, reply_len=len(result.reply),
                      est_tokens=est_tokens, context_hits=result.auto_context_hits,

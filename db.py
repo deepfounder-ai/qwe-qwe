@@ -50,6 +50,13 @@ def _migrate(conn: sqlite3.Connection):
     """)
     conn.commit()
 
+    # Add meta column (JSON) for assistant message metadata: tools, duration, etc.
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
 
 # --- Thread-aware helpers ---
 
@@ -68,14 +75,16 @@ def save_message(role: str, content: str | None = None,
                  tool_calls: list | None = None,
                  tool_call_id: str | None = None,
                  name: str | None = None,
-                 thread_id: str | None = None):
+                 thread_id: str | None = None,
+                 meta: dict | None = None):
     conn = _get_conn()
     tid = _tid(thread_id)
     conn.execute(
-        "INSERT INTO messages (role, content, tool_calls, tool_call_id, name, ts, thread_id) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO messages (role, content, tool_calls, tool_call_id, name, ts, thread_id, meta) VALUES (?,?,?,?,?,?,?,?)",
         (role, content,
          json.dumps(tool_calls) if tool_calls else None,
-         tool_call_id, name, time.time(), tid)
+         tool_call_id, name, time.time(), tid,
+         json.dumps(meta) if meta else None)
     )
     conn.commit()
 
@@ -86,11 +95,11 @@ def get_recent_messages(limit: int = None, thread_id: str | None = None) -> list
     conn = _get_conn()
     tid = _tid(thread_id)
     rows = conn.execute(
-        "SELECT role, content, tool_calls, tool_call_id, name FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT ?",
+        "SELECT role, content, tool_calls, tool_call_id, name, meta FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT ?",
         (tid, limit)
     ).fetchall()
     messages = []
-    for role, content, tc, tc_id, name in reversed(rows):
+    for role, content, tc, tc_id, name, meta_json in reversed(rows):
         msg: dict = {"role": role}
         if content is not None:
             msg["content"] = content
@@ -100,6 +109,8 @@ def get_recent_messages(limit: int = None, thread_id: str | None = None) -> list
             msg["tool_call_id"] = tc_id
         if name:
             msg["name"] = name
+        if meta_json:
+            msg["meta"] = json.loads(meta_json)
         messages.append(msg)
     return messages
 

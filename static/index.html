@@ -2092,7 +2092,7 @@ async function loadHistory(tid) {
   const msgs = await res.json();
   chat.innerHTML = '<div class="chat-spacer"></div>';
   if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo"><img src="/static/logo.png" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-chat-circle-dots"></i> start chatting</div></div>'; return; }
-  msgs.forEach(m => addMessage(m.role, m.content));
+  msgs.forEach(m => addMessage(m.role, m.content, m.meta || null));
   chat.scrollTop = chat.scrollHeight;
   loadThreadStats(t);
 }
