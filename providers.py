@@ -236,7 +236,12 @@ def _invalidate():
 # ── Switch/set operations ──
 
 def set_model(model: str) -> str:
-    """Set the active model (within current provider)."""
+    """Set the active model (within current provider). Blocks embedding-only models."""
+    # Block embedding models — they can't do chat and crash LM Studio
+    model_lower = model.lower()
+    if "embed" in model_lower or "embedding" in model_lower:
+        return f"✗ '{model}' is an embedding model, not a chat model. Use a chat model like qwen/qwen3.5-9b."
+
     old = get_model()
     db.kv_set(_db_key("model"), model)
     _log.info(f"model switched: {old} → {model}")
