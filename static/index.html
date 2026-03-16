@@ -125,7 +125,8 @@ body {
   display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth;
   position: relative;
 }
-.chat-spacer { flex: 1; }
+.chat-spacer { margin-top: auto; }
+.msg { flex-shrink: 0; }
 .chat::before {
   content: "";
   background: url('/static/logo.png') no-repeat center center;
