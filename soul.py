@@ -226,12 +226,6 @@ def to_prompt(soul: dict) -> str:
     if active_traits:
         lines.append("Personality: " + " ".join(active_traits))
 
-    # Current time in user's timezone
-    from datetime import datetime, timezone, timedelta
-    tz = timezone(timedelta(hours=config.TZ_OFFSET))
-    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M") + f" (UTC{config.TZ_OFFSET:+d})"
-    lines.append(f"Time: {now}")
-
     # Core rules — compact for small model context
     lang = soul['language']
     lines.append(f"""Rules:
@@ -264,6 +258,13 @@ Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every tu
 "remember I like python" → memory_save({"text":"User prefers Python","tag":"user"})
 "read config.py" → read_file({"path":"config.py"})
 "make a workout tracker" → create_skill({"name":"workout","description":"Track workouts, exercises, sets, reps..."})""")
+
+    # Dynamic data LAST — preserves KV cache for everything above
+    # llama.cpp caches prompt tokens sequentially; any change invalidates all tokens after it
+    from datetime import datetime, timezone, timedelta
+    tz = timezone(timedelta(hours=config.TZ_OFFSET))
+    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M") + f" (UTC{config.TZ_OFFSET:+d})"
+    lines.append(f"Time: {now}")
 
     return "\n".join(lines)
 
