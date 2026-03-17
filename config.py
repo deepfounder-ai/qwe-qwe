@@ -52,40 +52,72 @@ WORKSPACE_DIR.mkdir(exist_ok=True)
 _PROJECT_ROOT = Path(__file__).parent
 
 def _migrate_data():
-    """Move user data from project root to ~/.qwe-qwe/ (one-time migration)."""
+    """Move user data from old locations to ~/.qwe-qwe/ (one-time migration).
+
+    Old versions stored data relative to CWD (could be ~, project root, anywhere).
+    We search multiple candidate dirs to find the real data.
+    """
     import shutil
-    marker = DATA_DIR / ".migrated"
+    marker = DATA_DIR / ".migrated_v2"
     if marker.exists():
         return
     moved = []
-    # Files to move
+
+    # Candidate directories where old data might live
+    # (project root, CWD, home — old code used relative paths)
+    _candidates = []
+    for d in (_PROJECT_ROOT, Path.cwd(), Path.home()):
+        d = d.resolve()
+        if d not in _candidates and d != DATA_DIR.resolve():
+            _candidates.append(d)
+
+    # Files to migrate — pick the LARGEST (most data) from candidates
     for fname in ("qwe_qwe.db", "qwe_qwe.db-shm", "qwe_qwe.db-wal",
                   "soul.json", "user.md", "heartbeat.md"):
-        src = _PROJECT_ROOT / fname
         dst = DATA_DIR / fname
-        if src.exists() and not dst.exists():
-            shutil.move(str(src), str(dst))
-            moved.append(fname)
-    # Directories to move
+        if dst.exists() and dst.stat().st_size > 0:
+            continue  # already have data, don't overwrite
+        best_src = None
+        best_size = 0
+        for cdir in _candidates:
+            src = cdir / fname
+            if src.exists():
+                sz = src.stat().st_size
+                if sz > best_size:
+                    best_size = sz
+                    best_src = src
+        if best_src:
+            shutil.copy2(str(best_src), str(dst))
+            moved.append(f"{fname} (from {best_src.parent})")
+
+    # Directories to migrate
     for dname, target in [("memory", DATA_DIR / "memory"),
                           ("uploads", UPLOADS_DIR),
                           ("backups", BACKUPS_DIR),
                           ("logs", LOGS_DIR)]:
-        src = _PROJECT_ROOT / dname
-        if src.is_dir() and not target.exists():
-            shutil.move(str(src), str(target))
-            moved.append(f"{dname}/")
+        if target.exists() and any(target.iterdir()):
+            continue  # already has content
+        for cdir in _candidates:
+            src = cdir / dname
+            if src.is_dir() and any(src.iterdir()):
+                shutil.copytree(str(src), str(target), dirs_exist_ok=True)
+                moved.append(f"{dname}/ (from {src.parent})")
+                break
+
     # User skills (non-builtin .py files in skills/)
-    old_skills = _PROJECT_ROOT / "skills"
     _BUILTIN = {"__init__.py", "weather.py", "notes.py", "timer.py",
                 "soul_editor.py", "skill_creator.py"}
-    if old_skills.is_dir():
+    for cdir in _candidates:
+        old_skills = cdir / "skills"
+        if not old_skills.is_dir():
+            continue
         for f in old_skills.glob("*.py"):
             if f.name not in _BUILTIN and not f.name.startswith("_"):
                 dst = USER_SKILLS_DIR / f.name
                 if not dst.exists():
                     shutil.copy2(str(f), str(dst))
                     moved.append(f"skills/{f.name}")
+
     marker.write_text(f"migrated: {', '.join(moved) or 'nothing to move'}\n")
 
 try:
