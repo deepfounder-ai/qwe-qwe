@@ -22,6 +22,18 @@ def _emit_status(text: str):
             pass
 
 
+_thinking_callback = None  # set by server.py for live thinking streaming
+
+
+def _emit_thinking(text: str):
+    """Emit a thinking chunk to connected clients."""
+    if _thinking_callback:
+        try:
+            _thinking_callback(text)
+        except Exception:
+            pass
+
+
 def _resize_image_b64(b64: str, max_side: int = 512, quality: int = 80) -> str:
     """Resize image to fit within max_side px and re-encode as JPEG."""
     try:
@@ -784,9 +796,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                     think_shown = True
                     in_think = True
                 _console.print(f"  [dim]{rc}[/]", end="")
-                if len(reasoning_content) > 60:
-                    preview = reasoning_content[-60:].strip()
-                    _emit_status(f"💭 ...{preview}")
+                _emit_thinking(rc)
 
             # Stream content (text)
             if delta.content:
@@ -809,22 +819,18 @@ def _run_inner(user_input: str, thread_id: str | None,
                     after = text.split("<think>", 1)[1]
                     if after:
                         _console.print(f"  [dim]{after}[/]", end="")
+                        _emit_thinking(after)
                 elif "</think>" in text:
                     before = text.split("</think>", 1)[0]
                     if before:
                         _console.print(f"  [dim]{before}[/]", end="")
+                        _emit_thinking(before)
                     _console.print()  # newline after thinking block
                     in_think = False
                     _emit_status("✍️ writing reply...")
                 elif in_think:
                     _console.print(f"  [dim]{text}[/]", end="")
-                # Stream thinking preview to WebSocket status
-                if in_think and think_shown and not reasoning_content:
-                    think_so_far = re.sub(r"<think>", "", full_content)
-                    think_so_far = think_so_far.strip()
-                    if len(think_so_far) > 60:
-                        preview = think_so_far[-60:].strip()
-                        _emit_status(f"💭 ...{preview}")
+                    _emit_thinking(text)
 
             # Stream tool calls
             if delta.tool_calls:

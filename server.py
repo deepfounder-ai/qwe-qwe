@@ -81,6 +81,17 @@ def _emit_agent_status(text: str):
             pass
 
 
+def _emit_agent_thinking(text: str):
+    """Broadcast live thinking chunk from agent thread to WS clients."""
+    if _ws_loop and _ws_clients:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _broadcast({"type": "thinking_delta", "text": text}), _ws_loop
+            )
+        except Exception:
+            pass
+
+
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
                     image_path: str | None = None) -> dict:
@@ -92,6 +103,7 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
     agent._pending_image_path = image_path
     # Set live status callback for tool progress
     agent._status_callback = _emit_agent_status
+    agent._thinking_callback = _emit_agent_thinking
     t0 = time.time()
     result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
