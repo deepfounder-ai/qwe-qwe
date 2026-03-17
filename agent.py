@@ -747,20 +747,42 @@ def _run_inner(user_input: str, thread_id: str | None,
 
         # Stream the response
         extra = {}
+        thinking_on = db.kv_get("thinking_enabled") == "true"
+        if thinking_on:
+            extra["extra_body"] = {"enable_thinking": True}
 
-        stream = client.chat.completions.create(
-            model=providers.get_model(),
-            messages=messages,
-            tools=all_tools,
-            tool_choice="auto",
-            temperature=soul.get_temperature(),
-            max_tokens=2048,
-            stream=True,
-            **extra,
-        )
+        try:
+            stream = client.chat.completions.create(
+                model=providers.get_model(),
+                messages=messages,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=soul.get_temperature(),
+                max_tokens=2048,
+                stream=True,
+                **extra,
+            )
+        except Exception as e:
+            # Some providers don't support enable_thinking — retry without it
+            if "enable_thinking" in str(e) and extra.get("extra_body"):
+                _log.warning(f"enable_thinking not supported, falling back: {e}")
+                extra.pop("extra_body", None)
+                stream = client.chat.completions.create(
+                    model=providers.get_model(),
+                    messages=messages,
+                    tools=all_tools,
+                    tool_choice="auto",
+                    temperature=soul.get_temperature(),
+                    max_tokens=2048,
+                    stream=True,
+                    **extra,
+                )
+            else:
+                raise
 
         # Collect streamed response
         full_content = ""
+        reasoning_content = ""  # for models that use separate reasoning_content field
         tool_calls_data: dict[int, dict] = {}  # index -> {id, name, arguments}
         in_think = False
         think_shown = False
@@ -773,11 +795,31 @@ def _run_inner(user_input: str, thread_id: str | None,
 
             finish_reason = chunk.choices[0].finish_reason
 
+            # Handle reasoning_content (Qwen3/DeepSeek with enable_thinking)
+            rc = getattr(delta, "reasoning_content", None)
+            if rc:
+                reasoning_content += rc
+                if not think_shown:
+                    _console.print("  [dim]💭 thinking...[/]")
+                    _emit_status("💭 thinking...")
+                    think_shown = True
+                    in_think = True
+                _console.print(f"  [dim]{rc}[/]", end="")
+                if len(reasoning_content) > 60:
+                    preview = reasoning_content[-60:].strip()
+                    _emit_status(f"💭 ...{preview}")
+
             # Stream content (text)
             if delta.content:
+                # If we were in reasoning_content mode, transition out
+                if in_think and reasoning_content:
+                    _console.print()  # newline after thinking block
+                    in_think = False
+                    _emit_status("✍️ writing reply...")
+
                 full_content += delta.content
 
-                # Track thinking state
+                # Track thinking state (for models that put <think> in content)
                 text = delta.content
                 if "<think>" in text:
                     in_think = True
@@ -785,12 +827,20 @@ def _run_inner(user_input: str, thread_id: str | None,
                         _console.print("  [dim]💭 thinking...[/]")
                         _emit_status("💭 thinking...")
                         think_shown = True
-                if "</think>" in text:
+                    after = text.split("<think>", 1)[1]
+                    if after:
+                        _console.print(f"  [dim]{after}[/]", end="")
+                elif "</think>" in text:
+                    before = text.split("</think>", 1)[0]
+                    if before:
+                        _console.print(f"  [dim]{before}[/]", end="")
+                    _console.print()  # newline after thinking block
                     in_think = False
                     _emit_status("✍️ writing reply...")
-                # Stream thinking preview to status
-                if in_think and think_shown:
-                    # Extract last meaningful chunk for status preview
+                elif in_think:
+                    _console.print(f"  [dim]{text}[/]", end="")
+                # Stream thinking preview to WebSocket status
+                if in_think and think_shown and not reasoning_content:
                     think_so_far = re.sub(r"<think>", "", full_content)
                     think_so_far = think_so_far.strip()
                     if len(think_so_far) > 60:
@@ -810,9 +860,6 @@ def _run_inner(user_input: str, thread_id: str | None,
                             tool_calls_data[idx]["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
                             tool_calls_data[idx]["arguments"] += tc_delta.function.arguments
-
-        if think_shown:
-            _console.print()  # newline after thinking
 
         # Process tool calls
         if tool_calls_data:
@@ -971,7 +1018,9 @@ def _run_inner(user_input: str, thread_id: str | None,
 
         # No tool calls — final response
         _emit_status("✍️ writing reply...")
-        result.thinking = _extract_thinking(full_content) or ""
+        # Use reasoning_content if available (Qwen3/DeepSeek native thinking),
+        # otherwise extract from <think> tags in content
+        result.thinking = reasoning_content.strip() or _extract_thinking(full_content) or ""
         raw_reply = _strip_thinking(full_content)
 
         # Retry: if model hedges instead of acting
