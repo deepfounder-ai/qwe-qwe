@@ -35,3 +35,6 @@ py-modules = ["cli", "agent", "config", "db", "discovery", "logger", "memory", "
 
 [tool.setuptools.package-data]
 "*" = ["static/**/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["tests", "tests/*"]
