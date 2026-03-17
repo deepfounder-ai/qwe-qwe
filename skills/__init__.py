@@ -1,11 +1,44 @@
-"""Skill loader — dynamically loads tool definitions from skill files."""
+"""Skill loader — dynamically loads tool definitions from skill files.
+
+Skills are loaded from two directories:
+  1. Built-in skills: shipped with the project (skills/ in repo)
+  2. User skills: ~/.qwe-qwe/skills/ (safe from git updates)
+"""
 
 import importlib, importlib.util, sys
 from pathlib import Path
 from types import ModuleType
 import db
+import config
 
-SKILLS_DIR = Path(__file__).parent
+BUILTIN_SKILLS_DIR = Path(__file__).parent
+USER_SKILLS_DIR = config.USER_SKILLS_DIR
+# For backward compat — code that references SKILLS_DIR
+SKILLS_DIR = BUILTIN_SKILLS_DIR
+
+
+def _all_skill_paths() -> dict[str, Path]:
+    """Return {name: path} for all skills. User skills override built-in."""
+    skills = {}
+    for d in (BUILTIN_SKILLS_DIR, USER_SKILLS_DIR):
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.py")):
+            if f.name.startswith("_"):
+                continue
+            skills[f.stem] = f
+    return skills
+
+
+def _find_skill(name: str) -> Path | None:
+    """Find a skill file by name, checking user dir first."""
+    user_path = USER_SKILLS_DIR / f"{name}.py"
+    if user_path.exists():
+        return user_path
+    builtin_path = BUILTIN_SKILLS_DIR / f"{name}.py"
+    if builtin_path.exists():
+        return builtin_path
+    return None
 
 # Module cache: name -> (mtime, module)
 _module_cache: dict[str, tuple[float, ModuleType]] = {}
@@ -35,21 +68,21 @@ def list_all() -> list[dict]:
     """List all available skills with status."""
     active = get_active()
     skills = []
-    for f in sorted(SKILLS_DIR.glob("*.py")):
-        if f.name.startswith("_"):
-            continue
+    for name, path in sorted(_all_skill_paths().items()):
         try:
-            mod = _load_module(f)
+            mod = _load_module(path)
             tool_count = len(getattr(mod, "TOOLS", []))
             desc = getattr(mod, "DESCRIPTION", "")
+            is_user = path.parent == USER_SKILLS_DIR
             skills.append({
-                "name": f.stem,
-                "active": f.stem in active,
+                "name": name,
+                "active": name in active,
                 "tools": tool_count,
                 "description": desc,
+                "user_skill": is_user,
             })
         except Exception as e:
-            skills.append({"name": f.stem, "active": False, "tools": 0, "description": f"Error: {e}"})
+            skills.append({"name": name, "active": False, "tools": 0, "description": f"Error: {e}"})
     return skills
 
 
@@ -59,8 +92,8 @@ def get_active() -> set[str]:
     if not raw:
         return set()
     names = set(raw.split(","))
-    # Remove skills whose files no longer exist
-    valid = {n for n in names if (SKILLS_DIR / f"{n}.py").exists()}
+    all_paths = _all_skill_paths()
+    valid = {n for n in names if n in all_paths}
     if valid != names:
         set_active(valid)
     return valid
@@ -72,9 +105,9 @@ def set_active(names: set[str]):
 
 
 def enable(name: str) -> str:
-    path = SKILLS_DIR / f"{name}.py"
-    if not path.exists():
-        available = [f.stem for f in SKILLS_DIR.glob("*.py") if not f.name.startswith("_")]
+    path = _find_skill(name)
+    if not path:
+        available = sorted(_all_skill_paths().keys())
         return f"Skill '{name}' not found. Available: {', '.join(available)}"
     active = get_active()
     active.add(name)
@@ -111,8 +144,8 @@ def get_tools(compact: bool = False) -> list[dict]:
     active = get_active()
     all_tools = []
     for name in active:
-        path = SKILLS_DIR / f"{name}.py"
-        if not path.exists():
+        path = _find_skill(name)
+        if not path:
             continue
         try:
             mod = _load_module(path)
@@ -132,8 +165,8 @@ def get_instruction(tool_name: str) -> str | None:
     """
     active = get_active()
     for name in active:
-        path = SKILLS_DIR / f"{name}.py"
-        if not path.exists():
+        path = _find_skill(name)
+        if not path:
             continue
         try:
             mod = _load_module(path)
@@ -226,8 +259,8 @@ def execute(tool_name: str, args: dict) -> str:
     """Execute a tool from active skills. Returns result or None if not found."""
     active = get_active()
     for name in active:
-        path = SKILLS_DIR / f"{name}.py"
-        if not path.exists():
+        path = _find_skill(name)
+        if not path:
             continue
         try:
             mod = _load_module(path)

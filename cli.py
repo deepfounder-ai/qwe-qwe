@@ -92,7 +92,8 @@ def show_stats():
         f"[cyan]Tokens:[/]      ↑{s_prompt} prompt  ↓{s_compl} completion  Σ{s_total} total\n"
         f"[cyan]Model:[/]       {providers.get_model()} ({providers.get_active_name()})\n"
         f"[cyan]Memory:[/]      Qdrant ({agent.config.QDRANT_MODE}, {__import__('memory').count()} points)\n"
-        f"[cyan]Database:[/]    {agent.config.DB_PATH}",
+        f"[cyan]Database:[/]    {agent.config.DB_PATH}\n"
+        f"[cyan]Data dir:[/]   {agent.config.DATA_DIR}",
         title="[bold]📊 Session Stats[/]",
         border_style="cyan",
         padding=(0, 2),
@@ -439,7 +440,7 @@ def show_logs(args: str):
         if p.isdigit():
             n = int(p)
 
-    log_path = Path(__file__).parent / "logs" / log_file
+    log_path = config.LOGS_DIR / log_file
     if not log_path.exists():
         console.print("  [dim]No logs yet.[/]")
         return
@@ -916,7 +917,7 @@ def doctor():
     # ── 12. Logs ──
     def _check_logs():
         from pathlib import Path
-        log_path = Path("logs/qwe-qwe.log")
+        log_path = config.LOGS_DIR / "qwe-qwe.log"
         if not log_path.exists():
             return "⚠ no log file"
         size_kb = log_path.stat().st_size / 1024

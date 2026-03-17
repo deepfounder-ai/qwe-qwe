@@ -203,9 +203,8 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# Uploads directory
-UPLOADS_DIR = Path(__file__).parent / "uploads"
-UPLOADS_DIR.mkdir(exist_ok=True)
+# Uploads directory (in user data dir, safe from git)
+UPLOADS_DIR = config.UPLOADS_DIR
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
@@ -623,7 +622,7 @@ async def history(limit: int = 20, thread_id: str | None = None):
 @app.get("/api/logs")
 async def logs(file: str = "qwe-qwe.log", lines: int = 50):
     """Tail log files."""
-    logs_dir = (Path(__file__).parent / "logs").resolve()
+    logs_dir = config.LOGS_DIR.resolve()
     log_path = (logs_dir / file).resolve()
     # Prevent path traversal
     if not str(log_path).startswith(str(logs_dir)):

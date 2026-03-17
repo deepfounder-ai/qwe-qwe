@@ -22,8 +22,13 @@ import os
 from pathlib import Path
 
 # ── Log directory ──
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# Import config to get DATA_DIR; fallback to local ./logs if config unavailable
+try:
+    import config as _cfg
+    LOG_DIR = _cfg.LOGS_DIR
+except Exception:
+    LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Custom formatter with structured extras ──
 

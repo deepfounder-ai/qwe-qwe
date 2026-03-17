@@ -4,12 +4,17 @@ Override any setting via environment variables with QWE_ prefix:
   QWE_LLM_URL, QWE_LLM_MODEL, QWE_LLM_KEY,
   QWE_EMBED_URL, QWE_EMBED_MODEL, QWE_EMBED_KEY,
   QWE_QDRANT_MODE, QWE_QDRANT_PATH, QWE_QDRANT_URL,
-  QWE_DB_PATH
+  QWE_DB_PATH, QWE_DATA_DIR
 """
 
 import os
+from pathlib import Path
 
 _env = os.environ.get
+
+# ── Data directory (all user data lives here, safe from git) ──
+DATA_DIR = Path(_env("QWE_DATA_DIR", str(Path.home() / ".qwe-qwe")))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # LLM
 LLM_BASE_URL = _env("QWE_LLM_URL", "http://localhost:1234/v1")
@@ -24,12 +29,70 @@ EMBED_DIM = int(_env("QWE_EMBED_DIM", "768"))
 
 # Qdrant (local disk for persistence, no server needed)
 QDRANT_MODE = _env("QWE_QDRANT_MODE", "disk")  # "memory" | "disk" | "server"
-QDRANT_PATH = _env("QWE_QDRANT_PATH", "./memory")  # for disk mode
+QDRANT_PATH = _env("QWE_QDRANT_PATH", str(DATA_DIR / "memory"))  # for disk mode
 QDRANT_URL = _env("QWE_QDRANT_URL", "http://localhost:6333")  # for server mode
 QDRANT_COLLECTION = _env("QWE_QDRANT_COLLECTION", "qwe_qwe")
 
 # SQLite
-DB_PATH = _env("QWE_DB_PATH", "qwe_qwe.db")
+DB_PATH = _env("QWE_DB_PATH", str(DATA_DIR / "qwe_qwe.db"))
+
+# Other data paths
+UPLOADS_DIR = DATA_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
+BACKUPS_DIR = DATA_DIR / "backups"
+BACKUPS_DIR.mkdir(exist_ok=True)
+LOGS_DIR = DATA_DIR / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+USER_SKILLS_DIR = DATA_DIR / "skills"
+USER_SKILLS_DIR.mkdir(exist_ok=True)
+WORKSPACE_DIR = DATA_DIR / "workspace"
+WORKSPACE_DIR.mkdir(exist_ok=True)
+
+# ── Auto-migrate old data from project root to DATA_DIR ──
+_PROJECT_ROOT = Path(__file__).parent
+
+def _migrate_data():
+    """Move user data from project root to ~/.qwe-qwe/ (one-time migration)."""
+    import shutil
+    marker = DATA_DIR / ".migrated"
+    if marker.exists():
+        return
+    moved = []
+    # Files to move
+    for fname in ("qwe_qwe.db", "qwe_qwe.db-shm", "qwe_qwe.db-wal",
+                  "soul.json", "user.md", "heartbeat.md"):
+        src = _PROJECT_ROOT / fname
+        dst = DATA_DIR / fname
+        if src.exists() and not dst.exists():
+            shutil.move(str(src), str(dst))
+            moved.append(fname)
+    # Directories to move
+    for dname, target in [("memory", DATA_DIR / "memory"),
+                          ("uploads", UPLOADS_DIR),
+                          ("backups", BACKUPS_DIR),
+                          ("logs", LOGS_DIR)]:
+        src = _PROJECT_ROOT / dname
+        if src.is_dir() and not target.exists():
+            shutil.move(str(src), str(target))
+            moved.append(f"{dname}/")
+    # User skills (non-builtin .py files in skills/)
+    old_skills = _PROJECT_ROOT / "skills"
+    _BUILTIN = {"__init__.py", "weather.py", "notes.py", "timer.py",
+                "soul_editor.py", "skill_creator.py"}
+    if old_skills.is_dir():
+        for f in old_skills.glob("*.py"):
+            if f.name not in _BUILTIN and not f.name.startswith("_"):
+                dst = USER_SKILLS_DIR / f.name
+                if not dst.exists():
+                    shutil.copy2(str(f), str(dst))
+                    moved.append(f"skills/{f.name}")
+    marker.write_text(f"migrated: {', '.join(moved) or 'nothing to move'}\n")
+
+try:
+    _migrate_data()
+except Exception:
+    pass  # don't block startup on migration failure
+
 
 # Timezone offset from UTC (hours). Stored in DB, set via /soul or ask user.
 # Default: 0 (UTC). Agent should ask user on first run and save to kv "timezone".

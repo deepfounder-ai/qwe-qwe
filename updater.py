@@ -22,7 +22,7 @@ _log = logger.get("updater")
 BUILTIN_SKILLS = {"__init__.py", "weather.py", "notes.py", "timer.py",
                   "soul_editor.py", "skill_creator.py"}
 
-BACKUP_DIR = Path("backups")
+BACKUP_DIR = config.BACKUPS_DIR
 MAX_BACKUPS = 5
 
 

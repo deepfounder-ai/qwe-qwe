@@ -155,7 +155,8 @@ def _create_skill_async(skill_name: str, description: str) -> str:
     if not skill_name.isidentifier():
         return f"Error: '{skill_name}' is not a valid Python identifier"
 
-    skills_dir = Path(__file__).parent
+    import config
+    skills_dir = config.USER_SKILLS_DIR  # user skills go to ~/.qwe-qwe/skills/
     target = skills_dir / f"{skill_name}.py"
     if target.exists():
         return f"Error: skill '{skill_name}' already exists at {target}"
@@ -635,8 +636,12 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path, ta
 
 def _list_skills() -> str:
     from pathlib import Path
-    skills_dir = Path(__file__).parent
-    files = sorted(f.name for f in skills_dir.glob("*.py") if not f.name.startswith("_"))
+    import config
+    # List from both built-in and user directories
+    files = set()
+    for d in (Path(__file__).parent, config.USER_SKILLS_DIR):
+        if d.exists():
+            files.update(f.name for f in d.glob("*.py") if not f.name.startswith("_"))
     if not files:
         return "No skills found."
-    return "Existing skills:\n" + "\n".join(f"  - {f}" for f in files)
+    return "Existing skills:\n" + "\n".join(f"  - {f}" for f in sorted(files))

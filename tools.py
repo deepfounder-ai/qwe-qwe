@@ -2,10 +2,38 @@
 
 import json, subprocess, os
 from pathlib import Path
+import config
 import memory
 import logger
 
 _log = logger.get("tools")
+
+# Agent workspace — all relative paths resolve here
+WORKSPACE = config.WORKSPACE_DIR
+
+# Directories the agent must never write to
+_WRITE_BLACKLIST = ("/System", "/Library", "/usr/bin", "/usr/sbin", "/usr/lib",
+                    "/bin", "/sbin", "/etc", "/dev", "/proc",
+                    "/private/etc", "/private/var")
+
+
+def _resolve_path(raw: str, for_write: bool = False) -> Path:
+    """Resolve a file path for agent operations.
+
+    - Relative paths → workspace (~/.qwe-qwe/workspace/)
+    - ~ expands to home
+    - For writes: block system directories
+    """
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = WORKSPACE / p
+    p = p.resolve()
+    if for_write:
+        s = str(p)
+        for blocked in _WRITE_BLACKLIST:
+            if s.startswith(blocked):
+                raise PermissionError(f"Cannot write to system directory: {blocked}")
+    return p
 
 # ── Tool definitions — SHORT descriptions, small models need clarity ──
 
@@ -57,7 +85,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "shell",
-            "description": "Run a shell command. Returns stdout+stderr.",
+            "description": "Run a shell command in workspace directory. Returns stdout+stderr.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -86,7 +114,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write content to a file. Creates directories if needed.",
+            "description": "Write content to a file. Relative paths go to workspace. Creates directories if needed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -307,7 +335,7 @@ def execute(name: str, args: dict) -> str:
             return f"Saved (id: {pid[:8]})"
 
         elif name == "read_file":
-            p = Path(args["path"]).expanduser()
+            p = _resolve_path(args["path"])
             if not p.exists():
                 return f"Error: not found: {p}"
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -323,7 +351,7 @@ def execute(name: str, args: dict) -> str:
             return text
 
         elif name == "write_file":
-            p = Path(args["path"]).expanduser()
+            p = _resolve_path(args["path"], for_write=True)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(args["content"], encoding="utf-8")
             return f"Written {len(args['content'])} chars to {p}"
@@ -344,7 +372,8 @@ def execute(name: str, args: dict) -> str:
                 env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
             result = subprocess.run(
                 args["command"], shell=True, capture_output=True, text=True,
-                timeout=t, env=env, stdin=subprocess.DEVNULL  # prevent interactive prompts
+                timeout=t, env=env, cwd=str(WORKSPACE),
+                stdin=subprocess.DEVNULL  # prevent interactive prompts
             )
             output = result.stdout
             if result.stderr:
