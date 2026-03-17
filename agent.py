@@ -424,6 +424,7 @@ def _build_messages(user_input: str, thread_id: str | None = None,
 
     # Thinking mode — inject prompt instruction for models that don't natively support it
     thinking_on = db.kv_get("thinking_enabled")
+    _log.info(f"thinking_enabled={thinking_on}")
     if thinking_on == "true":
         system_text += (
             "\n\nIMPORTANT: Before answering, think through the problem step by step. "
@@ -431,6 +432,7 @@ def _build_messages(user_input: str, thread_id: str | None = None,
             "After thinking, write your final answer outside the tags. "
             "Example:\n<think>\nLet me analyze this...\n</think>\nHere is my answer."
         )
+        _log.info("thinking prompt injected into system message")
 
     # Auto-retrieve from Qdrant (thread-scoped + global)
     context = _auto_context(user_input, thread_id=thread_id)
@@ -746,39 +748,18 @@ def _run_inner(user_input: str, thread_id: str | None,
         providers.ensure_model_loaded()
 
         # Stream the response
-        extra = {}
-        thinking_on = db.kv_get("thinking_enabled") == "true"
-        if thinking_on:
-            extra["extra_body"] = {"enable_thinking": True}
-
-        try:
-            stream = client.chat.completions.create(
-                model=providers.get_model(),
-                messages=messages,
-                tools=all_tools,
-                tool_choice="auto",
-                temperature=soul.get_temperature(),
-                max_tokens=2048,
-                stream=True,
-                **extra,
-            )
-        except Exception as e:
-            # Some providers don't support enable_thinking — retry without it
-            if "enable_thinking" in str(e) and extra.get("extra_body"):
-                _log.warning(f"enable_thinking not supported, falling back: {e}")
-                extra.pop("extra_body", None)
-                stream = client.chat.completions.create(
-                    model=providers.get_model(),
-                    messages=messages,
-                    tools=all_tools,
-                    tool_choice="auto",
-                    temperature=soul.get_temperature(),
-                    max_tokens=2048,
-                    stream=True,
-                    **extra,
-                )
-            else:
-                raise
+        # Note: enable_thinking via extra_body is not reliably supported across providers.
+        # Thinking is triggered via system prompt injection in _build_messages() instead.
+        # The reasoning_content handler below still catches native thinking if a provider sends it.
+        stream = client.chat.completions.create(
+            model=providers.get_model(),
+            messages=messages,
+            tools=all_tools,
+            tool_choice="auto",
+            temperature=soul.get_temperature(),
+            max_tokens=2048,
+            stream=True,
+        )
 
         # Collect streamed response
         full_content = ""
@@ -811,6 +792,12 @@ def _run_inner(user_input: str, thread_id: str | None,
 
             # Stream content (text)
             if delta.content:
+                # Log first chunk to verify thinking tags
+                if not full_content and "<think>" in delta.content:
+                    _log.info("model generated <think> tag in content")
+                elif not full_content:
+                    _log.info(f"first content chunk (no <think>): {delta.content[:80]!r}")
+
                 # If we were in reasoning_content mode, transition out
                 if in_think and reasoning_content:
                     _console.print()  # newline after thinking block
