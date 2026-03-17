@@ -106,8 +106,9 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
         limit=limit,
         query_filter=filt,
     )
-    return [
-        {
+    out = []
+    for r in results.points:
+        item = {
             "id": r.id,
             "text": r.payload.get("text", ""),
             "tag": r.payload.get("tag", ""),
@@ -115,8 +116,12 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
             "score": round(r.score, 3),
             "ts": r.payload.get("ts", 0),
         }
-        for r in results.points
-    ]
+        # Include extra metadata (outcome_score, etc.)
+        for k, v in r.payload.items():
+            if k not in item:
+                item[k] = v
+        out.append(item)
+    return out
 
 
 def save(text: str, tag: str = "general", dedup: bool = True,

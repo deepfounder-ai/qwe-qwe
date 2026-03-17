@@ -120,7 +120,7 @@ def capture_save():
     calls = []
 
     def _save(text, tag=None, dedup=True, thread_id=None, meta=None):
-        calls.append({"text": text, "tag": tag, "thread_id": thread_id})
+        calls.append({"text": text, "tag": tag, "thread_id": thread_id, "meta": meta})
         return "ok"
 
     return _save, calls
@@ -258,8 +258,9 @@ def test_1_8_tag_experience_and_no_thread():
 
 # ── Block 2: _auto_context() experience retrieval ──
 
-def _make_exp_result(text, score):
-    return {"text": text, "tag": "experience", "thread_id": None, "score": score, "ts": time.time()}
+def _make_exp_result(text, score, outcome_score=1.0):
+    return {"text": text, "tag": "experience", "thread_id": None, "score": score,
+            "ts": time.time(), "outcome_score": outcome_score}
 
 
 def test_2_1_experience_injected_into_context():
@@ -398,6 +399,83 @@ def test_3_1_save_then_retrieve():
     ctx = agent._auto_context("какая погода в Лондоне?")
     assert "[Relevant past experiences:]" in ctx
     assert saved_cases[0]["text"] in ctx
+
+
+# ── Block 4: Outcome scoring ──
+
+def test_4_1_outcome_score_saved_in_meta():
+    """outcome_score is passed in meta when saving experience."""
+    save_fn, calls = capture_save()
+    mock_memory.save = save_fn
+
+    result = make_result(tools=["shell"], reply="Done")
+    agent._save_experience("запусти скрипт", result, rounds=1, fail_count=0)
+    time.sleep(0.05)
+
+    assert calls
+    assert calls[0]["meta"] is not None
+    assert calls[0]["meta"]["outcome_score"] == 1.0  # success
+
+
+def test_4_2_partial_outcome_score():
+    """fail_count=1 → outcome_score=0.6 (partial)."""
+    save_fn, calls = capture_save()
+    mock_memory.save = save_fn
+
+    result = make_result(tools=["shell"])
+    agent._save_experience("задача", result, rounds=2, fail_count=1)
+    time.sleep(0.05)
+
+    assert calls
+    assert calls[0]["meta"]["outcome_score"] == 0.6
+
+
+def test_4_3_failed_outcome_score():
+    """fail_count=2 → outcome_score=0.2 (failed)."""
+    save_fn, calls = capture_save()
+    mock_memory.save = save_fn
+
+    result = make_result(tools=["shell"])
+    agent._save_experience("задача", result, rounds=3, fail_count=2)
+    time.sleep(0.05)
+
+    assert calls
+    assert calls[0]["meta"]["outcome_score"] == 0.2
+
+
+def test_4_4_success_beats_failed_by_composite_score():
+    """Success case with lower similarity wins over failed case with higher similarity."""
+    success_case = _make_exp_result("[EXP] Task: good | Tools: shell | Steps: 1 | Result: success", 0.6, outcome_score=1.0)
+    failed_case = _make_exp_result("[EXP] Task: bad | Tools: shell | Steps: 1 | Result: failed", 0.8, outcome_score=0.2)
+
+    def _search(query, limit=3, tag=None, thread_id=None):
+        if tag == "experience":
+            return [failed_case, success_case]  # failed has higher raw score
+        return []
+
+    mock_memory.search = _search
+    ctx = agent._auto_context("задача")
+
+    # success: 0.6 * 1.0 = 0.6 > 0.4 → passes
+    # failed:  0.8 * 0.2 = 0.16 < 0.4 → filtered out
+    assert "good" in ctx
+    assert "bad" not in ctx
+
+
+def test_4_5_failed_case_filtered_by_composite_score():
+    """Failed case with high semantic similarity still filtered out."""
+    failed_case = _make_exp_result("[EXP] Task: fail | Tools: shell | Steps: 1 | Result: failed", 0.9, outcome_score=0.2)
+
+    def _search(query, limit=3, tag=None, thread_id=None):
+        if tag == "experience":
+            return [failed_case]
+        return []
+
+    mock_memory.search = _search
+    ctx = agent._auto_context("задача")
+
+    # 0.9 * 0.2 = 0.18 < 0.4 → filtered
+    assert "[Relevant past experiences:]" not in ctx
 
 
 # ── Reset memory mock to safe default after all tests ──

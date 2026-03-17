@@ -411,7 +411,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
             for r in exp_hits:
                 if len(exp_lines) >= config.MAX_EXPERIENCE_RESULTS:
                     break
-                if r["score"] > 0.4 and r["text"] not in seen_texts:
+                effective = r["score"] * r.get("outcome_score", 1.0)
+                if effective > 0.4 and r["text"] not in seen_texts:
                     exp_lines.append(f"- {r['text']}")
                     seen_texts.add(r["text"])
             if exp_lines:
@@ -428,6 +429,9 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
     except BaseException as e:
         _log.warning(f"auto_context failed ({type(e).__name__}): {e}", exc_info=True)
         return ""
+
+
+_OUTCOME_WEIGHTS = {"success": 1.0, "partial": 0.6, "failed": 0.2}
 
 
 def _save_experience(user_input: str, result: "TurnResult", rounds: int, fail_count: int):
@@ -450,7 +454,8 @@ def _save_experience(user_input: str, result: "TurnResult", rounds: int, fail_co
 
     def _do_save():
         try:
-            memory.save(case_text, tag="experience", dedup=True, thread_id=None)
+            memory.save(case_text, tag="experience", dedup=True, thread_id=None,
+                        meta={"outcome_score": _OUTCOME_WEIGHTS.get(outcome, 0.5)})
             _log.info(f"experience saved: {outcome} | tools={tools_str}")
         except Exception as e:
             _log.warning(f"experience save failed: {e}")
