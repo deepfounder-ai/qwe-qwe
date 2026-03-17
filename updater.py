@@ -53,15 +53,15 @@ def _pip(*args, timeout: int = 120) -> subprocess.CompletedProcess:
 
 
 def _current_version() -> str:
-    """Get current installed version."""
+    """Get current version from pyproject.toml (not cached metadata)."""
     try:
-        import importlib.metadata
-        return importlib.metadata.version("qwe-qwe")
+        import tomllib
+        with open(_root() / "pyproject.toml", "rb") as f:
+            return tomllib.load(f)["project"]["version"]
     except Exception:
         try:
-            import tomllib
-            with open(_root() / "pyproject.toml", "rb") as f:
-                return tomllib.load(f)["project"]["version"]
+            import importlib.metadata
+            return importlib.metadata.version("qwe-qwe")
         except Exception:
             return "unknown"
 
@@ -338,9 +338,12 @@ def perform_update(on_progress=None) -> dict:
     emit("pull", "ok", msg)
     steps.append({"step": "pull", "status": "ok", "detail": msg})
 
-    # ── 7. Reinstall deps ──
-    if deps_need_update:
-        emit("deps", "running", "Installing updated dependencies...")
+    # ── 7. Reinstall (always — to update version metadata + deps) ──
+    new_version_on_disk = _current_version()
+    version_changed = new_version_on_disk != old_version
+    if deps_need_update or version_changed:
+        reason = "dependencies changed" if deps_need_update else f"version bumped to {new_version_on_disk}"
+        emit("deps", "running", f"Reinstalling ({reason})...")
         ok, msg = reinstall_deps()
         status = "ok" if ok else "warning"
         emit("deps", status, msg)
