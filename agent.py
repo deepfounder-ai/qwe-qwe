@@ -402,15 +402,60 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                     lines.append(f"- [{r['tag']}] {r['text']}")
                     seen_texts.add(r["text"])
 
-        hits = len(lines) - 1
+        # Experience cases (separate tag, additive, higher threshold)
+        if config.get("experience_learning"):
+            exp_hits = memory.search(
+                user_input, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience"
+            )
+            exp_lines = []
+            for r in exp_hits:
+                if len(exp_lines) >= config.MAX_EXPERIENCE_RESULTS:
+                    break
+                if r["score"] > 0.4 and r["text"] not in seen_texts:
+                    exp_lines.append(f"- {r['text']}")
+                    seen_texts.add(r["text"])
+            if exp_lines:
+                lines.append("")
+                lines.append("[Relevant past experiences:]")
+                lines.extend(exp_lines)
+
+        hits = sum(1 for l in lines if l.startswith("- "))
         if hits > 0:
-            _log.info(f"auto_context: {hits} memories injected (thread={thread_id or 'global'})")
+            _log.info(f"auto_context: {hits} items injected (thread={thread_id or 'global'})")
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
     except BaseException as e:
         _log.warning(f"auto_context failed ({type(e).__name__}): {e}", exc_info=True)
         return ""
+
+
+def _save_experience(user_input: str, result: "TurnResult", rounds: int, fail_count: int):
+    """Save a compact experience case after a tool-using turn (async, non-blocking)."""
+    if not config.get("experience_learning"):
+        return
+    if not result.tool_calls_made:
+        return
+
+    outcome = "failed" if fail_count >= 2 else "partial" if fail_count > 0 else "success"
+    task = user_input.strip().replace("\n", " ")[:80]
+    tools_str = ", ".join(dict.fromkeys(result.tool_calls_made))
+    reply_summary = result.reply.strip().replace("\n", " ")[:60]
+
+    case_text = (
+        f"[EXP] Task: {task} | Tools: {tools_str} | "
+        f"Steps: {rounds} | Result: {outcome} | "
+        f"Learned: {reply_summary}"
+    )
+
+    def _do_save():
+        try:
+            memory.save(case_text, tag="experience", dedup=True, thread_id=None)
+            _log.info(f"experience saved: {outcome} | tools={tools_str}")
+        except Exception as e:
+            _log.warning(f"experience save failed: {e}")
+
+    threading.Thread(target=_do_save, daemon=True).start()
 
 
 def _build_messages(user_input: str, thread_id: str | None = None,
@@ -1047,6 +1092,9 @@ def _run_inner(user_input: str, thread_id: str | None,
                      est_tokens=est_tokens, context_hits=result.auto_context_hits,
                      json_repairs=result.json_repairs, retries=result.retry_successes,
                      self_checks=result.self_check_fixes, thread=tid or "active")
+
+        if result.tool_calls_made:
+            _save_experience(user_input, result, rounds, fail_count)
 
         return result
 

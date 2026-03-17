@@ -133,6 +133,7 @@ TZ_OFFSET = 0  # overridden at runtime from DB
 # Agent defaults (overridable via settings UI / kv store)
 MAX_HISTORY_MESSAGES = 10  # last N messages in context (smart compaction handles the rest)
 MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
+MAX_EXPERIENCE_RESULTS = 2 # top-K past experience cases injected per turn
 MAX_TOOL_ROUNDS = 10       # max consecutive tool calls per turn
 COMPACTION_THRESHOLD = 20  # auto-compact after N messages in DB
 THINKING_ENABLED = False   # send enable_thinking to model (toggle via /thinking or settings)
@@ -150,6 +151,7 @@ EDITABLE_SETTINGS = {
     "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, 5),
     "self_check_enabled":   ("setting:self_check_enabled",    int, 1,     "Self-check before shell/write_file (0=off, 1=on)", 0, 1),
     "heartbeat_interval_min": ("setting:heartbeat_interval_min", int, 30, "Heartbeat interval in minutes", 5, 1440),
+    "experience_learning":  ("setting:experience_learning",   int, 1,     "Learn from past task executions (0=off, 1=on)", 0, 1),
 }
 
 
