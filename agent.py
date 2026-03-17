@@ -807,30 +807,34 @@ def _run_inner(user_input: str, thread_id: str | None,
                     _emit_status("✍️ writing reply...")
 
                 full_content += delta.content
+                text = delta.content
 
                 # Track thinking state (for models that put <think> in content)
-                text = delta.content
-                if "<think>" in text:
+                # Check full_content to handle tags split across chunks
+                if not in_think and "<think>" in full_content and not think_shown:
                     in_think = True
-                    if not think_shown:
-                        _console.print("  [dim]💭 thinking...[/]")
-                        _emit_status("💭 thinking...")
-                        think_shown = True
-                    after = text.split("<think>", 1)[1]
-                    if after:
-                        _console.print(f"  [dim]{after}[/]", end="")
-                        _emit_thinking(after)
-                elif "</think>" in text:
-                    before = text.split("</think>", 1)[0]
-                    if before:
-                        _console.print(f"  [dim]{before}[/]", end="")
-                        _emit_thinking(before)
+                    think_shown = True
+                    _console.print("  [dim]💭 thinking...[/]")
+                    _emit_status("💭 thinking...")
+                    # Emit any content after <think> tag
+                    after_tag = full_content.split("<think>", 1)[1]
+                    if after_tag:
+                        _console.print(f"  [dim]{after_tag}[/]", end="")
+                        _emit_thinking(after_tag)
+                elif in_think and "</think>" in full_content:
+                    # Emit remaining thinking before </think>
+                    before_tag = text.split("</think>", 1)[0] if "</think>" in text else ""
+                    if before_tag:
+                        _console.print(f"  [dim]{before_tag}[/]", end="")
+                        _emit_thinking(before_tag)
                     _console.print()  # newline after thinking block
                     in_think = False
                     _emit_status("✍️ writing reply...")
                 elif in_think:
-                    _console.print(f"  [dim]{text}[/]", end="")
-                    _emit_thinking(text)
+                    # Stream thinking chunk (skip partial tag fragments)
+                    if text and not text.startswith("<"):
+                        _console.print(f"  [dim]{text}[/]", end="")
+                        _emit_thinking(text)
 
             # Stream tool calls
             if delta.tool_calls:
