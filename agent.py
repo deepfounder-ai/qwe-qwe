@@ -424,7 +424,6 @@ def _build_messages(user_input: str, thread_id: str | None = None,
 
     # Thinking mode — inject prompt instruction for models that don't natively support it
     thinking_on = db.kv_get("thinking_enabled")
-    _log.info(f"thinking_enabled={thinking_on}")
     if thinking_on == "true":
         system_text += (
             "\n\nIMPORTANT: Before answering, think through the problem step by step. "
@@ -432,7 +431,6 @@ def _build_messages(user_input: str, thread_id: str | None = None,
             "After thinking, write your final answer outside the tags. "
             "Example:\n<think>\nLet me analyze this...\n</think>\nHere is my answer."
         )
-        _log.info("thinking prompt injected into system message")
 
     # Auto-retrieve from Qdrant (thread-scoped + global)
     context = _auto_context(user_input, thread_id=thread_id)
@@ -792,12 +790,6 @@ def _run_inner(user_input: str, thread_id: str | None,
 
             # Stream content (text)
             if delta.content:
-                # Log first chunk to verify thinking tags
-                if not full_content and "<think>" in delta.content:
-                    _log.info("model generated <think> tag in content")
-                elif not full_content:
-                    _log.info(f"first content chunk (no <think>): {delta.content[:80]!r}")
-
                 # If we were in reasoning_content mode, transition out
                 if in_think and reasoning_content:
                     _console.print()  # newline after thinking block
