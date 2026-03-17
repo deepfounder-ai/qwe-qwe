@@ -422,6 +422,16 @@ def _build_messages(user_input: str, thread_id: str | None = None,
     elif source == "web":
         system_text += "\nYou are chatting via the web UI."
 
+    # Thinking mode — inject prompt instruction for models that don't natively support it
+    thinking_on = db.kv_get("thinking_enabled")
+    if thinking_on == "true":
+        system_text += (
+            "\n\nIMPORTANT: Before answering, think through the problem step by step. "
+            "Write your reasoning inside <think>...</think> tags. "
+            "After thinking, write your final answer outside the tags. "
+            "Example:\n<think>\nLet me analyze this...\n</think>\nHere is my answer."
+        )
+
     # Auto-retrieve from Qdrant (thread-scoped + global)
     context = _auto_context(user_input, thread_id=thread_id)
     if context:
@@ -736,11 +746,7 @@ def _run_inner(user_input: str, thread_id: str | None,
         providers.ensure_model_loaded()
 
         # Stream the response
-        # Check thinking toggle
         extra = {}
-        thinking_on = db.kv_get("thinking_enabled")
-        if thinking_on == "true":
-            extra["extra_body"] = {"enable_thinking": True}
 
         stream = client.chat.completions.create(
             model=providers.get_model(),
@@ -781,6 +787,15 @@ def _run_inner(user_input: str, thread_id: str | None,
                         think_shown = True
                 if "</think>" in text:
                     in_think = False
+                    _emit_status("✍️ writing reply...")
+                # Stream thinking preview to status
+                if in_think and think_shown:
+                    # Extract last meaningful chunk for status preview
+                    think_so_far = re.sub(r"<think>", "", full_content)
+                    think_so_far = think_so_far.strip()
+                    if len(think_so_far) > 60:
+                        preview = think_so_far[-60:].strip()
+                        _emit_status(f"💭 ...{preview}")
 
             # Stream tool calls
             if delta.tool_calls:
