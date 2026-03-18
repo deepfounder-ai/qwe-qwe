@@ -116,6 +116,7 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
         "duration_ms": elapsed,
         "context_hits": result.auto_context_hits,
         "thread_id": thread_id or threads.get_active_id(),
+        "model_used": result.model,
     }
 
 

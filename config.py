@@ -157,6 +157,8 @@ EDITABLE_SETTINGS = {
     "presence_penalty":     ("setting:presence_penalty",      float, 1.5,  "Presence penalty (Qwen3.5 recommends 1.5)", 0.0, 2.0),
     "rag_chunk_size":       ("setting:rag_chunk_size",        int, 800,    "RAG chunk size in chars (re-index after change)", 200, 4000),
     "rag_chunk_overlap":    ("setting:rag_chunk_overlap",     int, 100,    "RAG chunk overlap in chars", 0, 500),
+    "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
+    "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
 }
 
 
@@ -185,7 +187,7 @@ def set(key: str, value) -> str:
         v = type_(value)
     except (ValueError, TypeError):
         return f"Invalid value: {value} (expected {type_.__name__})"
-    if v < min_val or v > max_val:
+    if isinstance(v, (int, float)) and (v < min_val or v > max_val):
         return f"Out of range: {v} (allowed {min_val}-{max_val})"
     db.kv_set(kv_key, str(v))
     return f"✓ {key} = {v}"

@@ -2019,6 +2019,9 @@ function addMessage(role, text, meta, imageSrc) {
     if (meta.duration_ms) p.push(`${meta.duration_ms}ms`);
     if (meta.tools?.length) p.push(meta.tools.map(t=>`<span class="tool-tag"><i class="ph ph-wrench"></i> ${escapeHtml(t)}</span>`).join(''));
     if (meta.context_hits) p.push(`<i class="ph ph-paperclip"></i> ${meta.context_hits} memories`);
+    if (meta.fallback_model) {
+      p.push(`<span style="color:var(--accent)">&#9889; via ${escapeHtml(meta.fallback_model)}</span>`);
+    }
     m.innerHTML = p.join(' · '); div.appendChild(m);
   }
   chat.appendChild(div); chat.scrollTop = chat.scrollHeight;

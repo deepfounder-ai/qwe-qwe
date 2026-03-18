@@ -164,6 +164,55 @@ def get_client() -> OpenAI:
     return _client
 
 
+# ── Fallback client (separate instance, never touches global state) ──
+_fallback_client: OpenAI | None = None
+_fallback_client_key: str | None = None
+
+
+def get_fallback_config() -> tuple[str, str] | None:
+    """Get fallback provider + model. Returns (provider, model) or None if not configured."""
+    prov = db.kv_get("setting:fallback_provider") or ""
+    model = db.kv_get("setting:fallback_model") or ""
+    if not prov or not model:
+        return None
+    return (prov, model)
+
+
+def get_fallback_client() -> OpenAI | None:
+    """Get or create an OpenAI client for the fallback provider.
+    Does NOT mutate global _client or config values.
+    """
+    global _fallback_client, _fallback_client_key
+
+    fb = get_fallback_config()
+    if not fb:
+        return None
+
+    prov_name, _ = fb
+    p = get_provider(prov_name)
+    url = p.get("url", "")
+    key = p.get("key", "")
+
+    if not url or not key:
+        _log.warning(f"fallback provider '{prov_name}' missing url or key")
+        return None
+
+    cache_key = f"fb|{url}|{key}"
+    if _fallback_client is not None and _fallback_client_key == cache_key:
+        return _fallback_client
+
+    _fallback_client = OpenAI(base_url=url, api_key=key)
+    _fallback_client_key = cache_key
+    _log.info(f"fallback client created: {prov_name} ({url})")
+    return _fallback_client
+
+
+def get_fallback_model() -> str | None:
+    """Get the fallback model name, or None if not configured."""
+    fb = get_fallback_config()
+    return fb[1] if fb else None
+
+
 def ensure_model_loaded() -> bool:
     """For local providers (lmstudio/ollama): check if model is loaded, auto-load if not.
     

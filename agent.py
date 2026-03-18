@@ -775,6 +775,37 @@ def _run_inner(user_input: str, thread_id: str | None,
 
     _log.info(f"turn started | thread={tid or 'active'} | input: {user_input[:100]}")
 
+    # Check if this is a fallback confirmation ("да", "yes")
+    if user_input.lower().strip() in ("да", "yes", "y", "давай", "go"):
+        recent = db.get_recent_messages(limit=2, thread_id=tid)
+        if recent and "Отправить на" in (recent[-1].get("content") or ""):
+            fb_client = providers.get_fallback_client()
+            fb_model = providers.get_fallback_model()
+            if fb_client and fb_model and len(recent) >= 2:
+                original_q = recent[-2].get("content", "")
+                if original_q:
+                    _console.print(f"  [yellow]⚡ Sending to {fb_model}...[/]")
+                    _emit_status(f"⚡ {fb_model}...")
+                    result = TurnResult()
+                    db.save_message("user", user_input, thread_id=tid)
+                    fb_msgs = _build_messages(original_q, thread_id=tid, source=source)
+                    try:
+                        fb_resp = fb_client.chat.completions.create(
+                            model=fb_model, messages=fb_msgs,
+                            temperature=0.3, max_tokens=2048, stream=False,
+                        )
+                        result.reply = _clean_response(
+                            _strip_thinking(fb_resp.choices[0].message.content or "")
+                        )
+                        result.model = fb_model
+                        db.kv_inc("stats:fallback_used")
+                        db.save_message("assistant", result.reply, thread_id=tid,
+                                        meta={"fallback_model": fb_model})
+                        _console.print(f"  [green]⚡ Answered via {fb_model}[/]")
+                        return result
+                    except Exception as e:
+                        _log.warning(f"fallback failed: {e}")
+
     # Sanitize surrogates (WSL terminal issue)
     user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
 
@@ -1029,6 +1060,32 @@ def _run_inner(user_input: str, thread_id: str | None,
                     if fail_count >= 2:
                         _log.error(f"tool {tc['name']} failed 2x, stopping retries")
                         tool_result += "\n\nSTOP: This tool failed twice. Do NOT retry. Answer with what you have or try a different approach."
+
+                        # Auto-escalate to fallback model if configured
+                        fb_client = providers.get_fallback_client()
+                        fb_model = providers.get_fallback_model()
+                        if fb_client and fb_model:
+                            _log.info(f"auto-escalating to fallback: {fb_model}")
+                            _console.print(f"  [yellow]⚡ Escalating to {fb_model}...[/]")
+                            _emit_status(f"⚡ escalating to {fb_model}...")
+                            try:
+                                fb_resp = fb_client.chat.completions.create(
+                                    model=fb_model, messages=messages,
+                                    tools=all_tools, tool_choice="auto",
+                                    temperature=0.3, max_tokens=2048, stream=False,
+                                )
+                                fb_msg = fb_resp.choices[0].message
+                                if fb_msg.content:
+                                    result.reply = _clean_response(_strip_thinking(fb_msg.content))
+                                    result.model = fb_model
+                                    db.kv_inc("stats:fallback_used")
+                                    db.save_message("assistant", result.reply, thread_id=tid,
+                                                    meta={"tools": result.tool_calls_made,
+                                                          "fallback_model": fb_model})
+                                    _console.print(f"  [green]⚡ Answered via {fb_model}[/]")
+                                    return result
+                            except Exception as e:
+                                _log.warning(f"fallback escalation failed: {e}")
                 else:
                     last_failed_tool = None
                     fail_count = 0
@@ -1085,6 +1142,13 @@ def _run_inner(user_input: str, thread_id: str | None,
             continue
 
         result.reply = _clean_response(raw_reply)
+
+        # Offer fallback for short/empty responses on non-trivial questions
+        fb_config = providers.get_fallback_config()
+        if (fb_config and rounds == 0 and not result.tool_calls_made
+                and len(result.reply.strip()) < 50 and len(user_input) > 30):
+            _, fb_model = fb_config
+            result.reply += f"\n\n---\n_Ответ короткий. Отправить на {fb_model}?_"
 
         # Track session tokens (estimate from content length since streaming doesn't give usage)
         est_tokens = len(full_content) // 4
