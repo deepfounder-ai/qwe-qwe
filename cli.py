@@ -983,12 +983,16 @@ def main_entry():
     parser.add_argument("--web", action="store_true", help="Start web server instead of CLI")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
     parser.add_argument("--update", action="store_true", help="Update to latest version")
+    parser.add_argument("--setup-inference", action="store_true", help="Setup inference backend (Ollama)")
     parser.add_argument("--host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=7860, help="Web server port (default: 7860)")
     args = parser.parse_args()
 
     if args.update:
         _run_update_cli()
+    elif args.setup_inference:
+        import inference_setup
+        inference_setup.run_wizard()
     elif args.doctor:
         doctor()
     elif args.web:

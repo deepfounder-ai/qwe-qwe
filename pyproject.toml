@@ -31,7 +31,7 @@ qwe-qwe = "cli:main_entry"
 
 [tool.setuptools]
 packages = ["skills"]
-py-modules = ["cli", "agent", "config", "db", "discovery", "logger", "memory", "providers", "rag", "scheduler", "server", "soul", "tasks", "telegram_bot", "threads", "tools", "updater"]
+py-modules = ["cli", "agent", "config", "db", "discovery", "inference_setup", "logger", "memory", "providers", "rag", "scheduler", "server", "soul", "tasks", "telegram_bot", "threads", "tools", "updater"]
 
 [tool.setuptools.package-data]
 "*" = ["static/**/*"]
