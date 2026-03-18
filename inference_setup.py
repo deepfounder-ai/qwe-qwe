@@ -73,11 +73,13 @@ def _check_ollama_running() -> bool:
 def recommend_model(gpu: dict) -> str:
     """Recommend a model based on available memory."""
     mem = gpu.get("vram_gb") or 0
-    if mem >= 32:
+    if mem >= 48:
+        return "qwen3:32b"
+    elif mem >= 12:
         return "qwen3:14b"
-    elif mem >= 16:
-        return "qwen3:8b"
     elif mem >= 8:
+        return "qwen3:8b"
+    elif mem >= 4:
         return "qwen3:4b"
     else:
         return "qwen3:1.7b"
