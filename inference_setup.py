@@ -167,13 +167,43 @@ def run_wizard():
     else:
         console.print(f"  [yellow]⚠ No GPU detected — CPU-only mode (will be slow)[/]")
 
-    # Step 2: Recommend
-    model = recommend_model(gpu)
-    console.print(f"\n  [cyan]Recommended:[/]")
-    console.print(f"    Backend: [bold]Ollama[/]")
-    console.print(f"    Model:   [bold]{model}[/]")
+    # Step 2: Choose model
+    mem = gpu.get("vram_gb") or 0
+    recommended = recommend_model(gpu)
+    models = [
+        ("qwen3:1.7b", "1.7B", "~1.5GB", "Very fast, basic tasks"),
+        ("qwen3:4b", "4B", "~3GB", "Good balance for low memory"),
+        ("qwen3:8b", "8B", "~5GB", "Strong general purpose"),
+        ("qwen3:14b", "14B", "~9GB", "Best quality for 12-16GB (recommended for most)"),
+        ("qwen3:32b", "32B", "~20GB", "Maximum quality, needs 32GB+"),
+    ]
 
-    if gpu["type"] == "nvidia" and (gpu.get("vram_gb") or 0) >= 24:
+    console.print(f"\n  [cyan]Choose a model:[/]\n")
+    for i, (tag, size, vram, desc) in enumerate(models, 1):
+        rec = " [green]← recommended[/]" if tag == recommended else ""
+        fit = "✓" if mem >= float(vram.strip("~GB")) else "✗"
+        color = "green" if fit == "✓" else "red"
+        console.print(f"    [{color}]{fit}[/] {i}. [bold]{tag}[/] ({size}, {vram} RAM) — {desc}{rec}")
+
+    console.print(f"\n  [yellow]Enter number (1-{len(models)}) or model name:[/]")
+    try:
+        choice = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n  [dim]Cancelled.[/]")
+        return
+
+    if choice.isdigit() and 1 <= int(choice) <= len(models):
+        model = models[int(choice) - 1][0]
+    elif ":" in choice:
+        model = choice  # custom model name like "llama3:8b"
+    elif choice:
+        model = choice
+    else:
+        model = recommended
+
+    console.print(f"\n  [cyan]Selected:[/] [bold]{model}[/]")
+
+    if gpu["type"] == "nvidia" and mem >= 24:
         console.print(f"    [dim]For production: consider vLLM (pip install vllm)[/]")
 
     # Step 3: Check if Ollama is already installed
