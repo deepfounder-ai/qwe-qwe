@@ -8,6 +8,7 @@ import logger
 
 _log = logger.get("agent")
 _console = Console()
+_compaction_lock = threading.Lock()  # protects message read/delete during compaction
 
 # Status callback: set by server.py to push live updates to WebSocket
 _status_callback: callable = None  # (text: str) -> None
@@ -516,8 +517,9 @@ def _build_messages(user_input: str, thread_id: str | None = None,
         msgs.append({"role": "user", "content": user_input})
         return msgs
 
-    # Recent history from SQLite (skip if it would create invalid sequences)
-    history = db.get_recent_messages(thread_id=thread_id)
+    # Recent history from SQLite (lock prevents race with background compaction)
+    with _compaction_lock:
+        history = db.get_recent_messages(thread_id=thread_id)
 
     # Ensure history starts with user (not assistant) after system
     while history and history[0]["role"] != "user":
@@ -712,9 +714,10 @@ def _maybe_compact(thread_id: str | None = None):
                 _log.info("compaction: nothing important, skipped")
                 _notify_compaction("skip", {"thread_id": thread_id})
 
-            # Delete compacted messages
+            # Delete compacted messages (lock prevents race with _build_messages)
             ids = [m["id"] for m in oldest]
-            db.delete_messages_by_ids(ids)
+            with _compaction_lock:
+                db.delete_messages_by_ids(ids)
 
             remaining = db.count_messages(thread_id=thread_id)
             _log.info(f"compaction done: deleted {len(ids)} msgs, {remaining} remaining")
@@ -755,25 +758,17 @@ def run(user_input: str, thread_id: str | None = None,
         source: "cli", "web", or "telegram" — tells the agent where it's running
         image_b64: optional base64-encoded image for vision
     """
-    # Check thread-specific model override
-    thread_model = _get_thread_model(thread_id)
-    if thread_model:
-        _original_model = providers.get_model()
-        providers.set_model(thread_model)
-    else:
-        _original_model = None
-
-    try:
-        return _run_inner(user_input, thread_id, source, image_b64)
-    finally:
-        if _original_model:
-            providers.set_model(_original_model)
+    # Thread-specific model override (local variable, not global state mutation)
+    model_override = _get_thread_model(thread_id)
+    return _run_inner(user_input, thread_id, source, image_b64, model_override)
 
 
 def _run_inner(user_input: str, thread_id: str | None,
-               source: str, image_b64: str | None) -> TurnResult:
-    """Inner agent loop — separated so run() can restore model in finally."""
+               source: str, image_b64: str | None,
+               model_override: str | None = None) -> TurnResult:
+    """Inner agent loop."""
     client = providers.get_client()
+    _model = model_override or providers.get_model()  # thread-safe local
     result = TurnResult()
     turn_start = time.time()
     tid = thread_id  # None = uses active thread via db._tid()
@@ -826,7 +821,7 @@ def _run_inner(user_input: str, thread_id: str | None,
         # The reasoning_content handler below still catches native thinking if a provider sends it.
         presence_penalty = config.get("presence_penalty")
         stream = client.chat.completions.create(
-            model=providers.get_model(),
+            model=_model,
             messages=messages,
             tools=all_tools,
             tool_choice="auto",

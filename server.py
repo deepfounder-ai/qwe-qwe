@@ -153,6 +153,9 @@ def _check_rate_limit(ip: str) -> bool:
     timestamps = _rate_log.get(ip, [])
     # Remove entries older than 60s
     timestamps = [t for t in timestamps if now - t < 60]
+    if not timestamps:
+        _rate_log.pop(ip, None)  # evict inactive IPs to prevent memory leak
+        return True
     if len(timestamps) >= _RATE_LIMIT:
         _rate_log[ip] = timestamps
         return False
@@ -204,7 +207,7 @@ async def login(request: Request):
     if hmac.compare_digest(password, _AUTH_PASSWORD):
         response = JSONResponse({"ok": True})
         response.set_cookie(_AUTH_COOKIE, _AUTH_TOKEN,
-                            max_age=86400, httponly=True, samesite="lax")
+                            max_age=86400, httponly=True, samesite="strict")
         return response
     return JSONResponse({"error": "wrong password"}, status_code=401)
 
@@ -1211,8 +1214,13 @@ async def telegram_toggle(request: Request):
 
 
 @app.post("/api/telegram/activate")
-async def telegram_activate():
+async def telegram_activate(request: Request):
     """Generate a new activation code. User sends this code to the bot in Telegram."""
+    # Require auth even if global password is not set — activation codes are sensitive
+    if _AUTH_PASSWORD:
+        cookie = request.cookies.get(_AUTH_COOKIE, "")
+        if not hmac.compare_digest(cookie, _AUTH_TOKEN):
+            return JSONResponse({"error": "Auth required for telegram activation"}, status_code=401)
     if telegram_bot.is_verified():
         return JSONResponse({"error": "Already verified. Reset first to re-verify."}, status_code=400)
     code = telegram_bot.generate_activation_code()

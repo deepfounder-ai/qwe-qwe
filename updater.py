@@ -203,13 +203,12 @@ def pull_code() -> tuple[bool, str]:
     if r.returncode == 0:
         return True, r.stdout.strip() or "Updated with rebase"
 
-    # Last resort: reset (only tracked files, user data is gitignored)
-    _log.warning(f"rebase failed: {r.stderr.strip()}, resetting to origin/main")
-    r = _git("reset", "--hard", "origin/main")
-    if r.returncode == 0:
-        return True, "Reset to latest (local code changes overwritten)"
-
-    return False, f"Update failed: {r.stderr.strip()}"
+    # Don't force-reset — let the user resolve conflicts manually
+    _log.warning(f"rebase failed: {r.stderr.strip()}")
+    return False, (
+        "Update failed: local changes conflict with remote. "
+        "Run manually: git stash && git pull origin main && git stash pop"
+    )
 
 
 # ── Reinstall ──

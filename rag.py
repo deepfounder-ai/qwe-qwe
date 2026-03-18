@@ -22,17 +22,13 @@ _embed_client = None
 
 
 def _get_qdrant():
+    """Get shared Qdrant client from memory module (avoids duplicate connections)."""
     global _qclient
     if _qclient is None:
-        from qdrant_client import QdrantClient
+        import memory
+        _qclient = memory._get_qdrant()
+        # Ensure RAG collection exists (separate from memory collection)
         from qdrant_client.models import VectorParams, Distance
-        if config.QDRANT_MODE == "disk":
-            _qclient = QdrantClient(path=config.QDRANT_PATH)
-        elif config.QDRANT_MODE == "server":
-            _qclient = QdrantClient(url=config.QDRANT_URL)
-        else:
-            _qclient = QdrantClient(":memory:")
-        # Ensure RAG collection exists
         cols = [c.name for c in _qclient.get_collections().collections]
         if RAG_COLLECTION not in cols:
             _qclient.create_collection(
