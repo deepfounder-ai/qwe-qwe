@@ -58,8 +58,11 @@ def _ensure_table():
 
 
 def _gen_id() -> str:
-    """Generate a short thread id: t_<timestamp_hex>"""
-    return f"t_{int(time.time() * 1000) % 0xFFFFFFFF:08x}"
+    """Generate a unique thread id: t_<timestamp_hex><random>"""
+    import random
+    ts = int(time.time() * 1000) % 0xFFFFFFFF
+    rnd = random.randint(0, 0xFFF)
+    return f"t_{ts:08x}{rnd:03x}"
 
 
 # ── CRUD ──

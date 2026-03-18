@@ -66,7 +66,6 @@ def _embed(text: str) -> list[float]:
         resp = _get_embed().embeddings.create(input=text, model=config.EMBED_MODEL)
         return resp.data[0].embedding
     except Exception as e:
-        _log = __import__("logger").get("memory")
         _log.warning(f"embedding failed: {e}")
         raise
 

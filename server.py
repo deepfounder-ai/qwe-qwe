@@ -155,6 +155,7 @@ def _check_rate_limit(ip: str) -> bool:
     timestamps = [t for t in timestamps if now - t < 60]
     if not timestamps:
         _rate_log.pop(ip, None)  # evict inactive IPs to prevent memory leak
+        _rate_log[ip] = [now]    # record this request
         return True
     if len(timestamps) >= _RATE_LIMIT:
         _rate_log[ip] = timestamps
@@ -606,10 +607,9 @@ async def network_status():
     lan = lan_val != "0"
     import socket
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
     except Exception:
         ip = "unknown"
     return {"lan_access": lan, "ip": ip, "port": _current_port}
@@ -1277,10 +1277,9 @@ def start(host: str = "0.0.0.0", port: int = 7860):
     if actual_host == "0.0.0.0":
         import socket
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
             print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}")
             print(f"  📱 LAN access → http://{ip}:{port}\n")
         except Exception:
