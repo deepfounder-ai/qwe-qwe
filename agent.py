@@ -944,7 +944,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                             _console.print(f"  [yellow]🔄 retrying {tc['name']} (broken JSON)...[/]")
                             _emit_status(f"🔄 retrying {tc['name']}...")
                             retried = _retry_tool_call(
-                                client, providers.get_model(),
+                                client, _model,
                                 tc["name"], tc["arguments"], max_retries=retry_max
                             )
                             if retried:
@@ -959,7 +959,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                 # Self-check for critical tools (shell, write_file)
                 if args and tc["name"] in _SELF_CHECK_TOOLS and config.get("self_check_enabled"):
                     ok, fixed = _self_check_tool_call(
-                        client, providers.get_model(), tc["name"], args
+                        client, _model, tc["name"], args
                     )
                     if not ok and fixed:
                         args = fixed

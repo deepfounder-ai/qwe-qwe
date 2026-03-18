@@ -11,16 +11,24 @@ import types
 mock_db = types.ModuleType("db")
 mock_db.kv_get = lambda *a, **kw: None
 mock_db.kv_set = lambda *a, **kw: None
+mock_db.kv_inc = lambda *a, **kw: 0
+mock_db.kv_get_prefix = lambda *a, **kw: {}
 mock_db._get_conn = lambda: None
 mock_db.get_recent_messages = lambda *a, **kw: []
 mock_db.save_message = lambda *a, **kw: None
 mock_db.count_messages = lambda *a, **kw: 0
+mock_db.execute = lambda *a, **kw: 0
+mock_db.fetchall = lambda *a, **kw: []
+mock_db.fetchone = lambda *a, **kw: None
 sys.modules["db"] = mock_db
 
 mock_memory = types.ModuleType("memory")
 mock_memory.search = lambda *a, **kw: []
+mock_memory.search_by_vector = lambda *a, **kw: []
+mock_memory.embed = lambda text: [0.0] * 768
 mock_memory.save = lambda *a, **kw: "ok"
 mock_memory.delete = lambda *a, **kw: True
+mock_memory.cleanup = lambda *a, **kw: 0
 sys.modules["memory"] = mock_memory
 
 mock_logger = types.ModuleType("logger")
@@ -48,12 +56,18 @@ mock_config.DB_PATH = ":memory:"
 mock_config.TZ_OFFSET = 0
 mock_config.MAX_HISTORY_MESSAGES = 4
 mock_config.MAX_MEMORY_RESULTS = 3
+mock_config.MAX_EXPERIENCE_RESULTS = 2
 mock_config.MAX_TOOL_ROUNDS = 10
 mock_config.COMPACTION_THRESHOLD = 20
 mock_config.THINKING_ENABLED = False
+mock_config.WORKSPACE_DIR = __import__("pathlib").Path("/tmp/qwe-test-workspace")
+mock_config.DATA_DIR = __import__("pathlib").Path("/tmp/qwe-test-data")
 mock_config.EDITABLE_SETTINGS = {
     "tool_retry_max": ("setting:tool_retry_max", int, 3, "Max retries", 0, 5),
     "self_check_enabled": ("setting:self_check_enabled", int, 1, "Self-check", 0, 1),
+    "experience_learning": ("setting:experience_learning", int, 1, "Experience", 0, 1),
+    "max_memory_results": ("setting:max_memory_results", int, 3, "Memory results", 0, 10),
+    "presence_penalty": ("setting:presence_penalty", float, 1.5, "Presence penalty", 0.0, 2.0),
 }
 mock_config.get = lambda key: mock_config.EDITABLE_SETTINGS[key][2]
 sys.modules["config"] = mock_config
@@ -73,6 +87,21 @@ mock_threads.get_active_id = lambda: "test"
 mock_threads.get = lambda tid: None
 mock_threads.touch = lambda tid: None
 sys.modules["threads"] = mock_threads
+
+mock_tools = types.ModuleType("tools")
+mock_tools.TOOLS = [
+    {"type": "function", "function": {"name": "shell", "description": "Run shell command",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write a file",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+]
+mock_tools.get_all_tools = lambda compact=False: mock_tools.TOOLS
+mock_tools.execute = lambda *a, **kw: "ok"
+sys.modules["tools"] = mock_tools
+
+mock_skills = types.ModuleType("skills")
+mock_skills.get_instruction = lambda name: None
+sys.modules["skills"] = mock_skills
 
 import agent
 
