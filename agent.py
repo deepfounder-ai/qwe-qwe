@@ -881,8 +881,8 @@ def _run_inner(user_input: str, thread_id: str | None,
 
             finish_reason = chunk.choices[0].finish_reason
 
-            # Handle reasoning_content (Qwen3/DeepSeek with enable_thinking)
-            rc = getattr(delta, "reasoning_content", None)
+            # Handle reasoning/reasoning_content (Ollama uses "reasoning", others use "reasoning_content")
+            rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if rc:
                 reasoning_content += rc
                 if not think_shown:
