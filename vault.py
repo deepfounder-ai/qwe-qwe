@@ -9,9 +9,16 @@ import logger
 
 _log = logger.get("secrets")
 
-# Key derived from machine-specific seed + DB file path
-# Not military-grade, but keeps secrets encrypted at rest
-_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vault_key")
+# Key stored in user data directory (not in git repo)
+import config
+_KEY_FILE = os.path.join(str(config.DATA_DIR), ".vault_key")
+
+# Auto-migrate: if old key exists in project dir, copy to new location
+_OLD_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vault_key")
+if os.path.exists(_OLD_KEY_FILE) and not os.path.exists(_KEY_FILE):
+    import shutil
+    shutil.copy2(_OLD_KEY_FILE, _KEY_FILE)
+    os.chmod(_KEY_FILE, 0o600)
 
 
 def _get_fernet() -> Fernet:

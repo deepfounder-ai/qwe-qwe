@@ -164,16 +164,30 @@ def kv_get(key: str) -> str | None:
 
 
 def kv_inc(key: str, delta: int = 1) -> int:
-    """Atomically increment a counter. Creates if not exists."""
+    """Atomically increment a counter. Creates if not exists.
+    Uses RETURNING clause (SQLite 3.35+) for single-statement atomicity.
+    """
     conn = _get_conn()
-    conn.execute(
-        "INSERT INTO kv (key, value, ts) VALUES (?, ?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT), ts = ?",
-        (key, str(delta), time.time(), delta, time.time())
-    )
-    conn.commit()
-    row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
-    return int(row[0]) if row else delta
+    now = time.time()
+    try:
+        row = conn.execute(
+            "INSERT INTO kv (key, value, ts) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT), ts = ? "
+            "RETURNING CAST(value AS INTEGER)",
+            (key, str(delta), now, delta, now)
+        ).fetchone()
+        conn.commit()
+        return row[0] if row else delta
+    except Exception:
+        # Fallback for older SQLite without RETURNING
+        conn.execute(
+            "INSERT INTO kv (key, value, ts) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT), ts = ?",
+            (key, str(delta), now, delta, now)
+        )
+        conn.commit()
+        row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return int(row[0]) if row else delta
 
 
 def kv_get_prefix(prefix: str) -> dict[str, str]:

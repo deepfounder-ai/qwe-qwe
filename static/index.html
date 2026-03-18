@@ -939,7 +939,7 @@ function obProviderChanged() {
   const info = OB_PROVIDERS[prov];
   document.getElementById('obEndpoint').value = info.url;
   document.getElementById('obApiKeyWrap').style.display = info.local ? 'none' : 'block';
-  document.getElementById('obProviderHint').innerHTML = '<i class="ph ph-lightbulb"></i> ' + info.hint;
+  document.getElementById('obProviderHint').innerHTML = '<i class="ph ph-lightbulb"></i> ' + escapeHtml(info.hint);
   document.getElementById('obModel').placeholder = info.local ? 'auto-detected from server' : 'e.g. gpt-4o, claude-sonnet-4';
 }
 
@@ -1260,8 +1260,8 @@ async function loadSettingsSkills() {
     row.innerHTML = `
       <div class="skill-toggle ${s.active ? 'on' : ''}" onclick="toggleSkill('${s.name}', ${!s.active})"></div>
       <div class="skill-info">
-        <div class="skill-name">${s.name}</div>
-        ${s.description ? `<div class="skill-desc">${s.description}</div>` : ''}
+        <div class="skill-name">${escapeHtml(s.name)}</div>
+        ${s.description ? `<div class="skill-desc">${escapeHtml(s.description)}</div>` : ''}
         <div class="skill-tools">${s.tools} tools</div>
       </div>
     `;
@@ -2017,13 +2017,13 @@ function addMessage(role, text, meta, imageSrc) {
     const m = document.createElement('div'); m.className = 'msg-meta';
     let p = [];
     if (meta.duration_ms) p.push(`${meta.duration_ms}ms`);
-    if (meta.tools?.length) p.push(meta.tools.map(t=>`<span class="tool-tag"><i class="ph ph-wrench"></i> ${t}</span>`).join(''));
+    if (meta.tools?.length) p.push(meta.tools.map(t=>`<span class="tool-tag"><i class="ph ph-wrench"></i> ${escapeHtml(t)}</span>`).join(''));
     if (meta.context_hits) p.push(`<i class="ph ph-paperclip"></i> ${meta.context_hits} memories`);
     m.innerHTML = p.join(' · '); div.appendChild(m);
   }
   chat.appendChild(div); chat.scrollTop = chat.scrollHeight;
 }
-function showStatus(text) { removeStatus(); const d=document.createElement('div'); d.className='msg status'; d.id='statusMsg'; d.innerHTML=`<i class="ph ph-spinner"></i> ${text}`; chat.appendChild(d); chat.scrollTop=chat.scrollHeight; }
+function showStatus(text) { removeStatus(); const d=document.createElement('div'); d.className='msg status'; d.id='statusMsg'; d.innerHTML=`<i class="ph ph-spinner"></i> ${escapeHtml(text)}`; chat.appendChild(d); chat.scrollTop=chat.scrollHeight; }
 function removeStatus() { document.getElementById('statusMsg')?.remove(); }
 
 // ── Image handling ──

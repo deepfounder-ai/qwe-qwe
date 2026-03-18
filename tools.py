@@ -1,6 +1,6 @@
 """Tool definitions and execution — optimized for small models."""
 
-import json, subprocess, os
+import json, subprocess, os, re
 from pathlib import Path
 import config
 import memory
@@ -11,18 +11,28 @@ _log = logger.get("tools")
 # Agent workspace — all relative paths resolve here
 WORKSPACE = config.WORKSPACE_DIR
 
-# Directories the agent must never write to
-_WRITE_BLACKLIST = ("/System", "/Library", "/usr/bin", "/usr/sbin", "/usr/lib",
-                    "/bin", "/sbin", "/etc", "/dev", "/proc",
-                    "/private/etc", "/private/var")
+# Directories the agent is allowed to write to (whitelist — safer than blacklist)
+_WRITE_WHITELIST: list[str] | None = None
+
+
+def _get_write_whitelist() -> list[str]:
+    """Lazily compute write-allowed directories."""
+    global _WRITE_WHITELIST
+    if _WRITE_WHITELIST is None:
+        _WRITE_WHITELIST = [
+            str(config.WORKSPACE_DIR.resolve()),   # ~/.qwe-qwe/workspace/
+            str(config.DATA_DIR.resolve()),         # ~/.qwe-qwe/
+            str(Path.cwd().resolve()),              # project working directory
+        ]
+    return _WRITE_WHITELIST
 
 
 def _resolve_path(raw: str, for_write: bool = False) -> Path:
     """Resolve a file path for agent operations.
 
-    - Relative paths → workspace (~/.qwe-qwe/workspace/)
+    - Relative paths -> workspace (~/.qwe-qwe/workspace/)
     - ~ expands to home
-    - For writes: block system directories
+    - For writes: only allow workspace, data dir, and cwd (whitelist)
     """
     p = Path(raw).expanduser()
     if not p.is_absolute():
@@ -30,10 +40,54 @@ def _resolve_path(raw: str, for_write: bool = False) -> Path:
     p = p.resolve()
     if for_write:
         s = str(p)
-        for blocked in _WRITE_BLACKLIST:
-            if s.startswith(blocked):
-                raise PermissionError(f"Cannot write to system directory: {blocked}")
+        allowed = any(s.startswith(w) for w in _get_write_whitelist())
+        if not allowed:
+            raise PermissionError(
+                f"Cannot write outside allowed directories. Path: {p}\n"
+                f"Allowed: workspace, data dir (~/.qwe-qwe/), project dir"
+            )
     return p
+
+
+# ── Shell safety ──
+
+_SHELL_BLOCKED_PATTERNS = re.compile(
+    r"(?:^|[\s;|&])\s*(?:"
+    r"sudo\b|su\s+\w|"                           # privilege escalation
+    r"rm\s+-[rf]*\s+/|rm\s+-[rf]*\s+~/|rm\s+-[rf]*\s+\$HOME|"  # recursive delete root/home
+    r">\s*/dev/|dd\s+if=|"                        # raw device writes
+    r"mkfs|fdisk|parted|"                         # disk formatting
+    r"chmod\s+[0-7]{3,4}\s+/|chown\s+\S+\s+/|"   # system permission changes
+    r"shutdown|reboot|halt|poweroff|"             # system control
+    r"pkill\s+-9|killall\s|kill\s+-9\s+1\b"       # process killing
+    r")",
+    re.IGNORECASE
+)
+
+_SHELL_BLOCKED_EXACT = [
+    "rm -rf /", "rm -rf /*", "rm -rf ~", "rm -rf $HOME",
+    ":(){:|:&};:",   # fork bomb
+    ":(){ :|:& };:", # fork bomb variant
+]
+
+
+def _check_shell_safety(cmd: str) -> str | None:
+    """Returns error message if command is blocked, None if safe."""
+    # Exact substring matches
+    for b in _SHELL_BLOCKED_EXACT:
+        if b in cmd:
+            return f"Blocked: dangerous command pattern."
+    # Regex pattern matches
+    if _SHELL_BLOCKED_PATTERNS.search(cmd):
+        return "Blocked: potentially dangerous command."
+    # Block command substitution — prevents hiding commands inside $() or backticks
+    if "$(" in cmd or "`" in cmd:
+        return "Blocked: command substitution ($() and backticks) not allowed for safety."
+    # Block curl/wget piped to shell
+    if re.search(r"(?:curl|wget)\s.*\|\s*(?:sh|bash|zsh|python)", cmd, re.IGNORECASE):
+        return "Blocked: piping downloads to shell not allowed."
+    return None
+
 
 # ── Tool definitions — SHORT descriptions, small models need clarity ──
 
@@ -359,12 +413,11 @@ def execute(name: str, args: dict) -> str:
         elif name == "shell":
             cmd = args["command"]
             _log.info(f"shell: {cmd[:200]}")
-            # Block dangerous commands
-            blocked = ["sudo ", "rm -rf /", "mkfs", "> /dev/"]
-            for b in blocked:
-                if b in cmd:
-                    _log.warning(f"shell blocked: {cmd}")
-                    return f"Blocked: '{b}' not allowed. Use pip (venv) instead of sudo apt."
+            # Safety check — block dangerous command patterns
+            block_reason = _check_shell_safety(cmd)
+            if block_reason:
+                _log.warning(f"shell blocked: {cmd}")
+                return block_reason
             t = min(args.get("timeout", 120), 300)
             env = os.environ.copy()
             venv = os.environ.get("VIRTUAL_ENV")
