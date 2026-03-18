@@ -9,8 +9,8 @@ _log = logger.get("rag")
 
 # Separate Qdrant collection for RAG (not mixed with agent memory)
 RAG_COLLECTION = "qwe_rag"
-CHUNK_SIZE = 2000       # chars (~500 tokens)
-CHUNK_OVERLAP = 200     # chars (~50 tokens)
+CHUNK_SIZE = 800        # chars (~200 tokens), configurable via settings
+CHUNK_OVERLAP = 100     # chars (~25 tokens), configurable via settings
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx",
                         ".json", ".csv", ".yaml", ".yml", ".toml", ".cfg",
                         ".sh", ".bash", ".html", ".css", ".sql", ".go",
@@ -48,17 +48,19 @@ def _embed(text: str) -> list[float]:
 
 
 def _chunk_text(text: str) -> list[str]:
-    """Split text into overlapping chunks."""
-    if len(text) <= CHUNK_SIZE:
+    """Split text into overlapping chunks. Uses configurable sizes from settings."""
+    chunk_size = config.get("rag_chunk_size") if "rag_chunk_size" in config.EDITABLE_SETTINGS else CHUNK_SIZE
+    chunk_overlap = config.get("rag_chunk_overlap") if "rag_chunk_overlap" in config.EDITABLE_SETTINGS else CHUNK_OVERLAP
+    if len(text) <= chunk_size:
         return [text]
     chunks = []
     start = 0
     while start < len(text):
-        end = start + CHUNK_SIZE
+        end = start + chunk_size
         chunk = text[start:end]
         if chunk.strip():
             chunks.append(chunk)
-        start += CHUNK_SIZE - CHUNK_OVERLAP
+        start += chunk_size - chunk_overlap
     return chunks
 
 
