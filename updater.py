@@ -234,7 +234,7 @@ def run_migrations():
         except Exception:
             pass
         del db._local.conn
-    db._get_conn()
+    db.fetchone("SELECT 1")
     _log.info("migrations applied")
 
 

@@ -58,6 +58,26 @@ def _migrate(conn: sqlite3.Connection):
         pass  # column already exists
 
 
+# --- Public query helpers (use these instead of _get_conn() directly) ---
+
+def execute(sql: str, params: tuple = ()) -> int:
+    """Execute a write query (INSERT/UPDATE/DELETE) and commit. Returns rowcount."""
+    conn = _get_conn()
+    cur = conn.execute(sql, params)
+    conn.commit()
+    return cur.rowcount
+
+
+def fetchall(sql: str, params: tuple = ()) -> list:
+    """Execute a read query and return all rows."""
+    return _get_conn().execute(sql, params).fetchall()
+
+
+def fetchone(sql: str, params: tuple = ()):
+    """Execute a read query and return one row (or None)."""
+    return _get_conn().execute(sql, params).fetchone()
+
+
 # --- Thread-aware helpers ---
 
 def _tid(thread_id: str | None = None) -> str:

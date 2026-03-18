@@ -186,8 +186,7 @@ def get_status() -> dict:
         count = 0
 
     # Count indexed files from kv
-    conn = db._get_conn()
-    files = conn.execute("SELECT COUNT(*) FROM kv WHERE key LIKE 'rag:mtime:%'").fetchone()[0]
+    files = db.fetchone("SELECT COUNT(*) FROM kv WHERE key LIKE 'rag:mtime:%'")[0]
 
     return {"files": files, "chunks": count}
 

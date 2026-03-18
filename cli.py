@@ -776,10 +776,9 @@ def doctor():
     # ── 2. Database ──
     console.print("  [dim]── Storage ──[/]")
     def _check_db():
-        conn = db._get_conn()
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        kv_count = conn.execute("SELECT COUNT(*) FROM kv").fetchone()[0]
+        tables = [r[0] for r in db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")]
+        msg_count = db.fetchone("SELECT COUNT(*) FROM messages")[0]
+        kv_count = db.fetchone("SELECT COUNT(*) FROM kv")[0]
         return f"✓ {len(tables)} tables, {msg_count} messages, {kv_count} settings"
     check("SQLite", _check_db)
 

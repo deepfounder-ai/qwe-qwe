@@ -16,8 +16,7 @@ _callbacks = []  # [(fn, args)] — called when task completes
 
 
 def _ensure_table():
-    conn = db._get_conn()
-    conn.execute("""
+    db.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -29,7 +28,6 @@ def _ensure_table():
             enabled INTEGER DEFAULT 1
         )
     """)
-    conn.commit()
 
 
 def add(name: str, task: str, schedule: str) -> dict:
@@ -44,17 +42,15 @@ def add(name: str, task: str, schedule: str) -> dict:
       "HH:MM"       — once today/tomorrow at that time
     """
     _ensure_table()
-    conn = db._get_conn()
 
     next_run, repeat = _parse_schedule(schedule)
     if next_run is None:
         return {"error": f"Can't parse schedule: '{schedule}'"}
 
-    conn.execute(
+    db.execute(
         "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,?,1)",
         (name, task, schedule, next_run, 1 if repeat else 0)
     )
-    conn.commit()
 
     dt = datetime.fromtimestamp(next_run, _tz()).strftime("%H:%M:%S")
     return {"ok": True, "name": name, "next_run": dt, "repeat": bool(repeat)}
@@ -104,10 +100,9 @@ def _parse_schedule(schedule: str) -> tuple:
 
 def list_tasks() -> list[dict]:
     _ensure_table()
-    conn = db._get_conn()
-    rows = conn.execute(
+    rows = db.fetchall(
         "SELECT id, name, task, schedule, next_run, repeat, enabled FROM scheduled_tasks ORDER BY next_run"
-    ).fetchall()
+    )
     tasks = []
     for id_, name, task, schedule, next_run, repeat, enabled in rows:
         dt = datetime.fromtimestamp(next_run, _tz()).strftime("%Y-%m-%d %H:%M")
@@ -120,9 +115,7 @@ def list_tasks() -> list[dict]:
 
 def remove(task_id: int) -> str:
     _ensure_table()
-    conn = db._get_conn()
-    conn.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
-    conn.commit()
+    db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
     return f"✓ Task #{task_id} removed"
 
 
@@ -140,29 +133,25 @@ def _register_heartbeat():
     if val == "0":  # enabled by default (None or "1" → enabled)
         return
     _ensure_table()
-    conn = db._get_conn()
-    row = conn.execute(
+    row = db.fetchone(
         "SELECT id FROM scheduled_tasks WHERE name=?", (HEARTBEAT_TASK_NAME,)
-    ).fetchone()
+    )
     if row:
         return  # already registered
     interval = config.get("heartbeat_interval_min")
     schedule = f"every {interval}m"
     next_run = time.time() + interval * 60
-    conn.execute(
+    db.execute(
         "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,1,1)",
         (HEARTBEAT_TASK_NAME, HEARTBEAT_TASK_NAME, schedule, next_run)
     )
-    conn.commit()
     _log.info(f"heartbeat registered: every {interval}m")
 
 
 def _unregister_heartbeat():
     """Remove heartbeat task from scheduler."""
     _ensure_table()
-    conn = db._get_conn()
-    conn.execute("DELETE FROM scheduled_tasks WHERE name=?", (HEARTBEAT_TASK_NAME,))
-    conn.commit()
+    db.execute("DELETE FROM scheduled_tasks WHERE name=?", (HEARTBEAT_TASK_NAME,))
     _log.info("heartbeat unregistered")
 
 
@@ -216,27 +205,25 @@ def _loop():
 def _check_and_run():
     """Check for due tasks and execute them."""
     _ensure_table()
-    conn = db._get_conn()
     now = time.time()
 
-    rows = conn.execute(
+    rows = db.fetchall(
         "SELECT id, name, task, schedule, repeat FROM scheduled_tasks WHERE enabled=1 AND next_run<=?",
         (now,)
-    ).fetchall()
+    )
 
     for id_, name, task, schedule, repeat in rows:
         # Pre-reschedule to prevent duplicate execution if task takes >30s
         if repeat:
             _, interval = _parse_schedule(schedule)
             next_run = now + (interval if interval else 3600)
-            conn.execute(
+            db.execute(
                 "UPDATE scheduled_tasks SET next_run=? WHERE id=?",
                 (next_run, id_)
             )
         else:
             # Disable one-time task before execution
-            conn.execute("UPDATE scheduled_tasks SET enabled=0 WHERE id=?", (id_,))
-        conn.commit()
+            db.execute("UPDATE scheduled_tasks SET enabled=0 WHERE id=?", (id_,))
 
         # Execute task
         _log.info(f"cron firing: #{id_} '{name}' → {task[:80]}")
@@ -252,10 +239,9 @@ def _check_and_run():
 
         # Finalize
         if repeat:
-            conn.execute("UPDATE scheduled_tasks SET last_run=? WHERE id=?", (now, id_))
+            db.execute("UPDATE scheduled_tasks SET last_run=? WHERE id=?", (now, id_))
         else:
-            conn.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
-        conn.commit()
+            db.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
 
 
 def _execute_task(task_desc: str) -> str:

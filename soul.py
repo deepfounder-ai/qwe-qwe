@@ -153,9 +153,7 @@ def remove_trait(name: str) -> str:
     db.kv_set("soul:_custom_traits", json.dumps(custom))
 
     # Remove from DB and runtime
-    conn = db._get_conn()
-    conn.execute("DELETE FROM kv WHERE key=?", (f"soul:{name}",))
-    conn.commit()
+    db.execute("DELETE FROM kv WHERE key=?", (f"soul:{name}",))
 
     DEFAULTS.pop(name, None)
     TRAIT_DESCRIPTIONS.pop(name, None)

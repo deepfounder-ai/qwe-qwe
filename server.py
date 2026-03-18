@@ -468,9 +468,7 @@ async def update_user_profile(request: Request):
         key = req["delete"].strip().lower().replace(" ", "_")
         db.kv_set(f"user:{key}", "")
         # Actually delete by setting empty — or use raw SQL
-        conn = db._get_conn()
-        conn.execute("DELETE FROM kv WHERE key=?", (f"user:{key}",))
-        conn.commit()
+        db.execute("DELETE FROM kv WHERE key=?", (f"user:{key}",))
         return {"ok": True, "deleted": key}
     key = req.get("key", "").strip().lower().replace(" ", "_")
     value = req.get("value", "").strip()
@@ -838,15 +836,14 @@ async def list_threads(include_archived: bool = False):
     """List all threads with stats."""
     all_threads = threads.list_all(include_archived=include_archived)
     # Bulk-fetch thread stats in one query instead of 4N separate queries
-    conn = db._get_conn()
-    stats_rows = conn.execute("""
+    stats_rows = db.fetchall("""
         SELECT thread_id,
                COALESCE(SUM(LENGTH(content)), 0) / 4 AS est_tokens,
                SUM(CASE WHEN role='user' THEN 1 ELSE 0 END) AS user_msgs,
                SUM(CASE WHEN role='assistant' THEN 1 ELSE 0 END) AS asst_msgs,
                SUM(CASE WHEN role='tool' THEN 1 ELSE 0 END) AS tool_msgs
         FROM messages GROUP BY thread_id
-    """).fetchall()
+    """)
     stats = {r[0]: {"est_tokens": r[1], "user_messages": r[2],
                      "assistant_messages": r[3], "tool_calls": r[4]} for r in stats_rows}
     for t in all_threads:
@@ -876,16 +873,15 @@ async def thread_stats(thread_id: str):
     t = threads.get(thread_id)
     if not t:
         return JSONResponse({"error": "not found"}, status_code=404)
-    conn = db._get_conn()
     # Count user/assistant messages
-    user_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='user'", (thread_id,)).fetchone()[0]
-    asst_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='assistant'", (thread_id,)).fetchone()[0]
-    tool_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='tool'", (thread_id,)).fetchone()[0]
+    user_msgs = db.fetchone("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='user'", (thread_id,))[0]
+    asst_msgs = db.fetchone("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='assistant'", (thread_id,))[0]
+    tool_msgs = db.fetchone("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='tool'", (thread_id,))[0]
     # First and last message time
-    first = conn.execute("SELECT ts FROM messages WHERE thread_id=? ORDER BY id ASC LIMIT 1", (thread_id,)).fetchone()
-    last = conn.execute("SELECT ts FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT 1", (thread_id,)).fetchone()
+    first = db.fetchone("SELECT ts FROM messages WHERE thread_id=? ORDER BY id ASC LIMIT 1", (thread_id,))
+    last = db.fetchone("SELECT ts FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT 1", (thread_id,))
     # Estimate tokens from content length (rough: 1 token ≈ 4 chars)
-    row = conn.execute("SELECT COALESCE(SUM(LENGTH(content)),0) FROM messages WHERE thread_id=?", (thread_id,)).fetchone()
+    row = db.fetchone("SELECT COALESCE(SUM(LENGTH(content)),0) FROM messages WHERE thread_id=?", (thread_id,))
     est_tokens = row[0] // 4 if row else 0
 
     return {
@@ -913,10 +909,8 @@ async def set_thread_model(thread_id: str, request: Request):
         meta["model"] = model
     else:
         meta.pop("model", None)  # clear override
-    conn = db._get_conn()
     import json as _j
-    conn.execute("UPDATE threads SET meta=? WHERE id=?", (_j.dumps(meta), thread_id))
-    conn.commit()
+    db.execute("UPDATE threads SET meta=? WHERE id=?", (_j.dumps(meta), thread_id))
     return {"ok": True, "model": model or None}
 
 

@@ -72,12 +72,10 @@ def create(name: str, meta: dict | None = None) -> dict:
     _ensure_table()
     tid = _gen_id()
     now = time.time()
-    conn = db._get_conn()
-    conn.execute(
+    db.execute(
         "INSERT INTO threads (id, name, created_at, updated_at, meta) VALUES (?,?,?,?,?)",
         (tid, name, now, now, json.dumps(meta or {}))
     )
-    conn.commit()
     _log.info(f"thread created: {tid} '{name}'")
     return {"id": tid, "name": name, "created_at": now, "updated_at": now, "archived": False, "messages": 0}
 
@@ -85,16 +83,15 @@ def create(name: str, meta: dict | None = None) -> dict:
 def get(tid: str) -> dict | None:
     """Get thread by id."""
     _ensure_table()
-    conn = db._get_conn()
-    row = conn.execute(
+    row = db.fetchone(
         "SELECT id, name, created_at, updated_at, archived, meta FROM threads WHERE id=?",
         (tid,)
-    ).fetchone()
+    )
     if not row:
         return None
-    msg_count = conn.execute(
+    msg_count = db.fetchone(
         "SELECT COUNT(*) FROM messages WHERE thread_id=?", (tid,)
-    ).fetchone()[0]
+    )[0]
     return {
         "id": row[0], "name": row[1], "created_at": row[2], "updated_at": row[3],
         "archived": bool(row[4]), "meta": json.loads(row[5] or "{}"), "messages": msg_count,
@@ -104,7 +101,6 @@ def get(tid: str) -> dict | None:
 def list_all(include_archived: bool = False) -> list[dict]:
     """List all threads, sorted by last activity."""
     _ensure_table()
-    conn = db._get_conn()
     # Single query with subqueries — avoids N+1 problem (was 2N+1 queries)
     where = "" if include_archived else "WHERE t.archived=0"
     q = f"""
@@ -122,7 +118,7 @@ def list_all(include_archived: bool = False) -> list[dict]:
         {where}
         ORDER BY CASE WHEN t.id='default' THEN 0 ELSE 1 END, t.updated_at DESC
     """
-    rows = conn.execute(q).fetchall()
+    rows = db.fetchall(q)
 
     active = get_active_id()
     result = []
@@ -141,9 +137,7 @@ def list_all(include_archived: bool = False) -> list[dict]:
 def rename(tid: str, name: str) -> str:
     """Rename a thread."""
     _ensure_table()
-    conn = db._get_conn()
-    conn.execute("UPDATE threads SET name=?, updated_at=? WHERE id=?", (name, time.time(), tid))
-    conn.commit()
+    db.execute("UPDATE threads SET name=?, updated_at=? WHERE id=?", (name, time.time(), tid))
     _log.info(f"thread renamed: {tid} → '{name}'")
     return f"✓ Renamed to '{name}'"
 
@@ -153,9 +147,7 @@ def archive(tid: str) -> str:
     _ensure_table()
     if tid == DEFAULT_THREAD_ID:
         return "✗ Can't archive the default thread"
-    conn = db._get_conn()
-    conn.execute("UPDATE threads SET archived=1, updated_at=? WHERE id=?", (time.time(), tid))
-    conn.commit()
+    db.execute("UPDATE threads SET archived=1, updated_at=? WHERE id=?", (time.time(), tid))
 
     # If archiving active thread, switch to default
     if tid == get_active_id():
@@ -170,10 +162,8 @@ def delete(tid: str) -> str:
     _ensure_table()
     if tid == DEFAULT_THREAD_ID:
         return "✗ Can't delete the default thread"
-    conn = db._get_conn()
-    conn.execute("DELETE FROM messages WHERE thread_id=?", (tid,))
-    conn.execute("DELETE FROM threads WHERE id=?", (tid,))
-    conn.commit()
+    db.execute("DELETE FROM messages WHERE thread_id=?", (tid,))
+    db.execute("DELETE FROM threads WHERE id=?", (tid,))
 
     if tid == get_active_id():
         switch(DEFAULT_THREAD_ID)
@@ -199,8 +189,7 @@ def switch(tid: str) -> str:
     _ensure_table()
 
     # Verify thread exists
-    conn = db._get_conn()
-    row = conn.execute("SELECT name FROM threads WHERE id=?", (tid,)).fetchone()
+    row = db.fetchone("SELECT name FROM threads WHERE id=?", (tid,))
     if not row:
         return f"✗ Thread '{tid}' not found"
 
@@ -215,6 +204,4 @@ def touch(tid: str | None = None):
     """Update thread's updated_at timestamp."""
     tid = tid or get_active_id()
     _ensure_table()
-    conn = db._get_conn()
-    conn.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), tid))
-    conn.commit()
+    db.execute("UPDATE threads SET updated_at=? WHERE id=?", (time.time(), tid))

@@ -781,8 +781,7 @@ def _run_doctor_checks() -> str:
 
     # SQLite
     try:
-        conn = _db._get_conn()
-        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        msg_count = _db.fetchone("SELECT COUNT(*) FROM messages")[0]
         ok("SQLite", f"{msg_count} messages")
     except Exception as e:
         fail("SQLite", str(e)[:60])
