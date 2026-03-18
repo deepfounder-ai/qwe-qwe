@@ -824,12 +824,14 @@ def _run_inner(user_input: str, thread_id: str | None,
         # Note: enable_thinking via extra_body is not reliably supported across providers.
         # Thinking is triggered via system prompt injection in _build_messages() instead.
         # The reasoning_content handler below still catches native thinking if a provider sends it.
+        presence_penalty = config.get("presence_penalty")
         stream = client.chat.completions.create(
             model=providers.get_model(),
             messages=messages,
             tools=all_tools,
             tool_choice="auto",
             temperature=soul.get_temperature(),
+            presence_penalty=presence_penalty,
             max_tokens=2048,
             stream=True,
         )
