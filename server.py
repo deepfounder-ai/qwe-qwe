@@ -304,11 +304,16 @@ async def status():
 
 def _check_version_sync() -> dict:
     """Check current version vs latest GitHub release (sync, for thread pool)."""
-    import importlib.metadata
+    # Read version from pyproject.toml (not importlib.metadata which caches stale values)
     try:
-        current = importlib.metadata.version("qwe-qwe")
+        from updater import _current_version
+        current = _current_version()
     except Exception:
-        current = app.version  # fallback to FastAPI version
+        try:
+            import importlib.metadata
+            current = importlib.metadata.version("qwe-qwe")
+        except Exception:
+            current = app.version
 
     # Check cached latest version (avoid hammering GitHub)
     cached = db.kv_get("version:latest")
