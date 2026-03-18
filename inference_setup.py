@@ -74,15 +74,15 @@ def recommend_model(gpu: dict) -> str:
     """Recommend a model based on available memory."""
     mem = gpu.get("vram_gb") or 0
     if mem >= 48:
-        return "qwen3:32b"
+        return "qwen3.5:32b"
     elif mem >= 12:
-        return "qwen3:14b"
+        return "qwen3.5:14b"
     elif mem >= 8:
-        return "qwen3:8b"
+        return "qwen3.5:8b"
     elif mem >= 4:
-        return "qwen3:4b"
+        return "qwen3.5:4b"
     else:
-        return "qwen3:1.7b"
+        return "qwen3.5:1.7b"
 
 
 def install_ollama() -> bool:
@@ -171,11 +171,11 @@ def run_wizard():
     mem = gpu.get("vram_gb") or 0
     recommended = recommend_model(gpu)
     models = [
-        ("qwen3:1.7b", "1.7B", "~1.5GB", "Very fast, basic tasks"),
-        ("qwen3:4b", "4B", "~3GB", "Good balance for low memory"),
-        ("qwen3:8b", "8B", "~5GB", "Strong general purpose"),
-        ("qwen3:14b", "14B", "~9GB", "Best quality for 12-16GB (recommended for most)"),
-        ("qwen3:32b", "32B", "~20GB", "Maximum quality, needs 32GB+"),
+        ("qwen3.5:1.7b", "1.7B", "~1.5GB", "Very fast, basic tasks"),
+        ("qwen3.5:4b", "4B", "~3GB", "Good balance for low memory"),
+        ("qwen3.5:8b", "8B", "~5GB", "Strong general purpose"),
+        ("qwen3.5:14b", "14B", "~9GB", "Best quality for 12-16GB (recommended for most)"),
+        ("qwen3.5:32b", "32B", "~20GB", "Maximum quality, needs 32GB+"),
     ]
 
     console.print(f"\n  [cyan]Choose a model:[/]\n")
