@@ -1234,9 +1234,12 @@ async def inference_status():
     }
 
 
+_pull_status: dict = {}  # model -> {status, progress, detail}
+
+
 @app.post("/api/inference/pull")
 async def inference_pull(request: Request):
-    """Pull a model via Ollama (runs in background)."""
+    """Pull a model via Ollama with progress tracking."""
     data = await request.json()
     model = data.get("model", "")
     if not model:
@@ -1248,12 +1251,40 @@ async def inference_pull(request: Request):
     if not inference_setup._check_ollama_running():
         inference_setup.start_ollama()
 
-    # Pull in background thread
+    _pull_status[model] = {"status": "pulling", "progress": 0, "detail": "Starting..."}
+
     import threading
     def _do_pull():
-        inference_setup.pull_model(model)
+        import requests as _req
+        try:
+            resp = _req.post("http://localhost:11434/api/pull",
+                             json={"name": model}, stream=True, timeout=600)
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    total = d.get("total", 0)
+                    completed = d.get("completed", 0)
+                    pct = int(completed / total * 100) if total else 0
+                    _pull_status[model] = {
+                        "status": "pulling", "progress": pct,
+                        "detail": f"{d.get('status', '')} {pct}%"
+                    }
+                except Exception:
+                    pass
+            _pull_status[model] = {"status": "done", "progress": 100, "detail": "Complete"}
+        except Exception as e:
+            _pull_status[model] = {"status": "error", "progress": 0, "detail": str(e)[:100]}
+
     threading.Thread(target=_do_pull, daemon=True).start()
-    return {"ok": True, "message": f"Pulling {model}... Check Ollama logs for progress."}
+    return {"ok": True, "message": f"Pulling {model}..."}
+
+
+@app.get("/api/inference/pull-status")
+async def inference_pull_status(model: str = ""):
+    """Get pull progress for a model."""
+    return _pull_status.get(model, {"status": "idle", "progress": 0, "detail": ""})
 
 
 @app.post("/api/inference/configure")
