@@ -1733,8 +1733,8 @@ async function loadInferenceStatus() {
     try {
       const sres = await fetch('/api/settings');
       const settings = await sres.json();
-      if (settings.ollama_num_ctx) document.getElementById('infNumCtx').value = settings.ollama_num_ctx;
-      if (settings.embed_model) document.getElementById('infEmbedModel').value = settings.embed_model;
+      if (settings.ollama_num_ctx) document.getElementById('infNumCtx').value = settings.ollama_num_ctx.value || settings.ollama_num_ctx;
+      if (settings.embed_model) document.getElementById('infEmbedModel').value = settings.embed_model.value || settings.embed_model;
     } catch(e2) {}
   } catch(e) { console.error('inference status:', e); }
 }
