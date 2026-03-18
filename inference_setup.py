@@ -145,11 +145,18 @@ def start_ollama() -> bool:
 
 
 def configure_provider(model: str):
-    """Auto-configure qwe-qwe to use Ollama."""
-    import providers
+    """Auto-configure qwe-qwe to use Ollama (LLM + embedding)."""
+    import providers, config, db
     providers.add("ollama", url="http://localhost:11434/v1", key="ollama", models=[model])
     providers.switch("ollama")
     providers.set_model(model)
+    # Configure embedding to use Ollama too
+    config.EMBED_BASE_URL = "http://localhost:11434/v1"
+    config.EMBED_MODEL = "nomic-embed-text"
+    config.EMBED_API_KEY = "ollama"
+    db.kv_set("embed_base_url", config.EMBED_BASE_URL)
+    db.kv_set("embed_model", config.EMBED_MODEL)
+    db.kv_set("embed_api_key", config.EMBED_API_KEY)
 
 
 def run_wizard():
@@ -254,11 +261,20 @@ def run_wizard():
     else:
         console.print(f"  [dim]Skipped download. Run manually: ollama pull {model}[/]")
 
+    # Step 5b: Pull embedding model
+    console.print(f"\n  [cyan]Downloading embedding model (nomic-embed-text)...[/]")
+    if not pull_model("nomic-embed-text"):
+        console.print(f"  [yellow]⚠ Embedding download failed. Run manually: ollama pull nomic-embed-text[/]")
+    else:
+        console.print(f"  [green]✓ Embedding model ready[/]")
+
     # Step 6: Configure qwe-qwe
     console.print(f"\n  [cyan]Configuring qwe-qwe...[/]")
     configure_provider(model)
     console.print(f"  [green]✓ Provider: ollama (http://localhost:11434/v1)[/]")
     console.print(f"  [green]✓ Model: {model}[/]")
+    console.print(f"  [green]✓ Embedding: nomic-embed-text[/]")
+    console.print(f"  [green]✓ Context window: 16384 tokens[/]")
 
     # Done
     console.print(f"\n  [bold green]⚡ Setup complete![/]")

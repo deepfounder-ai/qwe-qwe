@@ -159,6 +159,8 @@ EDITABLE_SETTINGS = {
     "rag_chunk_overlap":    ("setting:rag_chunk_overlap",     int, 100,    "RAG chunk overlap in chars", 0, 500),
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
+    "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
+    "embed_model":          ("setting:embed_model",           str, "nomic-embed-text", "Embedding model name", "", ""),
 }
 
 

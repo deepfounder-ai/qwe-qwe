@@ -563,6 +563,21 @@ body {
           </div>
           <p class="desc" style="margin-top:12px">Or install via CLI: <code>qwe-qwe --setup-inference</code></p>
         </div>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-gear"></i> Inference Settings</div>
+          <div class="s-row">
+            <span class="s-row-label">Context window (num_ctx)</span>
+            <input class="s-input" id="infNumCtx" type="number" value="16384" min="2048" max="131072" style="width:100px" onchange="saveInfSettings()">
+          </div>
+          <div class="s-row">
+            <span class="s-row-label">Embedding model</span>
+            <input class="s-input" id="infEmbedModel" value="nomic-embed-text" style="max-width:200px" onchange="saveInfSettings()">
+          </div>
+          <div style="margin-top:8px">
+            <button class="btn-sm" onclick="infPullEmbed()">Pull embedding model</button>
+          </div>
+          <div id="infEmbedStatus" style="margin:8px 0;font-size:13px;color:var(--text-dim)"></div>
+        </div>
       </div>
 
       <!-- Model -->
@@ -1714,6 +1729,13 @@ async function loadInferenceStatus() {
       if (m.tag === d.recommended) opt.selected = true;
       sel.appendChild(opt);
     }
+    // Load saved inference settings
+    try {
+      const sres = await fetch('/api/settings');
+      const settings = await sres.json();
+      if (settings.ollama_num_ctx) document.getElementById('infNumCtx').value = settings.ollama_num_ctx;
+      if (settings.embed_model) document.getElementById('infEmbedModel').value = settings.embed_model;
+    } catch(e2) {}
   } catch(e) { console.error('inference status:', e); }
 }
 
@@ -1721,6 +1743,24 @@ async function infPullModel() {
   const model = document.getElementById('infModelSelect').value;
   const st = document.getElementById('infModelStatus');
   st.textContent = `Downloading ${model}... (check terminal for progress)`;
+  try {
+    const res = await fetch('/api/inference/pull', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
+    const d = await res.json();
+    st.textContent = d.message || d.error || 'Started';
+  } catch(e) { st.textContent = 'Error: ' + e.message; }
+}
+
+async function saveInfSettings() {
+  const numCtx = document.getElementById('infNumCtx').value;
+  const embedModel = document.getElementById('infEmbedModel').value;
+  await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ollama_num_ctx: parseInt(numCtx), embed_model: embedModel})});
+}
+
+async function infPullEmbed() {
+  const model = document.getElementById('infEmbedModel').value;
+  const st = document.getElementById('infEmbedStatus');
+  st.textContent = `Pulling ${model}...`;
   try {
     const res = await fetch('/api/inference/pull', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
     const d = await res.json();
