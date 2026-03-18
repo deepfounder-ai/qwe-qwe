@@ -26,8 +26,10 @@ from contextlib import asynccontextmanager
 # Global abort flag
 _abort_event = threading.Event()
 
-# Connected WebSocket clients for broadcast
+# Connected WebSocket clients for broadcast (thread-safe via copy-on-iterate)
+import threading as _threading
 _ws_clients: set = set()
+_ws_lock = _threading.Lock()
 _ws_loop: asyncio.AbstractEventLoop | None = None
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -975,7 +977,8 @@ async def websocket_chat(ws: WebSocket):
             return
 
     await ws.accept()
-    _ws_clients.add(ws)
+    with _ws_lock:
+        _ws_clients.add(ws)
     _ws_loop = asyncio.get_event_loop()
     _log.info(f"websocket client connected ({len(_ws_clients)} total)")
 
@@ -1069,7 +1072,8 @@ async def websocket_chat(ws: WebSocket):
     except Exception as e:
         _log.error(f"websocket error: {e}", exc_info=True)
     finally:
-        _ws_clients.discard(ws)
+        with _ws_lock:
+            _ws_clients.discard(ws)
         _log.info(f"websocket client disconnected ({len(_ws_clients)} left)")
 
 
@@ -1078,10 +1082,14 @@ async def websocket_chat(ws: WebSocket):
 async def _broadcast(msg: dict):
     """Send JSON to all connected WebSocket clients."""
     dead = set()
-    for ws in list(_ws_clients):  # copy to avoid mutation during iteration
+    with _ws_lock:
+        clients = list(_ws_clients)  # snapshot under lock
+    for ws in clients:
         if not await _ws_send_safe(ws, msg):
             dead.add(ws)
-    _ws_clients -= dead
+    if dead:
+        with _ws_lock:
+            _ws_clients -= dead
 
 
 def _cron_callback(name: str, task: str, result: str):

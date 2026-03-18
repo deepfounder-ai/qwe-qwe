@@ -1,5 +1,6 @@
 """Soul — agent personality as compact config with low/moderate/high levels."""
 
+import json
 from pathlib import Path
 import os
 import db
@@ -67,7 +68,6 @@ def load() -> dict:
 
 def _load_custom_traits():
     """Load user-defined traits from DB into DEFAULTS."""
-    import json
     raw = db.kv_get("soul:_custom_traits")
     if not raw:
         return
@@ -98,7 +98,6 @@ def save(key: str, value) -> str:
 
 def add_trait(name: str, low: str = "low", high: str = "high", value: str = "moderate") -> str:
     """Add a custom personality trait."""
-    import json
     name = name.lower().strip()
     if not name or not name.isalpha():
         return "✗ Trait name must be alphabetic"
@@ -131,7 +130,6 @@ def add_trait(name: str, low: str = "low", high: str = "high", value: str = "mod
 
 def remove_trait(name: str) -> str:
     """Remove a custom trait. Built-in traits cannot be removed."""
-    import json
     name = name.lower().strip()
 
     # Check if it's custom
@@ -174,7 +172,8 @@ def get_temperature() -> float:
     return LEVEL_TEMP.get(level, 0.6)
 
 
-import json  # ensure available at module level
+
+
 
 
 def _system_info() -> str:

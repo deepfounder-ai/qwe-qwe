@@ -84,7 +84,8 @@ def _search_impl(vector: list[float], limit: int,
     """Core search using pre-computed vector."""
     try:
         qc = _get_qdrant()
-    except Exception:
+    except Exception as e:
+        _log.warning(f"qdrant unavailable for search: {e}")
         return []
 
     conditions = []
@@ -132,7 +133,8 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
     """
     try:
         vector = _embed(query)
-    except Exception:
+    except Exception as e:
+        _log.warning(f"embedding unavailable for search: {e}")
         return []
     return _search_impl(vector, limit, tag, thread_id)
 
@@ -186,8 +188,8 @@ def save(text: str, tag: str = "general", dedup: bool = True,
                     )],
                 )
                 return str(existing.id)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug(f"dedup check failed, saving as new: {e}")
 
     point_id = str(uuid.uuid4())
     qc.upsert(

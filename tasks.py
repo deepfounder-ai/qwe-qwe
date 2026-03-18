@@ -92,6 +92,9 @@ def _save_result(task_id: int, task_desc: str, status: str, result: str):
             "result": result,
             "ts": time.time(),
         })
+        # Prevent unbounded growth — keep last 100 results
+        while len(_results) > 100:
+            _results.pop(0)
 
 
 def _worker():
