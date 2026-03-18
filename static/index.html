@@ -499,6 +499,7 @@ body {
   <div class="settings">
     <div class="settings-nav">
       <div class="settings-nav-item active" onclick="showSection('soul')"><span class="nav-icon"><i class="ph ph-dna"></i></span><span>Soul</span></div>
+      <div class="settings-nav-item" onclick="showSection('inference')"><span class="nav-icon"><i class="ph ph-cpu"></i></span><span>Inference</span></div>
       <div class="settings-nav-item" onclick="showSection('model')"><span class="nav-icon"><i class="ph ph-brain"></i></span><span>Model</span></div>
       <div class="settings-nav-item" onclick="showSection('skills')"><span class="nav-icon"><i class="ph ph-lightning"></i></span><span>Skills</span></div>
       <div class="settings-nav-item" onclick="showSection('threads')"><span class="nav-icon"><i class="ph ph-chats-circle"></i></span><span>Threads</span></div>
@@ -536,6 +537,31 @@ body {
             <input class="s-input" id="newTraitHigh" placeholder="high label (e.g. savage)" style="width:150px">
             <button class="s-btn primary" onclick="addTrait()">Add</button>
           </div>
+        </div>
+      </div>
+
+      <!-- Inference Setup -->
+      <div class="settings-section" id="sec-inference">
+        <h2>Inference Setup</h2>
+        <p class="desc">Install and configure a local inference backend (Ollama).</p>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-cpu"></i> Hardware</div>
+          <div class="s-row"><span class="s-row-label">GPU</span><span id="infGpu">detecting...</span></div>
+          <div class="s-row"><span class="s-row-label">Memory</span><span id="infMem">—</span></div>
+          <div class="s-row"><span class="s-row-label">Ollama</span><span id="infOllama">—</span></div>
+        </div>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-package"></i> Model</div>
+          <div class="s-row">
+            <span class="s-row-label">Select model</span>
+            <select class="s-select" id="infModelSelect" style="max-width:220px"></select>
+          </div>
+          <div id="infModelStatus" style="margin:8px 0;font-size:13px;color:var(--text-dim)"></div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="btn-sm" onclick="infPullModel()">Download</button>
+            <button class="btn-sm" onclick="infConfigure()" style="background:var(--accent);color:#fff">Use this model</button>
+          </div>
+          <p class="desc" style="margin-top:12px">Or install via CLI: <code>qwe-qwe --setup-inference</code></p>
         </div>
       </div>
 
@@ -1092,6 +1118,7 @@ async function loadAllSettings() {
   loadSettingsHeartbeat();
   loadSettingsStats();
   loadSettingsSystem();
+  loadInferenceStatus();
 }
 
 // Soul
@@ -1662,6 +1689,55 @@ const STAT_LABELS = {
   self_check_fixes: {label: 'Self-check fixes', icon: 'ph-magnifying-glass'},
   tool_errors: {label: 'Tool errors', icon: 'ph-warning'},
 };
+
+// ── Inference Setup ──
+async function loadInferenceStatus() {
+  try {
+    const res = await fetch('/api/inference/status');
+    const d = await res.json();
+    const g = d.gpu;
+    document.getElementById('infGpu').textContent = g.name || 'Unknown';
+    document.getElementById('infMem').textContent = g.vram_gb ? g.vram_gb + ' GB' : 'Unknown';
+    const olEl = document.getElementById('infOllama');
+    if (d.ollama_running) olEl.innerHTML = '<span style="color:var(--green)">Running</span>';
+    else if (d.ollama_installed) olEl.innerHTML = '<span style="color:var(--yellow)">Installed (not running)</span>';
+    else olEl.innerHTML = '<span style="color:var(--red)">Not installed</span>';
+
+    const sel = document.getElementById('infModelSelect');
+    sel.innerHTML = '';
+    for (const m of d.models) {
+      const opt = document.createElement('option');
+      opt.value = m.tag;
+      const installed = d.available_models.includes(m.tag) ? ' ✓' : '';
+      const rec = m.tag === d.recommended ? ' ★' : '';
+      opt.textContent = `${m.tag} (${m.ram})${installed}${rec}`;
+      if (m.tag === d.recommended) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  } catch(e) { console.error('inference status:', e); }
+}
+
+async function infPullModel() {
+  const model = document.getElementById('infModelSelect').value;
+  const st = document.getElementById('infModelStatus');
+  st.textContent = `Downloading ${model}... (check terminal for progress)`;
+  try {
+    const res = await fetch('/api/inference/pull', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
+    const d = await res.json();
+    st.textContent = d.message || d.error || 'Started';
+  } catch(e) { st.textContent = 'Error: ' + e.message; }
+}
+
+async function infConfigure() {
+  const model = document.getElementById('infModelSelect').value;
+  const st = document.getElementById('infModelStatus');
+  try {
+    const res = await fetch('/api/inference/configure', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
+    const d = await res.json();
+    st.innerHTML = d.ok ? `<span style="color:var(--green)">✓ ${d.message}</span>` : `<span style="color:var(--red)">${d.error}</span>`;
+    if (d.ok) setTimeout(() => location.reload(), 1000);
+  } catch(e) { st.textContent = 'Error: ' + e.message; }
+}
 
 async function loadSettingsStats() {
   try {

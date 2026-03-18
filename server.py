@@ -1193,6 +1193,82 @@ def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
     return result.reply
 
 
+# ── Inference setup endpoints ──
+
+@app.get("/api/inference/status")
+async def inference_status():
+    """Detect hardware and check Ollama status."""
+    import inference_setup
+    gpu = inference_setup.detect_gpu()
+    recommended = inference_setup.recommend_model(gpu)
+    ollama_installed = inference_setup._check_ollama_installed()
+    ollama_running = inference_setup._check_ollama_running() if ollama_installed else False
+
+    # List available models from Ollama if running
+    available_models = []
+    if ollama_running:
+        try:
+            import requests as _req
+            r = _req.get("http://localhost:11434/api/tags", timeout=3)
+            if r.ok:
+                available_models = [m["name"] for m in r.json().get("models", [])]
+        except Exception:
+            pass
+
+    models = [
+        {"tag": "qwen3.5:0.8b", "size": "0.8B", "ram": "~1GB", "desc": "Minimal, very fast"},
+        {"tag": "qwen3.5:2b", "size": "2B", "ram": "~2.7GB", "desc": "Light, basic tasks"},
+        {"tag": "qwen3.5:4b", "size": "4B", "ram": "~3.4GB", "desc": "Good balance"},
+        {"tag": "qwen3.5:9b", "size": "9B", "ram": "~6.6GB", "desc": "Best quality/speed ratio"},
+        {"tag": "qwen3.5:27b", "size": "27B", "ram": "~17GB", "desc": "High quality, 24GB+"},
+        {"tag": "qwen3.5:35b", "size": "35B", "ram": "~24GB", "desc": "Maximum, 48GB+"},
+    ]
+
+    return {
+        "gpu": gpu,
+        "recommended": recommended,
+        "ollama_installed": ollama_installed,
+        "ollama_running": ollama_running,
+        "available_models": available_models,
+        "models": models,
+    }
+
+
+@app.post("/api/inference/pull")
+async def inference_pull(request: Request):
+    """Pull a model via Ollama (runs in background)."""
+    data = await request.json()
+    model = data.get("model", "")
+    if not model:
+        return JSONResponse({"error": "model required"}, status_code=400)
+
+    import inference_setup
+    if not inference_setup._check_ollama_installed():
+        return JSONResponse({"error": "Ollama not installed. Run: qwe-qwe --setup-inference"}, status_code=400)
+    if not inference_setup._check_ollama_running():
+        inference_setup.start_ollama()
+
+    # Pull in background thread
+    import threading
+    def _do_pull():
+        inference_setup.pull_model(model)
+    threading.Thread(target=_do_pull, daemon=True).start()
+    return {"ok": True, "message": f"Pulling {model}... Check Ollama logs for progress."}
+
+
+@app.post("/api/inference/configure")
+async def inference_configure(request: Request):
+    """Configure qwe-qwe to use Ollama with selected model."""
+    data = await request.json()
+    model = data.get("model", "")
+    if not model:
+        return JSONResponse({"error": "model required"}, status_code=400)
+
+    import inference_setup
+    inference_setup.configure_provider(model)
+    return {"ok": True, "message": f"Configured: ollama / {model}"}
+
+
 @app.get("/api/telegram/status")
 async def telegram_status():
     return telegram_bot.status()
