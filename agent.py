@@ -612,7 +612,7 @@ def _notify_compaction(event: str, data: dict):
 
 
 # Token budget settings
-SYSTEM_RESERVE = 2000      # system prompt + tools
+SYSTEM_RESERVE = 3500      # system prompt (~1500 tokens) + tool schemas + auto-context
 RECENT_RESERVE = 2         # always keep last N user+assistant pairs
 
 

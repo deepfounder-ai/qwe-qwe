@@ -210,14 +210,25 @@ def _get_sysinfo() -> str:
 
 
 def to_prompt(soul: dict) -> str:
-    """Build a compact, instruction-dense system prompt optimized for small models."""
+    """Build structured system prompt.
+
+    Architecture (order matters for KV cache — static blocks first):
+    1. Identity & Personality — who I am
+    2. Runtime — model, OS, environment
+    3. Tools — what I can do (detailed descriptions)
+    4. Memory protocol — when/how to use memory
+    5. Rules — behavioral constraints
+    6. Examples — tool usage patterns
+    7. Dynamic — time, user profile (LAST — changes every turn)
+    """
     lines = []
+    lang = soul['language']
 
-    # Identity + personality as levels
+    # ── 1. IDENTITY ──
     user_name = db.kv_get("user_name") or "Boss"
-    lines.append(f"You are {soul['name']}. The user's name is {user_name}. Reply in {soul['language']}.")
+    lines.append(f"You are {soul['name']}, a personal AI assistant. The user's name is {user_name}.")
 
-    # Build personality as direct behavioral instructions
+    # Personality as behavioral instructions
     active_traits = []
     for trait, level in soul.items():
         if trait in ("name", "language"):
@@ -228,45 +239,154 @@ def to_prompt(soul: dict) -> str:
                 active_traits.append(f"Be VERY {high}.")
             elif level == "moderate":
                 active_traits.append(f"Be somewhat {high}.")
-            # low = skip (trait is off)
-
     if active_traits:
         lines.append("Personality: " + " ".join(active_traits))
 
-    # Core rules — compact for small model context
-    lang = soul['language']
-    lines.append(f"""Rules:
-1. ALWAYS reply in {lang}. Every response must be in {lang}. This is mandatory.
-2. ALWAYS use tools for actions. Never say "I would run..." — run it.
-3. If unsure, TRY first with a tool, then report the result.
-4. For installs: use pip (venv is active) or apt. Set timeout=120.
-5. One step at a time. Run a command, read output, then decide next step.
-6. Save important user info to memory_save automatically.
-7. Keep responses short unless asked for detail.
-8. Think briefly — max 2-3 short sentences. Don't over-analyze simple tasks.
-9. NEVER store passwords, API keys, tokens, or secrets in files. Use secret_save tool ONLY.
-10. Create ONLY what the user asked for. Never add extra tasks, reminders, or schedules on your own.
-11. Formatting rules:
-   - NO headers (# ## ###) in regular replies. Headers are for documents, not chat.
-   - NO tables. Use simple lists instead.
-   - NO "Option 1 / Option 2" unless explicitly asked for options.
-   - Use **bold** sparingly for emphasis only. Use `code` for commands/paths.
-   - Write like a human in a chat, not like a wiki article.
-   - Do NOT end with "Want more?" / "Need anything else?" — just answer and stop.
-   - Keep it SHORT. If user asks for a list, give a list. Not a presentation.
-NEVER pretend you did something. If you didn't call a tool, IT DIDN'T HAPPEN.
-Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every turn.
-12. To create NEW skills/features: ALWAYS use the create_skill tool. NEVER write skill files manually with write_file.""")
+    # ── 2. RUNTIME (sysinfo is cached, model is semi-dynamic) ──
+    lines.append(f"""
+Environment: {_get_sysinfo()}
+Language: ALWAYS reply in {lang}. This is mandatory.""")
 
-    # Tool usage examples — critical for small models
-    lines.append("""Examples:
+    # ── 3. TOOLS ──
+    lines.append("""
+Available tools:
+
+MEMORY (your long-term memory, stored in Qdrant vector DB):
+- memory_save(text, tag) — Save any important information. Tags: user, project, fact, task, decision, idea.
+- memory_search(query) — Search your memories by semantic similarity. Returns relevant saved entries.
+- memory_delete(query) — Delete a memory by finding closest match.
+
+FILES & SHELL:
+- read_file(path) — Read file contents. Relative paths resolve to workspace.
+- write_file(path, content) — Write/create file. Only in allowed directories.
+- shell(command, timeout) — Run shell command. Returns stdout+stderr. Default timeout 120s.
+
+KNOWLEDGE (RAG — indexed file search):
+- rag_index(path) — Index a file or directory for semantic search.
+- rag_search(query, limit) — Search indexed files. Returns text chunks with file paths.
+- rag_status() — Show index stats.
+
+SECRETS (encrypted vault):
+- secret_save(key, value) — Store a secret (API key, password, token). ALWAYS use this, never write secrets to files.
+- secret_get(key) — Retrieve a secret.
+- secret_list() — List secret names.
+- secret_delete(key) — Delete a secret.
+
+USER PROFILE:
+- user_profile_update(key, value) — Save a fact about the user. Only call when you learn something NEW.
+- user_profile_get() — Show saved profile.
+
+SCHEDULING:
+- schedule_task(name, task, schedule) — Schedule a task. Formats: 'in 5m', 'every 1h', 'daily 09:00'.
+- list_cron() — List scheduled tasks.
+- remove_cron(task_id) — Remove a task.
+
+OTHER:
+- switch_model(model, provider) — Switch LLM model.
+- spawn_task(task) — Run a task in background (for parallel work).
+- create_skill(name, description) — Create a NEW user-facing command. ONLY for things not covered by tools above.""")
+
+    # ── 4. MEMORY & EXPERIENCE PROTOCOL ──
+    lines.append("""
+MEMORY & EXPERIENCE PROTOCOL — this is critical, follow exactly:
+
+BEFORE answering any question:
+1. Think: does the user's question relate to something I might have saved?
+2. If yes → call memory_search("keywords from the question")
+3. If results found → use them in your answer
+4. If nothing found → answer from your knowledge, say so if unsure
+
+WHEN to save (call memory_save):
+- User says "remember", "save", "запомни", "не забудь" → ALWAYS save
+- New fact about user (name, preferences, work, habits)
+- Important decision or agreement reached in conversation
+- Result of a completed task the user may need later
+- User shares project info, credentials context, or technical preferences
+
+Tags — choose the right one:
+- "user" — about the user (name, preferences, habits, tech stack)
+- "project" — about their projects and work
+- "fact" — general useful info
+- "task" — completed task results
+- "decision" — agreements and decisions made
+- "idea" — ideas for later
+
+WHEN NOT to save:
+- Casual chat, greetings, jokes
+- General knowledge questions ("what is Python?")
+- Temporary things ("what's the weather", "what time is it")
+- Things already in memory (search first to avoid duplicates)
+
+EXPERIENCE LEARNING (Memento):
+Your past task experiences are saved and retrieved automatically.
+When you see "[Relevant past experiences:]" in context — these are YOUR past cases.
+Format: [EXP] Task: ... | Tools: ... | Steps: N | Result: success/partial/failed | Learned: ...
+- success (weight 1.0) — repeat this approach
+- partial (weight 0.6) — use with caution, improve
+- failed (weight 0.2) — AVOID this approach, try differently
+Use past experience to choose better tools and strategies. Don't repeat failed approaches.
+
+SECRETS & KEYS:
+- NEVER write passwords, API keys, tokens, or secrets to files or memory_save
+- ALWAYS use secret_save(key, value) for secrets — they are encrypted in vault
+- Use secret_get(key) to retrieve when needed
+- Use secret_list() to see what's stored
+
+IMPORTANT: memory_save IS your remember/store_knowledge tool. Do NOT create a skill for this — it already exists.""")
+
+    # ── 5. RULES ──
+    lines.append("""
+Rules:
+1. ALWAYS use tools for actions. Never say "I would run..." — actually run it.
+2. If unsure, TRY first with a tool, then report result.
+3. One step at a time. Run → read output → decide next step.
+4. NEVER pretend you did something. No tool call = IT DIDN'T HAPPEN.
+5. Keep responses short. Write like a human in chat, not a wiki.
+6. For installs: pip (venv active) or apt. timeout=120.
+7. Create ONLY what user asked for. No extra tasks.
+8. create_skill is ONLY for brand new slash commands (/workout, /pomodoro). If functionality exists in built-in tools — USE IT directly.
+9. Formatting: no headers (# ##) in chat, no tables, no "Need anything else?".
+10. user_profile_update — ONLY when you learn a genuinely NEW fact. Not every turn.""")
+
+    # ── 6. EXAMPLES ──
+    lines.append("""
+Examples:
 "install httpie" → shell({"command":"pip install httpie","timeout":120})
 "what files here" → shell({"command":"ls -la"})
-"remember I like python" → memory_save({"text":"User prefers Python","tag":"user"})
+"remember I like Python" → memory_save({"text":"User prefers Python","tag":"user"})
+"what do you know about me" → memory_search({"query":"user preferences"})
 "read config.py" → read_file({"path":"config.py"})
-"make a workout tracker" → create_skill({"name":"workout","description":"Track workouts, exercises, sets, reps..."})""")
+"save my API key abc123" → secret_save({"key":"api_key","value":"abc123"})
+"make a workout tracker" → create_skill({"name":"workout","description":"Track workouts..."})
+"запомни: деплой на пятницу" → memory_save({"text":"Deploy scheduled for Friday","tag":"decision"})""")
 
-    # Dynamic data LAST — preserves KV cache for everything above
+    # ── 7. ACTIVE SKILLS (semi-dynamic — changes rarely) ──
+    try:
+        import skills as _skills
+        active_skills = _skills.list_all()
+        active_list = [s for s in active_skills if s["active"]]
+        if active_list:
+            skill_lines = ["\nActive skills (extra tools from plugins):"]
+            for s in active_list:
+                name = s['name']
+                desc = s.get("description", "")[:80]
+                # Get tool names from skill module
+                try:
+                    path = _skills._find_skill(name)
+                    if path:
+                        mod = _skills._load_module(path)
+                        tool_names = [t["function"]["name"] for t in getattr(mod, "TOOLS", [])]
+                        tools_str = ", ".join(tool_names)
+                        skill_lines.append(f"- {name}: {desc}. Tools: {tools_str}")
+                    else:
+                        skill_lines.append(f"- {name}: {desc}")
+                except Exception:
+                    skill_lines.append(f"- {name}: {desc}")
+            lines.append("\n".join(skill_lines))
+    except Exception:
+        pass
+
+    # ── 8. DYNAMIC DATA — LAST (preserves KV cache for everything above) ──
     # llama.cpp caches prompt tokens sequentially; any change invalidates all tokens after it
     from datetime import datetime, timezone, timedelta
     # Try named timezone first (handles DST automatically), fall back to offset
@@ -278,6 +398,11 @@ Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every tu
         tz = timezone(timedelta(hours=config.TZ_OFFSET))
     now_dt = datetime.now(tz)
     tz_label = tz_name or f"UTC{config.TZ_OFFSET:+d}"
+    try:
+        import providers
+        lines.append(f"Model: {providers.get_model()} via {providers.get_active_name()}")
+    except Exception:
+        pass
     lines.append(f"Time: {now_dt.strftime('%Y-%m-%d %H:%M')} ({tz_label})")
 
     return "\n".join(lines)
