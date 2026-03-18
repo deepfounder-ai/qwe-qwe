@@ -185,7 +185,15 @@ def _deps_changed() -> bool:
                     deps.add(dep)
         return deps
 
-    return _extract_deps(r_old.stdout) != _extract_deps(r_new.stdout)
+    if _extract_deps(r_old.stdout) != _extract_deps(r_new.stdout):
+        return True
+    # Also check if py-modules changed (new files added)
+    def _extract_modules(text: str) -> str:
+        for line in text.splitlines():
+            if "py-modules" in line:
+                return line.strip()
+        return ""
+    return _extract_modules(r_old.stdout) != _extract_modules(r_new.stdout)
 
 
 # ── Pull ──
