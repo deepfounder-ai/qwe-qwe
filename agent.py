@@ -379,10 +379,16 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         seen_texts = set()
         lines = ["[Relevant context from memory:]"]
 
+        # Compute embedding once, reuse for all searches (saves 2 API calls)
+        try:
+            vector = memory.embed(user_input)
+        except Exception:
+            return ""  # embedding unavailable
+
         # Thread-scoped search first (prioritize local context)
         if thread_id:
-            thread_results = memory.search(
-                user_input, limit=2, thread_id=thread_id
+            thread_results = memory.search_by_vector(
+                vector, limit=2, thread_id=thread_id
             )
             for r in thread_results:
                 if r["score"] > 0.3 and r["text"] not in seen_texts:
@@ -394,7 +400,7 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         max_memory = config.get("max_memory_results")
         remaining = max_memory - (len(lines) - 1)
         if remaining > 0:
-            global_results = memory.search(user_input, limit=remaining + 2)
+            global_results = memory.search_by_vector(vector, limit=remaining + 2)
             for r in global_results:
                 if len(lines) - 1 >= max_memory:
                     break
@@ -404,8 +410,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
 
         # Experience cases (separate tag, additive, higher threshold)
         if config.get("experience_learning"):
-            exp_hits = memory.search(
-                user_input, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience"
+            exp_hits = memory.search_by_vector(
+                vector, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience"
             )
             exp_lines = []
             for r in exp_hits:
@@ -434,7 +440,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
 _OUTCOME_WEIGHTS = {"success": 1.0, "partial": 0.6, "failed": 0.2}
 
 
-def _save_experience(user_input: str, result: "TurnResult", rounds: int, fail_count: int):
+def _save_experience(user_input: str, result: "TurnResult", rounds: int,
+                     fail_count: int, _sync: bool = False):
     """Save a compact experience case after a tool-using turn (async, non-blocking)."""
     if not config.get("experience_learning"):
         return
@@ -460,7 +467,10 @@ def _save_experience(user_input: str, result: "TurnResult", rounds: int, fail_co
         except Exception as e:
             _log.warning(f"experience save failed: {e}")
 
-    threading.Thread(target=_do_save, daemon=True).start()
+    if _sync:
+        _do_save()
+    else:
+        threading.Thread(target=_do_save, daemon=True).start()
 
 
 def _build_messages(user_input: str, thread_id: str | None = None,
@@ -716,6 +726,8 @@ def _maybe_compact(thread_id: str | None = None):
 
             # Cleanup old compaction summaries (>14 days)
             memory.cleanup(max_age_days=14, tag="compaction")
+            # Cleanup old experience cases (>30 days)
+            memory.cleanup(max_age_days=30, tag="experience")
 
         except Exception as e:
             _log.error(f"compaction failed: {e}", exc_info=True)
@@ -793,6 +805,7 @@ def _run_inner(user_input: str, thread_id: str | None,
     rounds = 0
     last_failed_tool = None
     fail_count = 0
+    total_tool_errors = 0  # cumulative (never resets) — for experience scoring
     _injected_instructions: set[str] = set()  # track which skill instructions were injected
 
     max_tool_rounds = config.get("max_tool_rounds")
@@ -1008,6 +1021,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                 # Detect repeated failures
                 if tool_result.startswith("Error"):
                     db.kv_inc("stats:tool_errors")
+                    total_tool_errors += 1
                     _log.warning(f"tool error: {tc['name']} → {tool_result[:200]}")
                     if tc["name"] == last_failed_tool:
                         fail_count += 1
@@ -1099,7 +1113,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                      self_checks=result.self_check_fixes, thread=tid or "active")
 
         if result.tool_calls_made:
-            _save_experience(user_input, result, rounds, fail_count)
+            _save_experience(user_input, result, rounds, total_tool_errors)
 
         return result
 

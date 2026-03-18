@@ -71,27 +71,22 @@ def _embed(text: str) -> list[float]:
         raise
 
 
-def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
-           tag: str | None = None, thread_id: str | None = None) -> list[dict]:
-    """Semantic search over memories with optional tag/thread filters.
-    
-    Args:
-        query: search text
-        limit: max results
-        tag: filter by tag
-        thread_id: filter by thread (or None for global search)
-    
-    Returns [{text, tag, thread_id, score, ts, ...}]
-    """
-    try:
-        embedding = _embed(query)
-    except Exception:
-        return []  # embeddings unavailable, return empty gracefully
+def embed(text: str) -> list[float]:
+    """Public wrapper — compute embedding vector for text.
 
+    Use this to cache the vector and pass it to search_by_vector()
+    to avoid redundant embedding API calls.
+    """
+    return _embed(text)
+
+
+def _search_impl(vector: list[float], limit: int,
+                 tag: str | None, thread_id: str | None) -> list[dict]:
+    """Core search using pre-computed vector."""
     try:
         qc = _get_qdrant()
     except Exception:
-        return []  # qdrant unavailable
+        return []
 
     conditions = []
     if tag:
@@ -102,7 +97,7 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
 
     results = qc.query_points(
         config.QDRANT_COLLECTION,
-        query=embedding,
+        query=vector,
         limit=limit,
         query_filter=filt,
     )
@@ -122,6 +117,31 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
                 item[k] = v
         out.append(item)
     return out
+
+
+def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
+           tag: str | None = None, thread_id: str | None = None) -> list[dict]:
+    """Semantic search over memories with optional tag/thread filters.
+
+    Args:
+        query: search text
+        limit: max results
+        tag: filter by tag
+        thread_id: filter by thread (or None for global search)
+
+    Returns [{text, tag, thread_id, score, ts, ...}]
+    """
+    try:
+        vector = _embed(query)
+    except Exception:
+        return []
+    return _search_impl(vector, limit, tag, thread_id)
+
+
+def search_by_vector(vector: list[float], limit: int = config.MAX_MEMORY_RESULTS,
+                     tag: str | None = None, thread_id: str | None = None) -> list[dict]:
+    """Search using a pre-computed embedding vector (avoids redundant API calls)."""
+    return _search_impl(vector, limit, tag, thread_id)
 
 
 def save(text: str, tag: str = "general", dedup: bool = True,
@@ -148,11 +168,15 @@ def save(text: str, tag: str = "general", dedup: bool = True,
     if meta:
         payload.update(meta)
 
-    # Deduplicate: if very similar memory exists, update it
+    # Deduplicate: if very similar memory exists (same tag), update it
     if dedup:
         try:
+            dedup_filter = Filter(must=[
+                FieldCondition(key="tag", match=MatchValue(value=tag))
+            ])
             results = qc.query_points(
                 config.QDRANT_COLLECTION, query=vector, limit=1,
+                query_filter=dedup_filter,
             )
             if results.points and results.points[0].score > 0.9:
                 existing = results.points[0]

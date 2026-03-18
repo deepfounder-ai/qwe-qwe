@@ -23,8 +23,11 @@ sys.modules["db"] = mock_db
 # memory is replaced per-test to capture calls
 mock_memory = types.ModuleType("memory")
 mock_memory.search = lambda *a, **kw: []
+mock_memory.search_by_vector = lambda *a, **kw: []
+mock_memory.embed = lambda text: [0.0] * 768  # fake vector
 mock_memory.save = lambda *a, **kw: "ok"
 mock_memory.delete = lambda *a, **kw: True
+mock_memory.cleanup = lambda *a, **kw: 0
 sys.modules["memory"] = mock_memory
 
 mock_logger = types.ModuleType("logger")
@@ -145,8 +148,8 @@ def test_1_1_basic_case_format():
     mock_memory.save = save_fn
 
     result = make_result(tools=["weather_get"], reply="Погода: 15°C, дождь")
-    agent._save_experience("проверь погоду", result, rounds=1, fail_count=0)
-    time.sleep(0.05)  # wait for daemon thread
+    agent._save_experience("проверь погоду", result, rounds=1, fail_count=0, _sync=True)
+    # _sync=True used above — no sleep needed
 
     assert calls, "memory.save was not called"
     text = calls[0]["text"]
@@ -161,8 +164,7 @@ def test_1_2_outcome_partial():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell"])
-    agent._save_experience("запусти скрипт", result, rounds=2, fail_count=1)
-    time.sleep(0.05)
+    agent._save_experience("запусти скрипт", result, rounds=2, fail_count=1, _sync=True)
 
     assert calls
     assert "partial" in calls[0]["text"]
@@ -174,8 +176,7 @@ def test_1_3_outcome_failed():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell"])
-    agent._save_experience("сделай что-то", result, rounds=3, fail_count=2)
-    time.sleep(0.05)
+    agent._save_experience("сделай что-то", result, rounds=3, fail_count=2, _sync=True)
 
     assert calls
     assert "failed" in calls[0]["text"]
@@ -188,8 +189,7 @@ def test_1_4_long_input_truncated():
 
     long_input = "а" * 120
     result = make_result(tools=["shell"])
-    agent._save_experience(long_input, result, rounds=1, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience(long_input, result, rounds=1, fail_count=0, _sync=True)
 
     assert calls
     # Extract Task: field
@@ -204,8 +204,7 @@ def test_1_5_dedup_tools():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell", "shell", "write_file", "shell"])
-    agent._save_experience("напиши файл", result, rounds=3, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience("напиши файл", result, rounds=3, fail_count=0, _sync=True)
 
     assert calls
     text = calls[0]["text"]
@@ -220,8 +219,7 @@ def test_1_6_no_save_when_no_tools():
     mock_memory.save = lambda *a, **kw: calls.append(1) or "ok"
 
     result = make_result(tools=[])
-    agent._save_experience("просто вопрос", result, rounds=0, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience("просто вопрос", result, rounds=0, fail_count=0, _sync=True)
 
     assert not calls, "memory.save should not be called for turns without tools"
 
@@ -235,8 +233,7 @@ def test_1_7_no_save_when_disabled():
     mock_memory.save = lambda *a, **kw: calls.append(1) or "ok"
 
     result = make_result(tools=["shell"])
-    agent._save_experience("запусти что-то", result, rounds=1, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience("запусти что-то", result, rounds=1, fail_count=0, _sync=True)
 
     _experience_learning_enabled = 1  # restore
     assert not calls, "memory.save should not be called when experience_learning=0"
@@ -248,8 +245,7 @@ def test_1_8_tag_experience_and_no_thread():
     mock_memory.save = save_fn
 
     result = make_result(tools=["memory_save"])
-    agent._save_experience("запомни это", result, rounds=1, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience("запомни это", result, rounds=1, fail_count=0, _sync=True)
 
     assert calls
     assert calls[0]["tag"] == "experience"
@@ -263,6 +259,13 @@ def _make_exp_result(text, score, outcome_score=1.0):
             "ts": time.time(), "outcome_score": outcome_score}
 
 
+def _mock_vector_search(search_fn):
+    """Patch search_by_vector to delegate to a test's _search(query, ...) function."""
+    mock_memory.search_by_vector = lambda vec, limit=3, tag=None, thread_id=None: search_fn(
+        "", limit=limit, tag=tag, thread_id=thread_id
+    )
+
+
 def test_2_1_experience_injected_into_context():
     """When experience search returns results, they appear in context."""
     exp_case = "[EXP] Task: проверь погоду | Tools: weather_get | Steps: 1 | Result: success | Learned: OK"
@@ -272,7 +275,7 @@ def test_2_1_experience_injected_into_context():
             return [_make_exp_result(exp_case, 0.8)]
         return []
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("какая погода?")
 
     assert "[Relevant past experiences:]" in ctx
@@ -286,7 +289,7 @@ def test_2_2_low_score_filtered_out():
             return [_make_exp_result("[EXP] Task: something", 0.35)]
         return []
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("что-то сделай")
 
     assert "[Relevant past experiences:]" not in ctx
@@ -302,7 +305,7 @@ def test_2_3_max_experience_results():
             ]
         return []
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("похожая задача")
 
     exp_lines = [l for l in ctx.split("\n") if l.startswith("- [EXP]")]
@@ -310,12 +313,16 @@ def test_2_3_max_experience_results():
 
 
 def test_2_4_no_search_when_disabled():
-    """When experience_learning=0, memory.search with tag=experience is not called."""
+    """When experience_learning=0, search_by_vector with tag=experience is not called."""
     global _experience_learning_enabled
     _experience_learning_enabled = 0
 
-    search_fn, calls = capture_search()
-    mock_memory.search = search_fn
+    calls = []
+    def _tracking_search(vec, limit=3, tag=None, thread_id=None):
+        calls.append({"tag": tag, "thread_id": thread_id})
+        return []
+
+    mock_memory.search_by_vector = _tracking_search
 
     agent._auto_context("любой запрос")
     _experience_learning_enabled = 1
@@ -334,7 +341,7 @@ def test_2_5_dedup_memory_and_experience():
         # Regular memory search also returns same text
         return [{"text": shared_text, "tag": "general", "thread_id": None, "score": 0.8, "ts": time.time()}]
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("запрос")
 
     count = ctx.count(shared_text)
@@ -357,7 +364,7 @@ def test_2_6_experience_additive_to_memory():
             return exp_cases
         return normal_memories
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("задача")
 
     mem_lines = [l for l in ctx.split("\n") if "memory" in l and l.startswith("- ")]
@@ -386,12 +393,11 @@ def test_3_1_save_then_retrieve():
         return []
 
     mock_memory.save = _save
-    mock_memory.search = _search
+    _mock_vector_search(_search)
 
     # Save a case
     result = make_result(tools=["weather_get"], reply="Погода: 20°C")
-    agent._save_experience("проверь погоду в Москве", result, rounds=1, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience("проверь погоду в Москве", result, rounds=1, fail_count=0, _sync=True)
 
     assert saved_cases, "Case was not saved"
 
@@ -409,8 +415,7 @@ def test_4_1_outcome_score_saved_in_meta():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell"], reply="Done")
-    agent._save_experience("запусти скрипт", result, rounds=1, fail_count=0)
-    time.sleep(0.05)
+    agent._save_experience("запусти скрипт", result, rounds=1, fail_count=0, _sync=True)
 
     assert calls
     assert calls[0]["meta"] is not None
@@ -423,8 +428,7 @@ def test_4_2_partial_outcome_score():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell"])
-    agent._save_experience("задача", result, rounds=2, fail_count=1)
-    time.sleep(0.05)
+    agent._save_experience("задача", result, rounds=2, fail_count=1, _sync=True)
 
     assert calls
     assert calls[0]["meta"]["outcome_score"] == 0.6
@@ -436,8 +440,7 @@ def test_4_3_failed_outcome_score():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell"])
-    agent._save_experience("задача", result, rounds=3, fail_count=2)
-    time.sleep(0.05)
+    agent._save_experience("задача", result, rounds=3, fail_count=2, _sync=True)
 
     assert calls
     assert calls[0]["meta"]["outcome_score"] == 0.2
@@ -453,7 +456,7 @@ def test_4_4_success_beats_failed_by_composite_score():
             return [failed_case, success_case]  # failed has higher raw score
         return []
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("задача")
 
     # success: 0.6 * 1.0 = 0.6 > 0.4 → passes
@@ -471,7 +474,7 @@ def test_4_5_failed_case_filtered_by_composite_score():
             return [failed_case]
         return []
 
-    mock_memory.search = _search
+    _mock_vector_search(_search)
     ctx = agent._auto_context("задача")
 
     # 0.9 * 0.2 = 0.18 < 0.4 → filtered
@@ -480,4 +483,5 @@ def test_4_5_failed_case_filtered_by_composite_score():
 
 # ── Reset memory mock to safe default after all tests ──
 mock_memory.search = lambda *a, **kw: []
+mock_memory.search_by_vector = lambda *a, **kw: []
 mock_memory.save = lambda *a, **kw: "ok"
