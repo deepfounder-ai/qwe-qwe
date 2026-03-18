@@ -391,7 +391,7 @@ def execute(name: str, args: dict) -> str:
         elif name == "read_file":
             p = _resolve_path(args["path"])
             if not p.exists():
-                return f"Error: not found: {p}"
+                return f"Error: file not found: {args['path']}"
             text = p.read_text(encoding="utf-8", errors="replace")
             total_len = len(text)
             if total_len > 8000:
@@ -550,7 +550,9 @@ def execute(name: str, args: dict) -> str:
         return f"Error: command timed out after {args.get('timeout', 120)}s"
     except Exception as e:
         _log.error(f"tool {name} exception: {e}", exc_info=True)
-        return f"Error: {type(e).__name__}: {e}"
+        # Sanitize error message — don't leak full paths or internals
+        err_msg = str(e).replace(str(Path.home()), "~")
+        return f"Error: {type(e).__name__}: {err_msg}"
 
 
 def get_all_tools(compact: bool = False) -> list[dict]:

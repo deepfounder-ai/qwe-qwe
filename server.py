@@ -496,7 +496,7 @@ async def update_heartbeat(request: Request):
     action = req.get("action", "")
 
     if action == "add":
-        text = req.get("text", "").strip()
+        text = req.get("text", "").strip()[:500]  # limit length
         if not text:
             return JSONResponse({"error": "text required"}, status_code=400)
         raw = db.kv_get("heartbeat:items")
@@ -556,6 +556,8 @@ async def setup_save(request: Request):
 
     if "tz_offset" in req:
         offset = int(req["tz_offset"])
+        if not -12 <= offset <= 14:
+            return JSONResponse({"error": f"Invalid timezone offset: {offset}"}, status_code=400)
         config.TZ_OFFSET = offset
         db.kv_set("timezone", str(offset))
     if req.get("tz_name"):
@@ -833,14 +835,24 @@ async def toggle_skill(name: str, data: dict):
 async def list_threads(include_archived: bool = False):
     """List all threads with stats."""
     all_threads = threads.list_all(include_archived=include_archived)
+    # Bulk-fetch thread stats in one query instead of 4N separate queries
     conn = db._get_conn()
+    stats_rows = conn.execute("""
+        SELECT thread_id,
+               COALESCE(SUM(LENGTH(content)), 0) / 4 AS est_tokens,
+               SUM(CASE WHEN role='user' THEN 1 ELSE 0 END) AS user_msgs,
+               SUM(CASE WHEN role='assistant' THEN 1 ELSE 0 END) AS asst_msgs,
+               SUM(CASE WHEN role='tool' THEN 1 ELSE 0 END) AS tool_msgs
+        FROM messages GROUP BY thread_id
+    """).fetchall()
+    stats = {r[0]: {"est_tokens": r[1], "user_messages": r[2],
+                     "assistant_messages": r[3], "tool_calls": r[4]} for r in stats_rows}
     for t in all_threads:
-        tid = t["id"]
-        row = conn.execute("SELECT COALESCE(SUM(LENGTH(content)),0) FROM messages WHERE thread_id=?", (tid,)).fetchone()
-        t["est_tokens"] = row[0] // 4 if row else 0
-        t["user_messages"] = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='user'", (tid,)).fetchone()[0]
-        t["assistant_messages"] = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='assistant'", (tid,)).fetchone()[0]
-        t["tool_calls"] = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=? AND role='tool'", (tid,)).fetchone()[0]
+        s = stats.get(t["id"], {})
+        t["est_tokens"] = s.get("est_tokens", 0)
+        t["user_messages"] = s.get("user_messages", 0)
+        t["assistant_messages"] = s.get("assistant_messages", 0)
+        t["tool_calls"] = s.get("tool_calls", 0)
     return all_threads
 
 

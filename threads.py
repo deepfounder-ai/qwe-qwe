@@ -105,29 +105,34 @@ def list_all(include_archived: bool = False) -> list[dict]:
     """List all threads, sorted by last activity."""
     _ensure_table()
     conn = db._get_conn()
-    q = "SELECT id, name, created_at, updated_at, archived, meta FROM threads"
-    if not include_archived:
-        q += " WHERE archived=0"
-    q += " ORDER BY CASE WHEN id='default' THEN 0 ELSE 1 END, updated_at DESC"
+    # Single query with subqueries — avoids N+1 problem (was 2N+1 queries)
+    where = "" if include_archived else "WHERE t.archived=0"
+    q = f"""
+        SELECT t.id, t.name, t.created_at, t.updated_at, t.archived, t.meta,
+               COALESCE(mc.cnt, 0) AS msg_count,
+               lm.content AS last_preview
+        FROM threads t
+        LEFT JOIN (SELECT thread_id, COUNT(*) AS cnt FROM messages GROUP BY thread_id) mc
+            ON mc.thread_id = t.id
+        LEFT JOIN (
+            SELECT thread_id, content,
+                   ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY id DESC) AS rn
+            FROM messages WHERE role='user'
+        ) lm ON lm.thread_id = t.id AND lm.rn = 1
+        {where}
+        ORDER BY CASE WHEN t.id='default' THEN 0 ELSE 1 END, t.updated_at DESC
+    """
     rows = conn.execute(q).fetchall()
 
-    result = []
     active = get_active_id()
-    for tid, name, created, updated, archived, meta_raw in rows:
-        msg_count = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE thread_id=?", (tid,)
-        ).fetchone()[0]
-
-        # Get last message preview
-        last_row = conn.execute(
-            "SELECT content FROM messages WHERE thread_id=? AND role='user' ORDER BY id DESC LIMIT 1",
-            (tid,)
-        ).fetchone()
-        preview = (last_row[0][:60] + "...") if last_row and last_row[0] and len(last_row[0]) > 60 else (last_row[0] if last_row else "")
-
+    result = []
+    for tid, name, created, updated, archived, meta_raw, msg_count, preview_raw in rows:
+        preview = preview_raw or ""
+        if len(preview) > 60:
+            preview = preview[:60] + "..."
         result.append({
             "id": tid, "name": name, "created_at": created, "updated_at": updated,
-            "archived": bool(archived), "messages": msg_count, "preview": preview or "",
+            "archived": bool(archived), "messages": msg_count, "preview": preview,
             "active": tid == active, "meta": json.loads(meta_raw or "{}"),
         })
     return result
