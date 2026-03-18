@@ -10,8 +10,8 @@ import config
 LEVELS = ("low", "moderate", "high")
 LEVEL_TEMP = {"low": 0.3, "moderate": 0.6, "high": 0.9}
 
-# Default personality template
-DEFAULTS = {
+# Default personality template (immutable base — custom traits merged at runtime)
+_BUILTIN_DEFAULTS = {
     "name": "Agent",
     "language": "English",
     "humor": "moderate",
@@ -24,7 +24,7 @@ DEFAULTS = {
     "creativity": "moderate",
 }
 
-TRAIT_DESCRIPTIONS = {
+_BUILTIN_TRAIT_DESCRIPTIONS = {
     "humor": ("serious", "funny, jokes around"),
     "honesty": ("diplomatic", "direct, brutally honest"),
     "curiosity": ("answers questions", "asks follow-ups, digs deeper"),
@@ -34,6 +34,10 @@ TRAIT_DESCRIPTIONS = {
     "empathy": ("rational", "empathetic, caring"),
     "creativity": ("practical, standard", "creative, unconventional"),
 }
+
+# Mutable copies rebuilt from builtins + DB custom traits (never stale)
+DEFAULTS = dict(_BUILTIN_DEFAULTS)
+TRAIT_DESCRIPTIONS = dict(_BUILTIN_TRAIT_DESCRIPTIONS)
 
 
 def _migrate_numeric(val: str) -> str:
@@ -67,7 +71,13 @@ def load() -> dict:
 
 
 def _load_custom_traits():
-    """Load user-defined traits from DB into DEFAULTS."""
+    """Rebuild DEFAULTS and TRAIT_DESCRIPTIONS from builtins + DB custom traits.
+
+    Rebuilds from immutable base each time — removed traits don't persist stale.
+    """
+    global DEFAULTS, TRAIT_DESCRIPTIONS
+    DEFAULTS = dict(_BUILTIN_DEFAULTS)
+    TRAIT_DESCRIPTIONS = dict(_BUILTIN_TRAIT_DESCRIPTIONS)
     raw = db.kv_get("soul:_custom_traits")
     if not raw:
         return
@@ -261,9 +271,16 @@ Call user_profile_update ONLY when you learn a NEW fact. Do NOT call it every tu
     # Dynamic data LAST — preserves KV cache for everything above
     # llama.cpp caches prompt tokens sequentially; any change invalidates all tokens after it
     from datetime import datetime, timezone, timedelta
-    tz = timezone(timedelta(hours=config.TZ_OFFSET))
-    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M") + f" (UTC{config.TZ_OFFSET:+d})"
-    lines.append(f"Time: {now}")
+    # Try named timezone first (handles DST automatically), fall back to offset
+    tz_name = db.kv_get("timezone_name")
+    try:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo(tz_name) if tz_name else timezone(timedelta(hours=config.TZ_OFFSET))
+    except Exception:
+        tz = timezone(timedelta(hours=config.TZ_OFFSET))
+    now_dt = datetime.now(tz)
+    tz_label = tz_name or f"UTC{config.TZ_OFFSET:+d}"
+    lines.append(f"Time: {now_dt.strftime('%Y-%m-%d %H:%M')} ({tz_label})")
 
     return "\n".join(lines)
 

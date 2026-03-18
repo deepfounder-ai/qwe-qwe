@@ -337,12 +337,9 @@ def set_key(name: str, key: str) -> str:
 def list_providers() -> list[str]:
     """List all available provider names (presets + custom)."""
     names = set(PRESETS.keys())
-    # Scan DB for custom providers
-    conn = db._get_conn()
-    rows = conn.execute(
-        "SELECT key FROM kv WHERE key LIKE 'provider:config:%'"
-    ).fetchall()
-    for (k,) in rows:
+    # Scan DB for custom providers via public API
+    custom = db.kv_get_prefix("provider:config:")
+    for k in custom:
         name = k.replace("provider:config:", "")
         names.add(name)
     return sorted(names)

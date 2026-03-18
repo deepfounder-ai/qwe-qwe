@@ -122,8 +122,10 @@ def _migrate_data():
 
 try:
     _migrate_data()
-except Exception:
-    pass  # don't block startup on migration failure
+except Exception as e:
+    import sys
+    print(f"⚠️ Data migration failed: {e}", file=sys.stderr)
+    # Don't block startup — user can still use the app
 
 
 # Timezone offset from UTC (hours). Stored in DB, set via /soul or ask user.
