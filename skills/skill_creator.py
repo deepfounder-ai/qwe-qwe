@@ -144,10 +144,20 @@ def _sanitize_id(name: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_]', '', name) or "col"
 
 
-def _infer_op(tool_name: str) -> str:
-    """Infer operation type from tool name as heuristic fallback."""
+def _infer_op(tool_name: str, description: str = "") -> str:
+    """Infer operation type from tool name (and optionally description)."""
     n = tool_name.lower()
-    # Order matters: more specific patterns first
+    d = description.lower()
+    # Order matters: more specific patterns first, then general CRUD
+    if any(w in n for w in ("schedule", "cron", "every", "remind", "timer")):
+        return "schedule"
+    if any(w in n for w in ("send", "post", "notify", "webhook", "ping", "alert")):
+        return "http_request"
+    if any(w in n for w in ("read_file", "load_file", "open_file")):
+        return "read_file"
+    # read_*/fetch_* only → read_file if description mentions file/path/disk
+    if any(w in n for w in ("read", "fetch", "load")) and any(w in d for w in ("file", "path", "disk", "local")):
+        return "read_file"
     if any(w in n for w in ("delete", "remove", "drop")):
         return "delete"
     if any(w in n for w in ("update", "edit", "modify", "change")):
@@ -278,9 +288,80 @@ def _t_stats(name: str, spec: dict, first: bool) -> str:
     return "\n".join(lines)
 
 
+def _t_http_request(name: str, spec: dict, first: bool) -> str:
+    """Template for HTTP request tools (send_*, post_*, notify_*, webhook_*)."""
+    kw = "if" if first else "elif"
+    url_param = spec.get("url_param", "url")
+    method = spec.get("method", "GET").upper()
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        import urllib.request, urllib.error')
+    lines.append(f'        target_url = args.get("{url_param}", "")')
+    lines.append(f'        if not target_url:')
+    lines.append(f'            return "Error: url is required"')
+    lines.append(f'        body = args.get("body", args.get("message", args.get("text", "")))')
+    lines.append(f'        try:')
+    if method == "POST":
+        lines.append(f'            data = body.encode("utf-8") if body else None')
+        lines.append(f'            req = urllib.request.Request(target_url, data=data, method="POST")')
+        lines.append(f'            req.add_header("Content-Type", "application/json")')
+    else:
+        lines.append(f'            req = urllib.request.Request(target_url)')
+    lines.append(f'            req.add_header("User-Agent", "qwe-qwe/skill")')
+    lines.append(f'            with urllib.request.urlopen(req, timeout=15) as resp:')
+    lines.append(f'                result = resp.read().decode("utf-8")[:2000]')
+    lines.append(f'            return f"OK ({{len(result)}} chars): {{result[:200]}}"')
+    lines.append(f'        except urllib.error.URLError as e:')
+    lines.append(f'            return f"Request failed: {{e}}"')
+    return "\n".join(lines)
+
+
+def _t_read_file(name: str, spec: dict, first: bool) -> str:
+    """Template for file reading tools (read_*, load_*, fetch_file)."""
+    kw = "if" if first else "elif"
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        from pathlib import Path')
+    lines.append(f'        file_path = args.get("path", args.get("file", ""))')
+    lines.append(f'        if not file_path:')
+    lines.append(f'            return "Error: path is required"')
+    lines.append(f'        p = Path(file_path).expanduser()')
+    lines.append(f'        if not p.exists():')
+    lines.append(f'            return f"File not found: {{p}}"')
+    lines.append(f'        if not p.is_file():')
+    lines.append(f'            return f"Not a file: {{p}}"')
+    lines.append(f'        if p.stat().st_size > 1_000_000:')
+    lines.append(f'            return f"File too large: {{p.stat().st_size}} bytes (max 1MB)"')
+    lines.append(f'        try:')
+    lines.append(f'            text = p.read_text(encoding="utf-8", errors="replace")')
+    lines.append(f'            if len(text) > 4000:')
+    lines.append(f'                text = text[:4000] + f"\\n... ({{len(text)}} chars total, truncated)"')
+    lines.append(f'            return text')
+    lines.append(f'        except Exception as e:')
+    lines.append(f'            return f"Read error: {{e}}"')
+    return "\n".join(lines)
+
+
+def _t_schedule(name: str, spec: dict, first: bool) -> str:
+    """Template for scheduling tools (schedule_*, cron_*, every_*, remind_*)."""
+    kw = "if" if first else "elif"
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        import scheduler')
+    lines.append(f'        task_name = args.get("name", args.get("task_name", "scheduled_task"))')
+    lines.append(f'        task_desc = args.get("task", args.get("description", args.get("message", "")))')
+    lines.append(f'        schedule = args.get("schedule", args.get("time", args.get("interval", "in 1h")))')
+    lines.append(f'        if not task_desc:')
+    lines.append(f'            return "Error: task description is required"')
+    lines.append(f'        result = scheduler.add(task_name, task_desc, schedule)')
+    lines.append(f'        if result.get("error"):')
+    lines.append(f'            return f"Schedule failed: {{result[\'error\']}}"')
+    lines.append(f'        return f"Scheduled \'{{task_name}}\': {{schedule}} (next: {{result.get(\'next_run\', \'?\')}})"')
+    return "\n".join(lines)
+
+
 _TEMPLATE_BUILDERS = {
     "add": _t_add, "list": _t_list, "delete": _t_delete,
     "update": _t_update, "get": _t_get, "stats": _t_stats,
+    "http_request": _t_http_request, "read_file": _t_read_file,
+    "schedule": _t_schedule,
 }
 
 
@@ -363,7 +444,20 @@ def _build_mapping_from_tools(tools_list: list, plan: dict) -> dict:
             continue
         props = func.get("parameters", {}).get("properties", {})
 
-        op = _infer_op(tool_name)
+        tool_desc = func.get("description", "")
+        op = _infer_op(tool_name, tool_desc)
+
+        # Non-DB ops don't need table matching
+        if op in ("http_request", "read_file", "schedule"):
+            spec = {"op": op}
+            # For http_request: detect url param and method
+            if op == "http_request":
+                url_param = next((p for p in props if p in ("url", "endpoint", "webhook_url", "target")), "url")
+                spec["url_param"] = url_param
+                if any(w in tool_name for w in ("post", "send", "notify", "webhook")):
+                    spec["method"] = "POST"
+            mapping[tool_name] = spec
+            continue
 
         # Match table by name overlap (e.g. add_habit -> habits)
         table = default_table
