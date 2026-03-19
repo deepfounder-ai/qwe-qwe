@@ -431,7 +431,15 @@ def _build_table_ddl(plan: dict) -> str:
             parts = [c for c in parts if c
                      and not re.match(r'^id\b', c, re.IGNORECASE)
                      and not re.match(r'^created_at\b', c, re.IGNORECASE)]
-            cols_clean = ", ".join(parts)
+            # Quote column names to avoid SQLite reserved words (e.g. "income")
+            quoted = []
+            for p in parts:
+                tokens = p.strip().split(None, 1)
+                if len(tokens) == 2:
+                    quoted.append(f'"{tokens[0]}" {tokens[1]}')
+                elif tokens:
+                    quoted.append(f'"{tokens[0]}" TEXT')
+            cols_clean = ", ".join(quoted)
             if cols_clean:
                 ddl_lines.append(
                     f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} (\n'
