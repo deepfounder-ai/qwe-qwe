@@ -137,6 +137,239 @@ Example for a "notes" skill with tools add_note and list_notes:
 
 Now generate code following this exact pattern. Use 4-space indent. Each branch returns a string."""
 
+STEP3_MAPPING = """You are a tool-to-operation mapper. Given a skill plan with tables and tools, output a JSON object mapping each tool to a database operation.
+
+Output ONLY valid JSON, no markdown, no explanation.
+
+Operation types:
+- "add": Insert a new row
+- "list": Select multiple rows with optional filter
+- "delete": Delete a row by id
+- "update": Modify a row by id
+- "get": Get a single row by id
+- "stats": Count rows
+- "custom": Complex logic that doesn't fit above
+
+For each tool specify:
+{
+  "tool_name": {
+    "op": "add|list|delete|update|get|stats|custom",
+    "table": "table_name",
+    "cols": {"col1": "string", "col2": "integer"},
+    "preview": "col_to_show_in_confirmation",
+    "format": "#{r[0]}: {r[1]} ({r[2]})",
+    "filter_col": "optional_filter_column",
+    "label": "human_noun_for_stats",
+    "update_cols": ["col1", "col2"]
+  }
+}
+
+Only include fields relevant to the operation type."""
+
+
+# ── Template assembly (replaces LLM code generation for CRUD skills) ──
+
+def _sanitize_id(name: str) -> str:
+    """Ensure a SQL identifier is safe."""
+    return re.sub(r'[^a-zA-Z0-9_]', '', name) or "col"
+
+
+def _infer_op(tool_name: str) -> str:
+    """Infer operation type from tool name as heuristic fallback."""
+    n = tool_name.lower()
+    # Order matters: more specific patterns first
+    if any(w in n for w in ("delete", "remove", "drop")):
+        return "delete"
+    if any(w in n for w in ("update", "edit", "modify", "change")):
+        return "update"
+    if any(w in n for w in ("stats", "count", "summary", "total", "status")):
+        return "stats"
+    if any(w in n for w in ("get", "read", "view", "fetch", "detail")):
+        return "get"
+    if any(w in n for w in ("list", "search", "find", "all", "show", "browse")):
+        return "list"
+    if any(w in n for w in ("add", "create", "new", "insert", "log", "record")):
+        return "add"
+    return "custom"
+
+
+def _t_add(name: str, spec: dict, first: bool) -> str:
+    kw = "if" if first else "elif"
+    table = _sanitize_id(spec.get("table", "items"))
+    cols = spec.get("cols", {})
+    preview = spec.get("preview", next(iter(cols), "item"))
+    lines = [f'    {kw} name == "{name}":']
+    for c, ctype in cols.items():
+        c = _sanitize_id(c)
+        default = '""' if ctype == "string" else "0" if ctype == "integer" else "0.0"
+        lines.append(f'        {c} = args.get("{c}", {default})')
+    col_list = ", ".join(_sanitize_id(c) for c in cols)
+    placeholders = ", ".join("?" for _ in cols)
+    vals = ", ".join(_sanitize_id(c) for c in cols)
+    lines.append(f'        conn.execute("INSERT INTO {table} ({col_list}) VALUES ({placeholders})", ({vals},))')
+    lines.append(f'        conn.commit()')
+    preview = _sanitize_id(preview)
+    lines.append(f'        return f"Added: {{{preview}[:50]}}"')
+    return "\n".join(lines)
+
+
+def _t_list(name: str, spec: dict, first: bool) -> str:
+    kw = "if" if first else "elif"
+    table = _sanitize_id(spec.get("table", "items"))
+    cols = [_sanitize_id(c) for c in spec.get("cols", ["id"])]
+    fmt = spec.get("format", "#{r[0]}")
+    filt = spec.get("filter_col")
+    col_str = ", ".join(cols)
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        limit = args.get("limit", 10)')
+    if filt:
+        filt = _sanitize_id(filt)
+        lines.append(f'        fv = args.get("{filt}")')
+        lines.append(f'        if fv:')
+        lines.append(f'            rows = conn.execute("SELECT {col_str} FROM {table} WHERE {filt} = ? ORDER BY id DESC LIMIT ?", (fv, limit)).fetchall()')
+        lines.append(f'        else:')
+        lines.append(f'            rows = conn.execute("SELECT {col_str} FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()')
+    else:
+        lines.append(f'        rows = conn.execute("SELECT {col_str} FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()')
+    lines.append(f'        if not rows:')
+    lines.append(f'            return "No items found."')
+    lines.append(f'        out = [f"{fmt}" for r in rows]')
+    lines.append(f'        return "\\n".join(out)')
+    return "\n".join(lines)
+
+
+def _t_delete(name: str, spec: dict, first: bool) -> str:
+    kw = "if" if first else "elif"
+    table = _sanitize_id(spec.get("table", "items"))
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        item_id = args.get("id")')
+    lines.append(f'        if not item_id:')
+    lines.append(f'            return "Error: id is required"')
+    lines.append(f'        conn.execute("DELETE FROM {table} WHERE id = ?", (item_id,))')
+    lines.append(f'        conn.commit()')
+    lines.append(f'        return f"Deleted #{{item_id}}"')
+    return "\n".join(lines)
+
+
+def _t_update(name: str, spec: dict, first: bool) -> str:
+    kw = "if" if first else "elif"
+    table = _sanitize_id(spec.get("table", "items"))
+    ucols = spec.get("update_cols", spec.get("cols", []))
+    if isinstance(ucols, dict):
+        ucols = list(ucols.keys())
+    ucols = [_sanitize_id(c) for c in ucols]
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        item_id = args.get("id")')
+    lines.append(f'        if not item_id:')
+    lines.append(f'            return "Error: id is required"')
+    lines.append(f'        sets, vals = [], []')
+    lines.append(f'        for col in {ucols!r}:')
+    lines.append(f'            v = args.get(col)')
+    lines.append(f'            if v is not None:')
+    lines.append(f'                sets.append(f"{{col}}=?")')
+    lines.append(f'                vals.append(v)')
+    lines.append(f'        if not sets:')
+    lines.append(f'            return "Nothing to update"')
+    lines.append(f'        vals.append(item_id)')
+    lines.append(f'        conn.execute(f"UPDATE {table} SET {{\\",\\".join(sets)}} WHERE id=?", vals)')
+    lines.append(f'        conn.commit()')
+    lines.append(f'        return f"Updated #{{item_id}}"')
+    return "\n".join(lines)
+
+
+def _t_get(name: str, spec: dict, first: bool) -> str:
+    kw = "if" if first else "elif"
+    table = _sanitize_id(spec.get("table", "items"))
+    cols = [_sanitize_id(c) for c in spec.get("cols", ["id"])]
+    fmt = spec.get("format", "#{r[0]}")
+    col_str = ", ".join(cols)
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        item_id = args.get("id")')
+    lines.append(f'        if not item_id:')
+    lines.append(f'            return "Error: id is required"')
+    lines.append(f'        r = conn.execute("SELECT {col_str} FROM {table} WHERE id = ?", (item_id,)).fetchone()')
+    lines.append(f'        if not r:')
+    lines.append(f'            return "Not found"')
+    lines.append(f'        return f"{fmt}"')
+    return "\n".join(lines)
+
+
+def _t_stats(name: str, spec: dict, first: bool) -> str:
+    kw = "if" if first else "elif"
+    table = _sanitize_id(spec.get("table", "items"))
+    label = spec.get("label", "items")
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        count = conn.execute("SELECT COUNT(*) FROM {table}").fetchone()[0]')
+    lines.append(f'        return f"{{count}} {label} total"')
+    return "\n".join(lines)
+
+
+_TEMPLATE_BUILDERS = {
+    "add": _t_add, "list": _t_list, "delete": _t_delete,
+    "update": _t_update, "get": _t_get, "stats": _t_stats,
+}
+
+
+def _assemble_from_mapping(mapping: dict) -> tuple:
+    """Assemble execute() body from operation mapping.
+
+    Returns (code_body, has_custom, custom_tool_names).
+    """
+    blocks = []
+    custom_tools = []
+
+    for tool_name, spec in mapping.items():
+        op = spec.get("op", "custom")
+        if op not in _TEMPLATE_BUILDERS and op != "custom":
+            op = _infer_op(tool_name)
+
+        if op == "custom" or op not in _TEMPLATE_BUILDERS:
+            custom_tools.append(tool_name)
+            continue
+
+        block = _TEMPLATE_BUILDERS[op](tool_name, spec, first=len(blocks) == 0)
+        blocks.append(block)
+
+    return "\n\n".join(blocks), bool(custom_tools), custom_tools
+
+
+def _build_table_ddl(plan: dict) -> str:
+    """Build CREATE TABLE DDL from plan, fixing duplicate id/created_at columns."""
+    ddl_lines = []
+    for table_spec in plan.get("tables", []):
+        spec = table_spec.strip()
+        if spec.upper().startswith("CREATE TABLE"):
+            ddl_lines.append(f'    conn.execute("""{spec}""")')
+        elif ":" in spec:
+            tname, cols = spec.split(":", 1)
+            tname = _sanitize_id(tname.strip())
+            parts = [c.strip() for c in cols.strip().split(",")]
+            # Strip id and created_at — we auto-add them
+            parts = [c for c in parts if c
+                     and not re.match(r'^id\b', c, re.IGNORECASE)
+                     and not re.match(r'^created_at\b', c, re.IGNORECASE)]
+            cols_clean = ", ".join(parts)
+            if cols_clean:
+                ddl_lines.append(
+                    f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} (\n'
+                    f'        id INTEGER PRIMARY KEY AUTOINCREMENT,\n'
+                    f'        {cols_clean},\n'
+                    f'        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n'
+                    f'    )""")')
+            else:
+                ddl_lines.append(
+                    f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} (\n'
+                    f'        id INTEGER PRIMARY KEY AUTOINCREMENT,\n'
+                    f'        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n'
+                    f'    )""")')
+        elif "(" in spec:
+            match = re.match(r'(\w+)\s*\((.+)\)', spec)
+            if match:
+                tname, cols = match.group(1), match.group(2).strip()
+                ddl_lines.append(
+                    f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} ({cols})""")')
+    return "\n".join(ddl_lines) if ddl_lines else "    pass  # No tables needed"
+
 
 def execute(name: str, args: dict) -> str:
     if name == "create_skill":
@@ -477,9 +710,9 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path, ta
 
             _log.info(f"[{skill_name}] step 2 done: {len(tools_list)} tools")
 
-            # ── Step 3: Generate execute body ──
-            _progress(f"Step 3/5: generating code (attempt {attempt})")
-            _log.info(f"[{skill_name}] step 3: generating code")
+            # ── Step 3: Operation mapping + template assembly ──
+            _progress(f"Step 3/5: mapping operations (attempt {attempt})")
+            _log.info(f"[{skill_name}] step 3: generating operation mapping")
             tool_names = [t["function"]["name"] for t in tools_list]
             tool_descriptions = "\n".join(
                 f"- {t['function']['name']}: {t['function'].get('description', '')}"
@@ -487,53 +720,60 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path, ta
             )
             tables_info = "\n".join(plan.get("tables", []))
 
-            code_prompt = (
+            mapping_prompt = (
                 f"Skill: {skill_name}\n"
-                f"Tables (already created via DDL):\n{tables_info}\n\n"
-                f"Tools to implement:\n{tool_descriptions}\n\n"
-                f"Generate the if/elif chain for execute(). "
-                f"Tool names: {tool_names}"
+                f"Tables:\n{tables_info}\n\n"
+                f"Tools to map:\n{tool_descriptions}\n\n"
+                f"Map each tool to an operation. Tool names: {tool_names}"
             )
 
-            code_raw = _llm_call(STEP3_CODE, code_prompt, max_tokens=3072)
-            execute_body = _extract_code(code_raw)
+            mapping_raw = _llm_call(STEP3_MAPPING, mapping_prompt, max_tokens=1024)
+            mapping = _extract_json(mapping_raw)
 
-            # Fix common issues
-            execute_body = _fix_indentation(execute_body)
-            execute_body = _fix_empty_blocks(execute_body)
+            if mapping and isinstance(mapping, dict):
+                # Fill missing tools with heuristic inference
+                for tn in tool_names:
+                    if tn not in mapping:
+                        _log.info(f"[{skill_name}] tool '{tn}' missing from mapping, inferring op")
+                        mapping[tn] = {"op": _infer_op(tn), "table": plan.get("tables", ["items"])[0].split(":")[0].strip()}
+
+                execute_body, has_custom, custom_tools = _assemble_from_mapping(mapping)
+                _log.info(f"[{skill_name}] step 3: assembled {len(mapping) - len(custom_tools)} tools from templates")
+
+                if has_custom and custom_tools:
+                    # Fall back to LLM for custom tools only
+                    _log.info(f"[{skill_name}] step 3: {len(custom_tools)} custom tools need LLM: {custom_tools}")
+                    custom_prompt = (
+                        f"Skill: {skill_name}\n"
+                        f"Tables (already created):\n{tables_info}\n\n"
+                        f"Generate ONLY elif blocks for these tools:\n"
+                        + "\n".join(f"- {tn}" for tn in custom_tools)
+                        + f"\n\nDescriptions:\n{tool_descriptions}\n"
+                        f"Start each with 'elif name == \"tool_name\":'. Each returns a string."
+                    )
+                    custom_raw = _llm_call(STEP3_CODE, custom_prompt, max_tokens=2048)
+                    custom_code = _extract_code(custom_raw)
+                    custom_code = _fix_indentation(custom_code)
+                    custom_code = _fix_empty_blocks(custom_code)
+                    execute_body = execute_body + "\n\n" + custom_code if execute_body else custom_code
+            else:
+                # Mapping failed — full fallback to LLM code generation
+                _log.warning(f"[{skill_name}] step 3: mapping failed, falling back to LLM codegen")
+                code_prompt = (
+                    f"Skill: {skill_name}\n"
+                    f"Tables (already created via DDL):\n{tables_info}\n\n"
+                    f"Tools to implement:\n{tool_descriptions}\n\n"
+                    f"Generate the if/elif chain for execute(). "
+                    f"Tool names: {tool_names}"
+                )
+                code_raw = _llm_call(STEP3_CODE, code_prompt, max_tokens=3072)
+                execute_body = _extract_code(code_raw)
+                execute_body = _fix_indentation(execute_body)
+                execute_body = _fix_empty_blocks(execute_body)
 
             # ── Step 4: Generate table DDL ──
             _progress(f"Step 4/5: building tables (attempt {attempt})")
-            table_ddl_lines = []
-            for table_spec in plan.get("tables", []):
-                # Support formats:
-                #   "table_name: col1 TYPE, col2 TYPE"
-                #   "table_name (col1 TYPE, col2 TYPE)"
-                #   "CREATE TABLE IF NOT EXISTS table_name (...)"
-                spec = table_spec.strip()
-                if spec.upper().startswith("CREATE TABLE"):
-                    # Already a DDL statement
-                    table_ddl_lines.append(f'    conn.execute("""{spec}""")')
-                elif ":" in spec:
-                    tname, cols = spec.split(":", 1)
-                    tname = tname.strip()
-                    cols = cols.strip()
-                    table_ddl_lines.append(
-                        f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} (\n'
-                        f'        id INTEGER PRIMARY KEY AUTOINCREMENT,\n'
-                        f'        {cols},\n'
-                        f'        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n'
-                        f'    )""")'
-                    )
-                elif "(" in spec:
-                    # "table_name (col1 TYPE, col2 TYPE)"
-                    match = re.match(r'(\w+)\s*\((.+)\)', spec)
-                    if match:
-                        tname, cols = match.group(1), match.group(2).strip()
-                        table_ddl_lines.append(
-                            f'    conn.execute("""CREATE TABLE IF NOT EXISTS {tname} ({cols})""")'
-                        )
-            table_ddl = "\n".join(table_ddl_lines) if table_ddl_lines else "    pass  # No tables needed"
+            table_ddl = _build_table_ddl(plan)
 
             # ── Step 5: Assemble & validate ──
             _progress(f"Step 5/5: validating (attempt {attempt})")
