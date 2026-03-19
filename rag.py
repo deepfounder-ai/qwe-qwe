@@ -28,13 +28,22 @@ def _get_qdrant():
         import memory
         _qclient = memory._get_qdrant()
         # Ensure RAG collection exists (separate from memory collection)
-        from qdrant_client.models import VectorParams, Distance
+        from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
         cols = [c.name for c in _qclient.get_collections().collections]
         if RAG_COLLECTION not in cols:
             _qclient.create_collection(
                 RAG_COLLECTION,
                 vectors_config=VectorParams(size=config.EMBED_DIM, distance=Distance.COSINE),
             )
+        # Ensure payload indexes for filtered searches
+        try:
+            info = _qclient.get_collection(RAG_COLLECTION)
+            existing = set(info.payload_schema.keys()) if info.payload_schema else set()
+            if "file_path" not in existing:
+                _qclient.create_payload_index(RAG_COLLECTION, "file_path", PayloadSchemaType.KEYWORD)
+                _log.info("created payload index: file_path")
+        except Exception as e:
+            _log.debug(f"RAG payload index creation skipped: {e}")
     return _qclient
 
 

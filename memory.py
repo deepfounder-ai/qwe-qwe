@@ -5,7 +5,7 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter,
-    FieldCondition, MatchValue,
+    FieldCondition, MatchValue, Range, PayloadSchemaType,
 )
 import config
 import logger
@@ -46,7 +46,27 @@ def _get_qdrant() -> QdrantClient:
                     size=config.EMBED_DIM, distance=Distance.COSINE
                 ),
             )
+        # Ensure payload indexes exist (speeds up filtered searches)
+        _ensure_payload_indexes(_qclient, config.QDRANT_COLLECTION)
     return _qclient
+
+
+def _ensure_payload_indexes(qc: QdrantClient, collection: str):
+    """Create payload indexes if they don't exist yet."""
+    try:
+        info = qc.get_collection(collection)
+        existing = set(info.payload_schema.keys()) if info.payload_schema else set()
+        indexes = {
+            "tag": PayloadSchemaType.KEYWORD,
+            "thread_id": PayloadSchemaType.KEYWORD,
+            "ts": PayloadSchemaType.FLOAT,
+        }
+        for field, schema_type in indexes.items():
+            if field not in existing:
+                qc.create_payload_index(collection, field, schema_type)
+                _log.info(f"created payload index: {field} ({schema_type})")
+    except Exception as e:
+        _log.debug(f"payload index creation skipped: {e}")
 
 
 def _get_embed() -> OpenAI:
@@ -220,7 +240,7 @@ def cleanup(max_age_days: int = 7, tag: str = "session"):
             points_selector=FilterSelector(
                 filter=Filter(must=[
                     FieldCondition(key="tag", match=MatchValue(value=tag)),
-                    FieldCondition(key="ts", range={"lt": cutoff}),
+                    FieldCondition(key="ts", range=Range(lt=cutoff)),
                 ])
             ),
         )
