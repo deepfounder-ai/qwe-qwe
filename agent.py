@@ -389,7 +389,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         # Thread-scoped search first (prioritize local context)
         if thread_id:
             thread_results = memory.search_by_vector(
-                vector, limit=2, thread_id=thread_id
+                vector, limit=2, thread_id=thread_id,
+                query_text=user_input,
             )
             for r in thread_results:
                 if r["score"] > 0.3 and r["text"] not in seen_texts:
@@ -401,7 +402,10 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         max_memory = config.get("max_memory_results")
         remaining = max_memory - (len(lines) - 1)
         if remaining > 0:
-            global_results = memory.search_by_vector(vector, limit=remaining + 2)
+            global_results = memory.search_by_vector(
+                vector, limit=remaining + 2,
+                query_text=user_input,
+            )
             for r in global_results:
                 if len(lines) - 1 >= max_memory:
                     break
@@ -412,7 +416,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         # Experience cases (separate tag, additive, higher threshold)
         if config.get("experience_learning"):
             exp_hits = memory.search_by_vector(
-                vector, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience"
+                vector, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience",
+                query_text=user_input,
             )
             exp_lines = []
             for r in exp_hits:

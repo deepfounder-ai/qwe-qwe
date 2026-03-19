@@ -1,4 +1,4 @@
-"""RAG — index and search local files via Qdrant embeddings."""
+"""RAG — index and search local files via Qdrant (hybrid dense + sparse)."""
 
 import os, time, uuid
 from pathlib import Path
@@ -27,15 +27,27 @@ def _get_qdrant():
     if _qclient is None:
         import memory
         _qclient = memory._get_qdrant()
-        # Ensure RAG collection exists (separate from memory collection)
-        from qdrant_client.models import VectorParams, Distance, PayloadSchemaType
+        # Ensure RAG collection exists with v2 schema (named dense + sparse)
+        from qdrant_client.models import (
+            VectorParams, Distance, PayloadSchemaType, Datatype,
+            SparseVectorParams,
+        )
         cols = [c.name for c in _qclient.get_collections().collections]
         if RAG_COLLECTION not in cols:
             _qclient.create_collection(
                 RAG_COLLECTION,
-                vectors_config=VectorParams(size=config.EMBED_DIM, distance=Distance.COSINE),
+                vectors_config={
+                    "dense": VectorParams(
+                        size=config.EMBED_DIM,
+                        distance=Distance.COSINE,
+                        datatype=Datatype.FLOAT16,
+                    ),
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(),
+                },
             )
-        # Ensure payload indexes for filtered searches
+        # Ensure payload indexes
         try:
             info = _qclient.get_collection(RAG_COLLECTION)
             existing = set(info.payload_schema.keys()) if info.payload_schema else set()
@@ -96,8 +108,9 @@ def _read_file(path: Path) -> str | None:
 
 
 def index_file(filepath: str) -> dict:
-    """Index a single file. Returns {path, chunks, status}."""
+    """Index a single file with dense + sparse vectors. Returns {path, chunks, status}."""
     from qdrant_client.models import PointStruct
+    import memory  # for _sparse_embed
 
     path = Path(filepath).expanduser().resolve()
     if not path.exists():
@@ -125,13 +138,14 @@ def index_file(filepath: str) -> dict:
     # Delete old chunks for this file
     _delete_file_chunks(str(path))
 
-    # Index chunks
+    # Index chunks with both dense and sparse vectors
     points = []
     for i, chunk in enumerate(chunks):
-        vector = _embed(chunk)
+        dense = _embed(chunk)
+        sparse = memory._sparse_embed(chunk)
         points.append(PointStruct(
             id=str(uuid.uuid4()),
-            vector=vector,
+            vector={"dense": dense, "sparse": sparse},
             payload={
                 "text": chunk,
                 "file_path": str(path),
@@ -172,10 +186,35 @@ def index_directory(dirpath: str, recursive: bool = True) -> list[dict]:
 
 
 def search(query: str, limit: int = 5) -> list[dict]:
-    """Search indexed files. Returns [{text, file_path, chunk_index, score}]."""
+    """Hybrid search over indexed files (dense + sparse RRF).
+
+    Returns [{text, file_path, chunk_index, score}].
+    """
+    import memory  # for _sparse_embed
+    from qdrant_client.models import Prefetch, FusionQuery, Fusion
+
     qc = _get_qdrant()
-    vector = _embed(query)
-    results = qc.query_points(RAG_COLLECTION, query=vector, limit=limit)
+    dense = _embed(query)
+    sparse = memory._sparse_embed(query)
+
+    try:
+        results = qc.query_points(
+            RAG_COLLECTION,
+            prefetch=[
+                Prefetch(query=sparse, using="sparse", limit=limit * 4),
+                Prefetch(query=dense, using="dense", limit=limit * 4),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            limit=limit,
+        )
+    except Exception as e:
+        _log.debug(f"hybrid RAG search failed, falling back to dense: {e}")
+        try:
+            results = qc.query_points(RAG_COLLECTION, query=dense,
+                                      using="dense", limit=limit)
+        except Exception:
+            results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit)
+
     return [
         {
             "text": r.payload.get("text", ""),

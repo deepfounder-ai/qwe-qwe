@@ -24,7 +24,10 @@ sys.modules["db"] = mock_db
 mock_memory = types.ModuleType("memory")
 mock_memory.search = lambda *a, **kw: []
 mock_memory.search_by_vector = lambda *a, **kw: []
+mock_memory.search_grouped = lambda *a, **kw: []
+mock_memory.recommend = lambda *a, **kw: []
 mock_memory.embed = lambda text: [0.0] * 768  # fake vector
+mock_memory._sparse_embed = lambda text: types.SimpleNamespace(indices=[0], values=[1.0])
 mock_memory.save = lambda *a, **kw: "ok"
 mock_memory.delete = lambda *a, **kw: True
 mock_memory.cleanup = lambda *a, **kw: 0
@@ -261,7 +264,7 @@ def _make_exp_result(text, score, outcome_score=1.0):
 
 def _mock_vector_search(search_fn):
     """Patch search_by_vector to delegate to a test's _search(query, ...) function."""
-    mock_memory.search_by_vector = lambda vec, limit=3, tag=None, thread_id=None: search_fn(
+    mock_memory.search_by_vector = lambda vec, limit=3, tag=None, thread_id=None, query_text=None: search_fn(
         "", limit=limit, tag=tag, thread_id=thread_id
     )
 
