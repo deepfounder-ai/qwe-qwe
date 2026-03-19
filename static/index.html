@@ -2044,8 +2044,10 @@ function connect() {
     } else if (data.type === 'task_update') {
       // Auto-refresh background tasks section if cron tab is active
       if (document.getElementById('cronPage')?.style.display !== 'none') loadCron();
-      const taskKey = data.name.replace(/[^a-zA-Z0-9]/g, '_');
-      const isDone = data.text.startsWith('✅') || data.text.startsWith('❌') || data.text.startsWith('⚠️');
+      // Live progress in chat
+      const taskKey = (data.name || 'task').replace(/[^a-zA-Z0-9]/g, '_');
+      const txt = data.text || '';
+      const isDone = txt.startsWith('✅') || txt.startsWith('❌') || txt.startsWith('⚠️');
       let el = document.getElementById('taskProgress_' + taskKey);
       if (!el) {
         el = document.createElement('div');
@@ -2053,9 +2055,10 @@ function connect() {
         el.className = 'msg assistant task-progress';
         chat.appendChild(el);
       }
-      el.innerHTML = `<div class="task-progress-inner">${isDone ? '' : '<i class="ph ph-spinner task-spin"></i> '}<b>${escapeHtml(data.name)}</b>: ${escapeHtml(data.text)}</div>`;
-      if (isDone) el.classList.add('task-done');
+      el.innerHTML = `<div class="task-progress-inner">${isDone ? '' : '<i class="ph ph-spinner task-spin"></i> '}<b>${escapeHtml(data.name || 'task')}</b>: ${escapeHtml(txt)}</div>`;
+      if (isDone) { el.classList.add('task-done'); el.classList.remove('task-progress'); }
       chat.scrollTop = chat.scrollHeight;
+      console.log('[task_update]', data.name, txt);
     }
   };
 }

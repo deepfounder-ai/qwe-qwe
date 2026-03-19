@@ -709,16 +709,20 @@ def _notify(skill_name: str, message: str):
 
     # Try to notify via WebSocket (for web UI auto-refresh)
     try:
-        import asyncio
-        # Import _broadcast and _ws_loop from server if available
-        from server import _broadcast, _ws_loop, _ws_clients
-        if _ws_loop and _ws_clients:
-            asyncio.run_coroutine_threadsafe(
-                _broadcast({"type": "task_update", "name": skill_name, "text": message}),
-                _ws_loop
-            )
-    except Exception:
-        pass
+        import sys
+        if "server" in sys.modules:
+            import asyncio
+            server = sys.modules["server"]
+            ws_loop = getattr(server, "_ws_loop", None)
+            ws_clients = getattr(server, "_ws_clients", None)
+            broadcast = getattr(server, "_broadcast", None)
+            if ws_loop and ws_clients and broadcast:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast({"type": "task_update", "name": skill_name, "text": message}),
+                    ws_loop
+                )
+    except Exception as e:
+        _log.debug(f"[{skill_name}] WS notify failed: {e}")
 
     # Try to notify via telegram
     try:
