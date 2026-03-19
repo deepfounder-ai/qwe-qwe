@@ -405,6 +405,19 @@ Examples:
         pass
     lines.append(f"Time: {now_dt.strftime('%Y-%m-%d %H:%M')} ({tz_label})")
 
+    # Active background tasks — prevents agent from re-triggering running tasks
+    try:
+        import tasks
+        running = tasks.get_running()
+        if running:
+            lines.append("\nBackground tasks running:")
+            for t in running:
+                status = f" — {t['result']}" if t.get("result") else ""
+                lines.append(f"  • {t['task']}{status}")
+            lines.append("Do NOT re-create or duplicate these tasks.")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 

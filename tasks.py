@@ -173,3 +173,10 @@ def pending_count() -> int:
 def completed_count() -> int:
     with _lock:
         return sum(1 for r in _results if r.get("status") != "running")
+
+
+def get_running() -> list[dict]:
+    """Get list of currently running tasks (for system prompt injection)."""
+    with _lock:
+        return [{"name": r.get("name", ""), "task": r["task"], "result": r.get("result", "")}
+                for r in _results if r.get("status") == "running"]

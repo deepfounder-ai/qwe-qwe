@@ -795,6 +795,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
     def _progress(step: str):
         if task_id:
             tasks.update(task_id, "running", step)
+        _notify(skill_name, step)
 
     for attempt in range(1, max_attempts + 1):
         _log.info(f"[{skill_name}] attempt {attempt}/{max_attempts}")
