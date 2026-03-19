@@ -2074,6 +2074,7 @@ function renderTabs() {
 }
 async function switchThread(tid) {
   if (tid === activeThreadId) return;
+  setGenerating(false);  // unlock input when switching threads
   await fetch(`/api/threads/${tid}/switch`, {method:'POST'});
   activeThreadId = tid;
   renderTabs(); loadHistory(tid);
