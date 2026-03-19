@@ -289,16 +289,25 @@ def _t_stats(name: str, spec: dict, first: bool) -> str:
 
 
 def _t_http_request(name: str, spec: dict, first: bool) -> str:
-    """Template for HTTP request tools (send_*, post_*, notify_*, webhook_*)."""
+    """Template for HTTP request tools — uses actual param names from tool definition."""
     kw = "if" if first else "elif"
     url_param = spec.get("url_param", "url")
+    body_params = spec.get("body_params", ["body", "message", "text"])
     method = spec.get("method", "GET").upper()
     lines = [f'    {kw} name == "{name}":']
-    lines.append(f'        import urllib.request, urllib.error')
+    lines.append(f'        import urllib.request, urllib.error, json as _json')
     lines.append(f'        target_url = args.get("{url_param}", "")')
     lines.append(f'        if not target_url:')
-    lines.append(f'            return "Error: url is required"')
-    lines.append(f'        body = args.get("body", args.get("message", args.get("text", "")))')
+    lines.append(f'            return "Error: {url_param} is required"')
+    # Build body from all non-url params
+    if len(body_params) == 1:
+        lines.append(f'        body = args.get("{body_params[0]}", "")')
+    elif body_params:
+        # Multiple body params → build JSON payload from all of them
+        gets = ", ".join(f'"{p}": args.get("{p}", "")' for p in body_params)
+        lines.append(f'        body = _json.dumps({{{gets}}})')
+    else:
+        lines.append(f'        body = ""')
     lines.append(f'        try:')
     if method == "POST":
         lines.append(f'            data = body.encode("utf-8") if body else None')
@@ -316,44 +325,72 @@ def _t_http_request(name: str, spec: dict, first: bool) -> str:
 
 
 def _t_read_file(name: str, spec: dict, first: bool) -> str:
-    """Template for file reading tools (read_*, load_*, fetch_file)."""
+    """Template for file reading tools — uses actual param names from tool definition."""
     kw = "if" if first else "elif"
+    path_param = spec.get("path_param", "path")
+    extra_params = spec.get("extra_params", [])
     lines = [f'    {kw} name == "{name}":']
     lines.append(f'        from pathlib import Path')
-    lines.append(f'        file_path = args.get("path", args.get("file", ""))')
-    lines.append(f'        if not file_path:')
-    lines.append(f'            return "Error: path is required"')
-    lines.append(f'        p = Path(file_path).expanduser()')
-    lines.append(f'        if not p.exists():')
-    lines.append(f'            return f"File not found: {{p}}"')
-    lines.append(f'        if not p.is_file():')
-    lines.append(f'            return f"Not a file: {{p}}"')
-    lines.append(f'        if p.stat().st_size > 1_000_000:')
-    lines.append(f'            return f"File too large: {{p.stat().st_size}} bytes (max 1MB)"')
-    lines.append(f'        try:')
-    lines.append(f'            text = p.read_text(encoding="utf-8", errors="replace")')
-    lines.append(f'            if len(text) > 4000:')
-    lines.append(f'                text = text[:4000] + f"\\n... ({{len(text)}} chars total, truncated)"')
-    lines.append(f'            return text')
-    lines.append(f'        except Exception as e:')
-    lines.append(f'            return f"Read error: {{e}}"')
+    # If multiple file params (e.g. cpu_file, mem_file), read all and concatenate
+    all_paths = [path_param] + extra_params
+    if len(all_paths) > 1:
+        lines.append(f'        results = []')
+        for p in all_paths:
+            lines.append(f'        _{_sanitize_id(p)} = args.get("{p}", "")')
+            lines.append(f'        if _{_sanitize_id(p)}:')
+            lines.append(f'            _p = Path(_{_sanitize_id(p)}).expanduser()')
+            lines.append(f'            if _p.is_file() and _p.stat().st_size <= 1_000_000:')
+            lines.append(f'                try:')
+            lines.append(f'                    results.append(f"[{p}] " + _p.read_text(encoding="utf-8", errors="replace")[:2000])')
+            lines.append(f'                except Exception as e:')
+            lines.append(f'                    results.append(f"[{p}] Error: {{e}}")')
+            lines.append(f'            elif _p.exists():')
+            lines.append(f'                results.append(f"[{p}] Too large or not a file: {{_p}}")')
+            lines.append(f'            else:')
+            lines.append(f'                results.append(f"[{p}] Not found: {{_p}}")')
+        lines.append(f'        if not results:')
+        lines.append(f'            return "Error: no file paths provided"')
+        lines.append(f'        return "\\n".join(results)')
+    else:
+        lines.append(f'        file_path = args.get("{path_param}", "")')
+        lines.append(f'        if not file_path:')
+        lines.append(f'            return "Error: {path_param} is required"')
+        lines.append(f'        p = Path(file_path).expanduser()')
+        lines.append(f'        if not p.exists():')
+        lines.append(f'            return f"File not found: {{p}}"')
+        lines.append(f'        if not p.is_file():')
+        lines.append(f'            return f"Not a file: {{p}}"')
+        lines.append(f'        if p.stat().st_size > 1_000_000:')
+        lines.append(f'            return f"File too large: {{p.stat().st_size}} bytes (max 1MB)"')
+        lines.append(f'        try:')
+        lines.append(f'            text = p.read_text(encoding="utf-8", errors="replace")')
+        lines.append(f'            if len(text) > 4000:')
+        lines.append(f'                text = text[:4000] + f"\\n... ({{len(text)}} chars total, truncated)"')
+        lines.append(f'            return text')
+        lines.append(f'        except Exception as e:')
+        lines.append(f'            return f"Read error: {{e}}"')
     return "\n".join(lines)
 
 
 def _t_schedule(name: str, spec: dict, first: bool) -> str:
-    """Template for scheduling tools (schedule_*, cron_*, every_*, remind_*)."""
+    """Template for scheduling tools — calls scheduler.add() with actual param names."""
     kw = "if" if first else "elif"
+    pm = spec.get("param_map", {})
+    # Use actual param names from tool definition, fall back to generic
+    name_p = pm.get("name") or "name"
+    task_p = pm.get("task") or "task"
+    sched_p = pm.get("schedule") or "schedule"
     lines = [f'    {kw} name == "{name}":']
     lines.append(f'        import scheduler')
-    lines.append(f'        task_name = args.get("name", args.get("task_name", "scheduled_task"))')
-    lines.append(f'        task_desc = args.get("task", args.get("description", args.get("message", "")))')
-    lines.append(f'        schedule = args.get("schedule", args.get("time", args.get("interval", "in 1h")))')
+    lines.append(f'        task_name = args.get("{name_p}", "scheduled_task")')
+    lines.append(f'        task_desc = args.get("{task_p}", "")')
+    lines.append(f'        sched = args.get("{sched_p}", "in 1h")')
     lines.append(f'        if not task_desc:')
-    lines.append(f'            return "Error: task description is required"')
-    lines.append(f'        result = scheduler.add(task_name, task_desc, schedule)')
+    lines.append(f'            return "Error: {task_p} is required"')
+    lines.append(f'        result = scheduler.add(task_name, task_desc, sched)')
     lines.append(f'        if result.get("error"):')
     lines.append(f'            return f"Schedule failed: {{result[\'error\']}}"')
-    lines.append(f'        return f"Scheduled \'{{task_name}}\': {{schedule}} (next: {{result.get(\'next_run\', \'?\')}})"')
+    lines.append(f'        return f"Scheduled \'{{task_name}}\': {{sched}} (next: {{result.get(\'next_run\', \'?\')}})"')
     return "\n".join(lines)
 
 
@@ -447,15 +484,35 @@ def _build_mapping_from_tools(tools_list: list, plan: dict) -> dict:
         tool_desc = func.get("description", "")
         op = _infer_op(tool_name, tool_desc)
 
-        # Non-DB ops don't need table matching
+        # Non-DB ops don't need table matching — pass actual param names
         if op in ("http_request", "read_file", "schedule"):
-            spec = {"op": op}
-            # For http_request: detect url param and method
+            spec = {"op": op, "params": list(props.keys())}
             if op == "http_request":
-                url_param = next((p for p in props if p in ("url", "endpoint", "webhook_url", "target")), "url")
+                # Find the URL-like param (by name or by being the first string param)
+                url_param = next((p for p in props if any(w in p.lower() for w in ("url", "endpoint", "webhook", "target", "link"))), None)
+                if not url_param:
+                    url_param = next((p for p, s in props.items() if s.get("type") == "string"), "url")
                 spec["url_param"] = url_param
+                # Remaining string params are body candidates
+                body_params = [p for p in props if p != url_param]
+                spec["body_params"] = body_params
                 if any(w in tool_name for w in ("post", "send", "notify", "webhook")):
                     spec["method"] = "POST"
+            elif op == "read_file":
+                # Find the path-like param
+                path_param = next((p for p in props if any(w in p.lower() for w in ("path", "file", "filename", "location"))), None)
+                if not path_param:
+                    path_param = next(iter(props), "path")
+                spec["path_param"] = path_param
+                # Any other params are extra (e.g. second file path)
+                spec["extra_params"] = [p for p in props if p != path_param]
+            elif op == "schedule":
+                # Map params by semantic role
+                spec["param_map"] = {
+                    "name": next((p for p in props if any(w in p.lower() for w in ("name", "label", "title", "job"))), None),
+                    "task": next((p for p in props if any(w in p.lower() for w in ("task", "desc", "command", "message", "action"))), None),
+                    "schedule": next((p for p in props if any(w in p.lower() for w in ("schedule", "time", "interval", "cron", "every", "when"))), None),
+                }
             mapping[tool_name] = spec
             continue
 
