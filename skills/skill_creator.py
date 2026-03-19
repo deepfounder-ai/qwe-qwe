@@ -137,36 +137,6 @@ Example for a "notes" skill with tools add_note and list_notes:
 
 Now generate code following this exact pattern. Use 4-space indent. Each branch returns a string."""
 
-STEP3_MAPPING = """You are a tool-to-operation mapper. Given a skill plan with tables and tools, output a JSON object mapping each tool to a database operation.
-
-Output ONLY valid JSON, no markdown, no explanation.
-
-Operation types:
-- "add": Insert a new row
-- "list": Select multiple rows with optional filter
-- "delete": Delete a row by id
-- "update": Modify a row by id
-- "get": Get a single row by id
-- "stats": Count rows
-- "custom": Complex logic that doesn't fit above
-
-For each tool specify:
-{
-  "tool_name": {
-    "op": "add|list|delete|update|get|stats|custom",
-    "table": "table_name",
-    "cols": {"col1": "string", "col2": "integer"},
-    "preview": "col_to_show_in_confirmation",
-    "format": "#{r[0]}: {r[1]} ({r[2]})",
-    "filter_col": "optional_filter_column",
-    "label": "human_noun_for_stats",
-    "update_cols": ["col1", "col2"]
-  }
-}
-
-Only include fields relevant to the operation type."""
-
-
 # ── Template assembly (replaces LLM code generation for CRUD skills) ──
 
 def _sanitize_id(name: str) -> str:
@@ -199,17 +169,21 @@ def _t_add(name: str, spec: dict, first: bool) -> str:
     cols = spec.get("cols", {})
     preview = spec.get("preview", next(iter(cols), "item"))
     lines = [f'    {kw} name == "{name}":']
+    safe_names = {}
     for c, ctype in cols.items():
-        c = _sanitize_id(c)
+        sc = _sanitize_id(c)
+        # Prefix with v_ to avoid shadowing function params like 'name'
+        var = f"v_{sc}" if sc in ("name", "args", "conn") else sc
+        safe_names[c] = var
         default = '""' if ctype == "string" else "0" if ctype == "integer" else "0.0"
-        lines.append(f'        {c} = args.get("{c}", {default})')
+        lines.append(f'        {var} = args.get("{sc}", {default})')
     col_list = ", ".join(_sanitize_id(c) for c in cols)
     placeholders = ", ".join("?" for _ in cols)
-    vals = ", ".join(_sanitize_id(c) for c in cols)
+    vals = ", ".join(safe_names[c] for c in cols)
     lines.append(f'        conn.execute("INSERT INTO {table} ({col_list}) VALUES ({placeholders})", ({vals},))')
     lines.append(f'        conn.commit()')
-    preview = _sanitize_id(preview)
-    lines.append(f'        return f"Added: {{{preview}[:50]}}"')
+    preview_var = safe_names.get(preview, _sanitize_id(preview))
+    lines.append(f'        return f"Added: {{{preview_var}[:50]}}"')
     return "\n".join(lines)
 
 
@@ -333,6 +307,115 @@ def _assemble_from_mapping(mapping: dict) -> tuple:
     return "\n\n".join(blocks), bool(custom_tools), custom_tools
 
 
+def _auto_format(cols: list) -> str:
+    """Generate f-string format from column list for display."""
+    if not cols:
+        return "#{r[0]}"
+    parts = []
+    for i, c in enumerate(cols):
+        if i == 0:
+            parts.append(f"#{{r[{i}]}}")
+        elif i == 1:
+            parts.append(f"{{r[{i}]}}")
+        else:
+            parts.append(f"({{r[{i}]}})")
+    return ": ".join(parts[:2]) + (" " + " ".join(parts[2:]) if len(parts) > 2 else "")
+
+
+def _extract_table_cols(plan: dict, table_name: str) -> list:
+    """Parse column names from plan['tables'] entry matching table_name."""
+    for t in plan.get("tables", []):
+        parts = t.split(":")
+        if len(parts) < 2:
+            continue
+        tname = parts[0].strip().split("(")[0].strip()
+        if _sanitize_id(tname) == _sanitize_id(table_name):
+            cols_str = parts[1].strip()
+            cols = []
+            for c in cols_str.split(","):
+                col_name = c.strip().split()[0]  # take name, skip TYPE
+                col_name = _sanitize_id(col_name)
+                if col_name and col_name.lower() not in ("id", "created_at"):
+                    cols.append(col_name)
+            return cols
+    return []
+
+
+def _build_mapping_from_tools(tools_list: list, plan: dict) -> dict:
+    """Build operation mapping deterministically from tool definitions and plan.
+
+    No LLM call — uses tool names, parameter definitions, and table info from plan.
+    """
+    # Parse table names from plan
+    tables = []
+    for t in plan.get("tables", []):
+        tname = t.split(":")[0].strip().split("(")[0].strip()
+        tname = _sanitize_id(tname)
+        if tname:
+            tables.append(tname)
+    default_table = tables[0] if tables else "items"
+
+    mapping = {}
+    for tool in tools_list:
+        func = tool.get("function", {})
+        tool_name = func.get("name", "")
+        if not tool_name:
+            continue
+        props = func.get("parameters", {}).get("properties", {})
+
+        op = _infer_op(tool_name)
+
+        # Match table by name overlap (e.g. add_habit -> habits)
+        table = default_table
+        for t in tables:
+            # Check if table stem appears in tool name
+            stem = t.rstrip("s")
+            if stem and stem in tool_name:
+                table = t
+                break
+
+        # Extract cols from tool parameters (skip "id" and "limit")
+        cols = {}
+        for pname, pspec in props.items():
+            if pname in ("id", "limit"):
+                continue
+            ptype = pspec.get("type", "string")
+            cols[pname] = ptype
+
+        spec = {"op": op, "table": table}
+
+        if op == "add":
+            spec["cols"] = cols
+            first_str = next((c for c, t in cols.items() if t == "string"), next(iter(cols), None))
+            if first_str:
+                spec["preview"] = first_str
+
+        elif op == "list":
+            plan_cols = _extract_table_cols(plan, table)
+            list_cols = ["id"] + (plan_cols if plan_cols else [_sanitize_id(c) for c in cols])
+            spec["cols"] = list_cols
+            spec["format"] = _auto_format(list_cols)
+            filter_cols = [c for c in cols if cols[c] == "string"]
+            if filter_cols:
+                spec["filter_col"] = filter_cols[0]
+
+        elif op == "update":
+            spec["update_cols"] = [_sanitize_id(c) for c in cols]
+
+        elif op == "stats":
+            spec["label"] = table
+
+        elif op == "get":
+            plan_cols = _extract_table_cols(plan, table)
+            get_cols = ["id"] + (plan_cols[:4] if plan_cols else [_sanitize_id(c) for c in cols])
+            spec["cols"] = get_cols
+            spec["format"] = _auto_format(get_cols)
+
+        mapping[tool_name] = spec
+
+    return mapping
+
+
 def _build_table_ddl(plan: dict) -> str:
     """Build CREATE TABLE DDL from plan, fixing duplicate id/created_at columns."""
     ddl_lines = []
@@ -371,6 +454,11 @@ def _build_table_ddl(plan: dict) -> str:
     return "\n".join(ddl_lines) if ddl_lines else "    pass  # No tables needed"
 
 
+# ── Duplicate creation guard ──
+_active_skills: set = set()
+_active_lock = threading.Lock()
+
+
 def execute(name: str, args: dict) -> str:
     if name == "create_skill":
         return _create_skill_async(args["name"], args["description"])
@@ -388,10 +476,18 @@ def _create_skill_async(skill_name: str, description: str) -> str:
     if not skill_name.isidentifier():
         return f"Error: '{skill_name}' is not a valid Python identifier"
 
+    # Prevent duplicate concurrent generation
+    with _active_lock:
+        if skill_name in _active_skills:
+            return f"Skill '{skill_name}' is already being generated. Please wait."
+        _active_skills.add(skill_name)
+
     import config
     skills_dir = config.USER_SKILLS_DIR  # user skills go to ~/.qwe-qwe/skills/
     target = skills_dir / f"{skill_name}.py"
     if target.exists():
+        with _active_lock:
+            _active_skills.discard(skill_name)
         return f"Error: skill '{skill_name}' already exists at {target}"
 
     # Register in background tasks registry
@@ -436,7 +532,10 @@ def _llm_call(system: str, user: str, max_tokens: int = 2048) -> str:
 
 
 def _extract_json(raw: str):
-    """Extract JSON from LLM output, handling markdown fences."""
+    """Extract JSON from LLM output, handling markdown fences and thinking text."""
+    # Strip thinking tags (tagged and untagged)
+    raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL).strip()
+
     # Strip markdown code fences
     if "```" in raw:
         lines = raw.split("\n")
@@ -446,19 +545,35 @@ def _extract_json(raw: str):
             if line.strip().startswith("```"):
                 in_fence = not in_fence
                 continue
-            if in_fence or not clean:  # keep content
+            if in_fence or not clean:
                 clean.append(line)
         raw = "\n".join(clean).strip()
 
-    # Try to find JSON
-    match = re.search(r'[\[{].*[\]}]', raw, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+    # Try full text as JSON first
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
 
-    # Try json repair
+    # Scan from end to find last valid JSON block (skips thinking text before JSON)
+    for i in range(len(raw) - 1, -1, -1):
+        if raw[i] in ('}', ']'):
+            opener = '{' if raw[i] == '}' else '['
+            depth = 0
+            for j in range(i, -1, -1):
+                if raw[j] == raw[i]:
+                    depth += 1
+                elif raw[j] == opener:
+                    depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[j:i + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        break
+            # Only try the outermost match
+            break
+
+    # Try json repair as last resort
     try:
         from agent import _repair_json
         return _repair_json(raw)
@@ -654,6 +769,15 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
 
 def _generate_skill_pipeline(skill_name: str, description: str, target: Path, task_id: int = 0):
     """Multi-step skill generation pipeline running in background."""
+    try:
+        _run_pipeline(skill_name, description, target, task_id)
+    finally:
+        with _active_lock:
+            _active_skills.discard(skill_name)
+
+
+def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int = 0):
+    """Actual pipeline logic, wrapped by _generate_skill_pipeline for cleanup."""
     import logger
     import tasks
     _log = logger.get("skill_creator")
@@ -710,66 +834,36 @@ def _generate_skill_pipeline(skill_name: str, description: str, target: Path, ta
 
             _log.info(f"[{skill_name}] step 2 done: {len(tools_list)} tools")
 
-            # ── Step 3: Operation mapping + template assembly ──
-            _progress(f"Step 3/5: mapping operations (attempt {attempt})")
-            _log.info(f"[{skill_name}] step 3: generating operation mapping")
+            # ── Step 3: Deterministic mapping + template assembly (no LLM) ──
+            _progress(f"Step 3/5: assembling code (attempt {attempt})")
+            _log.info(f"[{skill_name}] step 3: building mapping from tool definitions")
             tool_names = [t["function"]["name"] for t in tools_list]
-            tool_descriptions = "\n".join(
-                f"- {t['function']['name']}: {t['function'].get('description', '')}"
-                for t in tools_list
-            )
             tables_info = "\n".join(plan.get("tables", []))
 
-            mapping_prompt = (
-                f"Skill: {skill_name}\n"
-                f"Tables:\n{tables_info}\n\n"
-                f"Tools to map:\n{tool_descriptions}\n\n"
-                f"Map each tool to an operation. Tool names: {tool_names}"
-            )
+            mapping = _build_mapping_from_tools(tools_list, plan)
+            execute_body, has_custom, custom_tools = _assemble_from_mapping(mapping)
+            _log.info(f"[{skill_name}] step 3: assembled {len(mapping) - len(custom_tools)} tools from templates")
 
-            mapping_raw = _llm_call(STEP3_MAPPING, mapping_prompt, max_tokens=1024)
-            mapping = _extract_json(mapping_raw)
-
-            if mapping and isinstance(mapping, dict):
-                # Fill missing tools with heuristic inference
-                for tn in tool_names:
-                    if tn not in mapping:
-                        _log.info(f"[{skill_name}] tool '{tn}' missing from mapping, inferring op")
-                        mapping[tn] = {"op": _infer_op(tn), "table": plan.get("tables", ["items"])[0].split(":")[0].strip()}
-
-                execute_body, has_custom, custom_tools = _assemble_from_mapping(mapping)
-                _log.info(f"[{skill_name}] step 3: assembled {len(mapping) - len(custom_tools)} tools from templates")
-
-                if has_custom and custom_tools:
-                    # Fall back to LLM for custom tools only
-                    _log.info(f"[{skill_name}] step 3: {len(custom_tools)} custom tools need LLM: {custom_tools}")
-                    custom_prompt = (
-                        f"Skill: {skill_name}\n"
-                        f"Tables (already created):\n{tables_info}\n\n"
-                        f"Generate ONLY elif blocks for these tools:\n"
-                        + "\n".join(f"- {tn}" for tn in custom_tools)
-                        + f"\n\nDescriptions:\n{tool_descriptions}\n"
-                        f"Start each with 'elif name == \"tool_name\":'. Each returns a string."
-                    )
-                    custom_raw = _llm_call(STEP3_CODE, custom_prompt, max_tokens=2048)
-                    custom_code = _extract_code(custom_raw)
-                    custom_code = _fix_indentation(custom_code)
-                    custom_code = _fix_empty_blocks(custom_code)
-                    execute_body = execute_body + "\n\n" + custom_code if execute_body else custom_code
-            else:
-                # Mapping failed — full fallback to LLM code generation
-                _log.warning(f"[{skill_name}] step 3: mapping failed, falling back to LLM codegen")
-                code_prompt = (
-                    f"Skill: {skill_name}\n"
-                    f"Tables (already created via DDL):\n{tables_info}\n\n"
-                    f"Tools to implement:\n{tool_descriptions}\n\n"
-                    f"Generate the if/elif chain for execute(). "
-                    f"Tool names: {tool_names}"
+            if has_custom and custom_tools:
+                # Fall back to LLM only for truly custom operations
+                _log.info(f"[{skill_name}] step 3: {len(custom_tools)} custom tools need LLM: {custom_tools}")
+                tool_descriptions = "\n".join(
+                    f"- {t['function']['name']}: {t['function'].get('description', '')}"
+                    for t in tools_list
                 )
-                code_raw = _llm_call(STEP3_CODE, code_prompt, max_tokens=3072)
-                execute_body = _extract_code(code_raw)
-                execute_body = _fix_indentation(execute_body)
-                execute_body = _fix_empty_blocks(execute_body)
+                custom_prompt = (
+                    f"Skill: {skill_name}\n"
+                    f"Tables (already created):\n{tables_info}\n\n"
+                    f"Generate ONLY elif blocks for these tools:\n"
+                    + "\n".join(f"- {tn}" for tn in custom_tools)
+                    + f"\n\nDescriptions:\n{tool_descriptions}\n"
+                    f"Start each with 'elif name == \"tool_name\":'. Each returns a string."
+                )
+                custom_raw = _llm_call(STEP3_CODE, custom_prompt, max_tokens=2048)
+                custom_code = _extract_code(custom_raw)
+                custom_code = _fix_indentation(custom_code)
+                custom_code = _fix_empty_blocks(custom_code)
+                execute_body = execute_body + "\n\n" + custom_code if execute_body else custom_code
 
             # ── Step 4: Generate table DDL ──
             _progress(f"Step 4/5: building tables (attempt {attempt})")
