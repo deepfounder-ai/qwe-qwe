@@ -41,6 +41,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "delete_skill",
+            "description": "Delete a user-created skill by name. Cannot delete built-in skills.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name to delete (e.g. 'health_check')",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_skill_files",
             "description": "List existing skill files to see examples.",
             "parameters": {"type": "object", "properties": {}},
@@ -621,9 +638,49 @@ _active_lock = threading.Lock()
 def execute(name: str, args: dict) -> str:
     if name == "create_skill":
         return _create_skill_async(args["name"], args["description"])
+    elif name == "delete_skill":
+        return _delete_skill(args["name"])
     elif name == "list_skill_files":
         return _list_skills()
     return f"Unknown tool: {name}"
+
+
+def _delete_skill(skill_name: str) -> str:
+    """Delete a user-created skill. Refuses to delete built-in skills."""
+    import config
+    from skills import disable
+
+    skill_name = skill_name.lower().replace(" ", "_").replace("-", "_")
+    if not skill_name.isidentifier():
+        return f"Error: '{skill_name}' is not a valid skill name"
+
+    # Only allow deleting from user skills directory
+    user_dir = config.USER_SKILLS_DIR
+    target = user_dir / f"{skill_name}.py"
+
+    # Check if it's a built-in skill
+    builtin_dir = Path(__file__).parent
+    if (builtin_dir / f"{skill_name}.py").exists():
+        return f"Error: '{skill_name}' is a built-in skill and cannot be deleted"
+
+    if not target.exists():
+        return f"Error: skill '{skill_name}' not found in {user_dir}"
+
+    # Disable first
+    disable(skill_name)
+
+    # Delete file
+    target.unlink()
+
+    # Clean up __pycache__
+    pycache = user_dir / "__pycache__"
+    if pycache.exists():
+        for cached in pycache.glob(f"skill_{skill_name}*"):
+            cached.unlink(missing_ok=True)
+        for cached in pycache.glob(f"{skill_name}*"):
+            cached.unlink(missing_ok=True)
+
+    return f"Deleted skill '{skill_name}'"
 
 
 def _create_skill_async(skill_name: str, description: str) -> str:
