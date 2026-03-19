@@ -20,10 +20,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.4.0-blue" alt="version">
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
   <img src="https://img.shields.io/badge/runs-100%25_offline-purple" alt="offline">
+  <a href="https://t.me/qwe_qwe_ai"><img src="https://img.shields.io/badge/community-Telegram-blue?logo=telegram" alt="Telegram"></a>
 </p>
 
 ---
@@ -396,6 +397,12 @@ Persistent data in `./data/` (memory, logs, skills, database).
 ├── logs/            # System logs
 └── pyproject.toml   # Package config
 ```
+
+## Community
+
+Join our Telegram community for support, feature requests, and discussion:
+
+**[@qwe_qwe_ai](https://t.me/qwe_qwe_ai)** — English & Russian
 
 ## License
 

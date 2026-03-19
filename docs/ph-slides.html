@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>qwe-qwe — Product Hunt Gallery Slides</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #fff; padding: 40px; }
+  .slide {
+    width: 1270px; height: 760px;
+    background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 50%, #16213e 100%);
+    border-radius: 16px;
+    margin: 40px auto;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #333;
+  }
+  .slide::before {
+    content: '';
+    position: absolute;
+    top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: radial-gradient(circle at 30% 40%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 70% 60%, rgba(139, 92, 246, 0.06) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .slide-label {
+    text-align: center;
+    color: #666;
+    font-size: 14px;
+    margin: 10px 0 30px;
+  }
+  h1 { font-size: 54px; font-weight: 800; letter-spacing: -1px; }
+  h2 { font-size: 36px; font-weight: 700; }
+  h3 { font-size: 24px; font-weight: 600; }
+  .accent { color: #818cf8; }
+  .accent2 { color: #a78bfa; }
+  .muted { color: #9ca3af; }
+  .tag {
+    display: inline-block;
+    background: rgba(129, 140, 248, 0.15);
+    border: 1px solid rgba(129, 140, 248, 0.3);
+    color: #a5b4fc;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .stats-row {
+    display: flex;
+    gap: 40px;
+    margin-top: 40px;
+  }
+  .stat {
+    text-align: center;
+  }
+  .stat-num {
+    font-size: 42px;
+    font-weight: 800;
+    color: #818cf8;
+  }
+  .stat-label {
+    font-size: 14px;
+    color: #9ca3af;
+    margin-top: 4px;
+  }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    padding: 0 60px;
+    width: 100%;
+  }
+  .feature-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 24px;
+    text-align: left;
+  }
+  .feature-card .icon {
+    font-size: 28px;
+    margin-bottom: 12px;
+  }
+  .feature-card h3 {
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+  .feature-card p {
+    font-size: 13px;
+    color: #9ca3af;
+    line-height: 1.5;
+  }
+  .steps {
+    display: flex;
+    gap: 40px;
+    align-items: flex-start;
+    padding: 0 60px;
+    width: 100%;
+  }
+  .step {
+    flex: 1;
+    text-align: center;
+  }
+  .step-num {
+    width: 48px; height: 48px;
+    background: linear-gradient(135deg, #818cf8, #a78bfa);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    font-weight: 800;
+    margin: 0 auto 16px;
+  }
+  .step h3 { margin-bottom: 8px; font-size: 20px; }
+  .step p { font-size: 13px; color: #9ca3af; line-height: 1.5; }
+  .code-block {
+    background: rgba(0,0,0,0.4);
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 14px;
+    color: #a5b4fc;
+    margin-top: 12px;
+    display: inline-block;
+  }
+  .arch-box {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 16px 24px;
+    text-align: center;
+    font-size: 15px;
+    min-width: 140px;
+  }
+  .arch-row {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    justify-content: center;
+  }
+  .arch-arrow {
+    font-size: 28px;
+    color: #818cf8;
+  }
+  .arch-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .arch-small {
+    background: rgba(129, 140, 248, 0.1);
+    border: 1px solid rgba(129, 140, 248, 0.25);
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    color: #a5b4fc;
+    text-align: center;
+  }
+  .flow-row {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: center;
+  }
+  .flow-box {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px;
+    padding: 16px 20px;
+    text-align: center;
+    min-width: 160px;
+  }
+  .flow-box.success {
+    border-color: rgba(34, 197, 94, 0.4);
+    background: rgba(34, 197, 94, 0.08);
+  }
+  .flow-box.fail {
+    border-color: rgba(239, 68, 68, 0.4);
+    background: rgba(239, 68, 68, 0.08);
+  }
+  .flow-box.neutral {
+    border-color: rgba(129, 140, 248, 0.3);
+    background: rgba(129, 140, 248, 0.08);
+  }
+  .flow-arrow { font-size: 24px; color: #666; }
+  .logo-img { width: 120px; height: 120px; margin-bottom: 24px; border-radius: 20px; }
+  .badge-row { display: flex; gap: 12px; margin-top: 20px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ SLIDE 1: HERO ═══════════════ -->
+<p class="slide-label">Slide 1 — Hero (1270x760)</p>
+<div class="slide">
+  <img src="../static/logo.png" class="logo-img" alt="logo">
+  <h1>qwe-qwe</h1>
+  <p style="font-size: 22px; color: #d1d5db; margin-top: 12px;">
+    Your AI agent that runs <span class="accent">100% offline</span> on your laptop
+  </p>
+  <p style="font-size: 16px; color: #6b7280; margin-top: 8px;">
+    Optimized for small local models. No cloud, no subscriptions, no data leaving your machine.
+  </p>
+  <div class="stats-row">
+    <div class="stat">
+      <div class="stat-num">32+</div>
+      <div class="stat-label">Built-in Tools</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">4</div>
+      <div class="stat-label">Interfaces</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">&infin;</div>
+      <div class="stat-label">Semantic Memory</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">$0</div>
+      <div class="stat-label">Monthly Cost</div>
+    </div>
+  </div>
+  <div class="badge-row">
+    <span class="tag">Open Source (MIT)</span>
+    <span class="tag">CLI + Web + Telegram</span>
+    <span class="tag">8GB GPU</span>
+    <span class="tag">Qwen 9B</span>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 2: FEATURES ═══════════════ -->
+<p class="slide-label">Slide 2 — Key Features (1270x760)</p>
+<div class="slide">
+  <h2 style="margin-bottom: 40px;">Everything a personal agent needs</h2>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <div class="icon">🧠</div>
+      <h3>Semantic Memory</h3>
+      <p>Remembers facts, preferences, and past experiences. Auto-injects relevant context into every conversation.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔧</div>
+      <h3>32+ Tools</h3>
+      <p>Files, shell, web search, notes, secrets vault, scheduling. One tool call away from any action.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">📚</div>
+      <h3>RAG Search</h3>
+      <p>Index any file — code, docs, PDFs — and search by meaning. 30+ formats supported.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">⚡</div>
+      <h3>Skill Creation</h3>
+      <p>"Create a habit tracker" — agent generates, validates, and deploys working Python code.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔒</div>
+      <h3>Privacy First</h3>
+      <p>100% offline. Encrypted vault. Write whitelist. Shell safety blocks. Your data never leaves.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🎭</div>
+      <h3>Personality</h3>
+      <p>Customize humor, formality, creativity. Add traits. Name your agent. Make it yours.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 3: HOW IT WORKS ═══════════════ -->
+<p class="slide-label">Slide 3 — How It Works (1270x760)</p>
+<div class="slide">
+  <h2 style="margin-bottom: 50px;">Up and running in <span class="accent">3 minutes</span></h2>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <h3>Install</h3>
+      <p>One command. Auto-creates venv, installs deps, sets up database.</p>
+      <div class="code-block">curl -fsSL ...install.sh | bash</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <h3>Set Up Model</h3>
+      <p>Wizard detects your GPU, installs Ollama, pulls the right model.</p>
+      <div class="code-block">qwe-qwe --setup-inference</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <h3>Chat</h3>
+      <p>Terminal, browser, or Telegram. Your agent is ready.</p>
+      <div class="code-block">qwe-qwe --web</div>
+    </div>
+  </div>
+  <p style="margin-top: 50px; color: #6b7280; font-size: 15px;">
+    Works on: RTX 3060+ (8GB VRAM) &bull; Mac M1/M2/M3 &bull; Any 16GB RAM machine
+  </p>
+</div>
+
+<!-- ═══════════════ SLIDE 4: ARCHITECTURE ═══════════════ -->
+<p class="slide-label">Slide 4 — Architecture (1270x760)</p>
+<div class="slide">
+  <h2 style="margin-bottom: 40px;">Smart system, small model</h2>
+  <p style="color: #9ca3af; margin-bottom: 40px; font-size: 16px;">
+    Don't make the 9B model smarter — make the system around it smarter
+  </p>
+  <div class="arch-row">
+    <div class="arch-stack">
+      <div class="arch-box">💻 Terminal</div>
+      <div class="arch-box">🌐 Web UI</div>
+      <div class="arch-box">📱 Telegram</div>
+    </div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box" style="padding: 24px 32px; border-color: rgba(129,140,248,0.4);">
+      <div style="font-size: 20px; font-weight: 700; color: #818cf8;">Agent Loop</div>
+      <div style="font-size: 13px; color: #9ca3af; margin-top: 8px;">JSON repair &bull; Retry &bull; Self-check</div>
+    </div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-stack">
+      <div class="arch-small">🧠 Semantic Memory</div>
+      <div class="arch-small">📚 RAG Index</div>
+      <div class="arch-small">🔧 32+ Tools</div>
+      <div class="arch-small">⚡ Skills</div>
+      <div class="arch-small">🔒 Vault</div>
+      <div class="arch-small">⏰ Scheduler</div>
+    </div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box" style="padding: 24px 32px; border-color: rgba(167,139,246,0.4);">
+      <div style="font-size: 20px; font-weight: 700; color: #a78bfa;">Local LLM</div>
+      <div style="font-size: 13px; color: #9ca3af; margin-top: 8px;">Qwen 9B &bull; Ollama/LM Studio</div>
+      <div style="font-size: 12px; color: #6b7280; margin-top: 4px;">7 providers supported</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 5: MEMENTO ═══════════════ -->
+<p class="slide-label">Slide 5 — Experience Learning (1270x760)</p>
+<div class="slide">
+  <h2 style="margin-bottom: 12px;">Memento <span class="accent2">Experience Learning</span></h2>
+  <p style="color: #9ca3af; margin-bottom: 50px; font-size: 16px;">
+    Your agent learns from every task — remembers what worked, avoids what didn't
+  </p>
+  <div class="flow-row" style="margin-bottom: 30px;">
+    <div class="flow-box neutral">
+      <div style="font-size: 24px; margin-bottom: 8px;">💬</div>
+      <div style="font-weight: 600;">User Request</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">"install nginx and configure it"</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box neutral">
+      <div style="font-size: 24px; margin-bottom: 8px;">🔧</div>
+      <div style="font-weight: 600;">Execute</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">Tools: shell, write_file</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box success">
+      <div style="font-size: 24px; margin-bottom: 8px;">✅</div>
+      <div style="font-weight: 600;">Save Experience</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">outcome: success (weight 1.0)</div>
+    </div>
+  </div>
+  <div class="flow-row" style="margin-bottom: 40px;">
+    <div class="flow-box neutral">
+      <div style="font-size: 24px; margin-bottom: 8px;">💬</div>
+      <div style="font-weight: 600;">Similar Request Later</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">"set up apache web server"</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box" style="border-color: rgba(129,140,248,0.4); background: rgba(129,140,248,0.08);">
+      <div style="font-size: 24px; margin-bottom: 8px;">🧠</div>
+      <div style="font-weight: 600;">Recall Experience</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">semantic similarity + outcome weight</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box success">
+      <div style="font-size: 24px; margin-bottom: 8px;">⚡</div>
+      <div style="font-weight: 600;">Better Execution</div>
+      <div style="font-size: 12px; color: #9ca3af; margin-top: 4px;">reuses successful approach</div>
+    </div>
+  </div>
+  <div style="display: flex; gap: 40px; font-size: 14px;">
+    <div><span style="color: #22c55e; font-weight: 700;">success</span> <span class="muted">(weight 1.0) — repeat</span></div>
+    <div><span style="color: #eab308; font-weight: 700;">partial</span> <span class="muted">(weight 0.6) — improve</span></div>
+    <div><span style="color: #ef4444; font-weight: 700;">failed</span> <span class="muted">(weight 0.2) — avoid</span></div>
+  </div>
+</div>
+
+<p style="text-align: center; color: #444; margin-top: 60px; font-size: 13px;">
+  Open each slide in browser at 100% zoom &rarr; screenshot at 1270x760px &rarr; upload to Product Hunt
+</p>
+
+</body>
+</html>
