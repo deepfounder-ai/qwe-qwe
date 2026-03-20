@@ -879,22 +879,33 @@ def _run_knowledge_index(task_id: int, files: list[dict]):
 
     with _knowledge_lock:
         if _knowledge_task:
-            _knowledge_task["status"] = "done"
+            _knowledge_task.update({
+                "status": "done",
+                "files_done": len(results),
+                "chunks_done": total_chunks,
+                "errors_count": len(errors),
+            })
 
     _emit_knowledge({
         "type": "knowledge_done",
         "files": len(results),
         "chunks": total_chunks,
         "errors": len(errors),
-        "duration_sec": 0  # tracked client-side
+        "duration_sec": 0
     })
 
     # Update tasks registry
     import tasks as t
     t.update(task_id, "done", f"Indexed {len(results)} files, {total_chunks} chunks")
 
-    with _knowledge_lock:
-        _knowledge_task = None
+    # Keep result visible for polling clients, then clear after 10s
+    def _clear_task():
+        import time as _t
+        _t.sleep(10)
+        with _knowledge_lock:
+            global _knowledge_task
+            _knowledge_task = None
+    threading.Thread(target=_clear_task, daemon=True).start()
 
 
 # ── File Browser ──

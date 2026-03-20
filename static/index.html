@@ -2465,6 +2465,8 @@ function knRenderSelection() {
   actions.style.display = 'flex';
 }
 
+let _knPollTimer = null;
+
 async function knStartIndex() {
   if (_knSelected.size === 0) return;
 
@@ -2485,8 +2487,38 @@ async function knStartIndex() {
       alert(data.error);
       document.querySelector('.kn-split').style.display = 'flex';
       document.getElementById('knProgress').style.display = 'none';
+      return;
     }
+    // Start polling fallback in case WS events don't arrive
+    _knStartPolling();
   } catch(e) { alert('Index failed: ' + e.message); }
+}
+
+function _knStartPolling() {
+  _knStopPolling();
+  _knPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch('/api/knowledge/status');
+      const data = await res.json();
+      if (data.status === 'running') {
+        knOnProgress({file: data.file || '...', current: data.current || 0, total: data.total || 0, phase: data.phase || 'cpu'});
+      } else if (data.status === 'done') {
+        _knStopPolling();
+        if (document.getElementById('knProgress').style.display !== 'none') {
+          knOnDone({files: data.files_done || data.total || 0, chunks: data.chunks_done || 0, errors: data.errors_count || 0});
+        }
+      } else if (data.status === 'idle') {
+        _knStopPolling();
+        if (document.getElementById('knProgress').style.display !== 'none') {
+          knOnDone({files: 0, chunks: 0, errors: 0});
+        }
+      }
+    } catch(e) { /* ignore polling errors */ }
+  }, 2000);
+}
+
+function _knStopPolling() {
+  if (_knPollTimer) { clearInterval(_knPollTimer); _knPollTimer = null; }
 }
 
 function knOnProgress(data) {
@@ -2504,6 +2536,7 @@ function knOnGpuWarning(data) {
 }
 
 function knOnDone(data) {
+  _knStopPolling();
   document.getElementById('knProgress').style.display = 'none';
   document.getElementById('knGpuWarning').style.display = 'none';
   document.getElementById('knDone').style.display = '';

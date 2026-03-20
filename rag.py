@@ -472,6 +472,16 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None) -> lis
     from qdrant_client.models import PointStruct
     import memory
 
+    # Normalize method names (frontend sends "text"/"pdf"/"vision",
+    # backend uses "chunk_text"/"pdf_extract"/"vision_describe")
+    _METHOD_MAP = {
+        "text": "chunk_text", "pdf": "pdf_extract", "vision": "vision_describe",
+        "chunk_text": "chunk_text", "pdf_extract": "pdf_extract",
+        "vision_describe": "vision_describe", "pdf_scan": "pdf_scan",
+    }
+    for f in files:
+        f["method"] = _METHOD_MAP.get(f.get("method", ""), "chunk_text")
+
     cpu_files = [f for f in files if f.get("method") in ("chunk_text", "pdf_extract")]
     gpu_files = [f for f in files if f.get("method") in ("vision_describe", "pdf_scan")]
     total = len(cpu_files) + len(gpu_files)
