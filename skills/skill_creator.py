@@ -168,6 +168,8 @@ def _infer_op(tool_name: str, description: str = "") -> str:
     # Order matters: more specific patterns first, then general CRUD
     if any(w in n for w in ("schedule", "cron", "every", "remind", "timer")):
         return "schedule"
+    if any(w in n for w in ("telegram",)) or ("telegram" in d and any(w in n for w in ("send", "notify"))):
+        return "telegram"
     if any(w in n for w in ("send", "post", "notify", "webhook", "ping", "alert")):
         return "http_request"
     if any(w in n for w in ("read_file", "load_file", "open_file")):
@@ -389,6 +391,40 @@ def _t_read_file(name: str, spec: dict, first: bool) -> str:
     return "\n".join(lines)
 
 
+def _t_telegram(name: str, spec: dict, first: bool) -> str:
+    """Template for Telegram-sending tools — builds API URL from bot_token + chat_id."""
+    kw = "if" if first else "elif"
+    pm = spec.get("param_map", {})
+    token_p = pm.get("bot_token", "bot_token")
+    chat_p = pm.get("chat_id", "chat_id")
+    text_p = pm.get("text", "message_text")
+    lines = [f'    {kw} name == "{name}":']
+    lines.append(f'        import urllib.request, urllib.error, json as _json')
+    lines.append(f'        bot_token = args.get("{token_p}", "")')
+    lines.append(f'        chat_id = args.get("{chat_p}", "")')
+    lines.append(f'        text = args.get("{text_p}", "")')
+    lines.append(f'        if not bot_token:')
+    lines.append(f'            return "Error: {token_p} is required"')
+    lines.append(f'        if not chat_id:')
+    lines.append(f'            return "Error: {chat_p} is required"')
+    lines.append(f'        if not text:')
+    lines.append(f'            return "Error: {text_p} is required"')
+    lines.append(f'        url = f"https://api.telegram.org/bot{{bot_token}}/sendMessage"')
+    lines.append(f'        payload = _json.dumps({{"chat_id": chat_id, "text": text, "parse_mode": "HTML"}}).encode("utf-8")')
+    lines.append(f'        try:')
+    lines.append(f'            req = urllib.request.Request(url, data=payload, method="POST")')
+    lines.append(f'            req.add_header("Content-Type", "application/json")')
+    lines.append(f'            req.add_header("User-Agent", "qwe-qwe/skill")')
+    lines.append(f'            with urllib.request.urlopen(req, timeout=15) as resp:')
+    lines.append(f'                result = _json.loads(resp.read().decode("utf-8"))')
+    lines.append(f'            if result.get("ok"):')
+    lines.append(f'                return f"Telegram message sent to chat {{chat_id}}"')
+    lines.append(f'            return f"Telegram API error: {{result}}"')
+    lines.append(f'        except urllib.error.URLError as e:')
+    lines.append(f'            return f"Telegram request failed: {{e}}"')
+    return "\n".join(lines)
+
+
 def _t_schedule(name: str, spec: dict, first: bool) -> str:
     """Template for scheduling tools — calls scheduler.add() with actual param names."""
     kw = "if" if first else "elif"
@@ -414,8 +450,8 @@ def _t_schedule(name: str, spec: dict, first: bool) -> str:
 _TEMPLATE_BUILDERS = {
     "add": _t_add, "list": _t_list, "delete": _t_delete,
     "update": _t_update, "get": _t_get, "stats": _t_stats,
-    "http_request": _t_http_request, "read_file": _t_read_file,
-    "schedule": _t_schedule,
+    "http_request": _t_http_request, "telegram": _t_telegram,
+    "read_file": _t_read_file, "schedule": _t_schedule,
 }
 
 
@@ -476,6 +512,22 @@ def _extract_table_cols(plan: dict, table_name: str) -> list:
     return []
 
 
+def _has_telegram_params(props: dict) -> bool:
+    """Check if tool parameters look like Telegram API params (bot_token + chat_id)."""
+    names = {p.lower() for p in props}
+    has_token = any(w in n for n in names for w in ("bot_token", "token"))
+    has_chat = any(w in n for n in names for w in ("chat_id", "chat"))
+    return has_token and has_chat
+
+
+def _map_telegram_params(props: dict) -> dict:
+    """Map actual parameter names to telegram template roles."""
+    token_p = next((p for p in props if any(w in p.lower() for w in ("bot_token", "token"))), "bot_token")
+    chat_p = next((p for p in props if any(w in p.lower() for w in ("chat_id", "chat"))), "chat_id")
+    text_p = next((p for p in props if any(w in p.lower() for w in ("message", "text", "body", "content")) and "token" not in p.lower() and "chat" not in p.lower()), "message_text")
+    return {"bot_token": token_p, "chat_id": chat_p, "text": text_p}
+
+
 def _build_mapping_from_tools(tools_list: list, plan: dict) -> dict:
     """Build operation mapping deterministically from tool definitions and plan.
 
@@ -502,9 +554,14 @@ def _build_mapping_from_tools(tools_list: list, plan: dict) -> dict:
         op = _infer_op(tool_name, tool_desc)
 
         # Non-DB ops don't need table matching — pass actual param names
-        if op in ("http_request", "read_file", "schedule"):
+        # http_request with bot_token+chat_id → upgrade to telegram
+        if op == "http_request" and _has_telegram_params(props):
+            op = "telegram"
+        if op in ("http_request", "telegram", "read_file", "schedule"):
             spec = {"op": op, "params": list(props.keys())}
-            if op == "http_request":
+            if op == "telegram":
+                spec["param_map"] = _map_telegram_params(props)
+            elif op == "http_request":
                 # Find the URL-like param (by name or by being the first string param)
                 url_param = next((p for p in props if any(w in p.lower() for w in ("url", "endpoint", "webhook", "target", "link"))), None)
                 if not url_param:
@@ -956,7 +1013,8 @@ def _cleanup_debug_logs(logs_dir: Path, keep: int = 5):
 def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
     """Try importing the skill and calling execute() with empty args for each tool.
 
-    Catches crashes on import or basic call — NOT functional correctness.
+    Also verifies that required parameters from tool definitions are actually
+    referenced in the generated execute() code (catches definition/implementation mismatch).
     Returns list of error strings (empty = OK).
     """
     errors = []
@@ -968,10 +1026,19 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
     except Exception as e:
         return [f"Import failed: {e}"]
 
+    # Read source code for param-usage check
+    try:
+        source = skill_path.read_text(encoding="utf-8")
+    except Exception:
+        source = ""
+
     for t in tools_list:
-        tool_name = t.get("function", {}).get("name", "")
+        func = t.get("function", {})
+        tool_name = func.get("name", "")
         if not tool_name:
             continue
+
+        # 1. Basic call test
         try:
             result = mod.execute(tool_name, {})
             if not isinstance(result, str):
@@ -981,8 +1048,22 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
             # Some errors are expected with empty args (e.g. missing required param)
             # Only flag actual crashes, not "missing argument" type errors
             if "NOT NULL" in err_str or "required" in err_str.lower() or "missing" in err_str.lower():
-                continue  # Expected with empty args
-            errors.append(f"{tool_name}: {e}")
+                pass  # Expected with empty args — continue to param check
+            else:
+                errors.append(f"{tool_name}: {e}")
+
+        # 2. Param-usage check: every required param must appear in execute() source
+        if source:
+            required = func.get("parameters", {}).get("required", [])
+            props = func.get("parameters", {}).get("properties", {})
+            # Check required params + all properties (since most should be used)
+            for param in required:
+                # Look for args.get("param") or args["param"] or param as variable
+                if f'"{param}"' not in source and f"'{param}'" not in source:
+                    errors.append(
+                        f'{tool_name}: required param "{param}" not found in execute() code — '
+                        f'definition/implementation mismatch'
+                    )
 
     return errors
 
