@@ -368,6 +368,38 @@ def _extract_thinking(text: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def _summarize_tool_output(tool_name: str, output: str, max_chars: int) -> str:
+    """Summarize large tool output to fit context budget.
+
+    For structured data (JSON, tables), extract key info.
+    For text, keep first and last parts with a summary marker.
+    """
+    # JSON output — extract structure, drop bulk data
+    if output.lstrip().startswith(("{", "[")):
+        try:
+            data = json.loads(output)
+            if isinstance(data, list) and len(data) > 5:
+                preview = json.dumps(data[:3], ensure_ascii=False, indent=1)
+                return f"{preview}\n\n[... {len(data)} total items, showing first 3]"
+            elif isinstance(data, dict) and len(output) > max_chars:
+                keys = list(data.keys())[:20]
+                return f"Keys: {keys}\nFirst values preview:\n{output[:max_chars // 2]}..."
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Line-based output (ls, grep, logs) — keep head + tail
+    lines = output.split("\n")
+    if len(lines) > 30:
+        head = "\n".join(lines[:15])
+        tail = "\n".join(lines[-10:])
+        return f"{head}\n\n[... {len(lines)} lines total, {len(lines) - 25} omitted ...]\n\n{tail}"
+
+    # Default: head truncation with marker
+    if len(output) > max_chars:
+        return output[:max_chars] + f"\n[... truncated, {len(output)} chars total]"
+    return output
+
+
 def _auto_context(user_input: str, thread_id: str | None = None) -> str:
     """Auto-retrieve relevant memories with Qdrant-side score filtering.
 
@@ -525,10 +557,13 @@ def _build_messages(user_input: str, thread_id: str | None = None,
             "Example:\n<think>\nLet me analyze this...\n</think>\nHere is my answer."
         )
 
-    # Auto-retrieve from Qdrant (thread-scoped + global)
-    context = _auto_context(user_input, thread_id=thread_id)
-    if context:
-        system_text += "\n\n" + context
+    # Progressive context injection: skip memory for trivial queries
+    # (saves ~200ms embedding + Qdrant latency + context tokens)
+    query_lower = (user_input or "").strip().lower().rstrip("!?.,")
+    if query_lower not in TRIVIAL_QUERIES and len(query_lower) > 3:
+        context = _auto_context(user_input, thread_id=thread_id)
+        if context:
+            system_text += "\n\n" + context
 
     msgs = [{"role": "system", "content": system_text}]
 
@@ -634,6 +669,9 @@ def _notify_compaction(event: str, data: dict):
 # Token budget settings
 SYSTEM_RESERVE = 3500      # system prompt (~1500 tokens) + tool schemas + auto-context
 RECENT_RESERVE = 2         # always keep last N user+assistant pairs
+TOOL_OUTPUT_SUMMARIZE_THRESHOLD = 2000  # chars — above this, auto-summarize tool output
+TRIVIAL_QUERIES = {"привет", "hello", "hi", "хай", "здравствуй", "ку", "hey", "yo",
+                   "ok", "ок", "ага", "угу", "да", "спасибо", "thanks", "thx"}
 
 
 def _maybe_compact(thread_id: str | None = None):
@@ -707,13 +745,15 @@ def _maybe_compact(thread_id: str | None = None):
                 model=providers.get_model(),
                 messages=[
                     {"role": "system", "content": (
-                        "Summarize this conversation into key facts. Extract:\n"
-                        "- User preferences and decisions\n"
-                        "- Technical details, configs, paths\n"
-                        "- Task results and outcomes\n"
-                        "- Names, dates, important context\n"
-                        "If nothing important — reply SKIP.\n"
-                        "Be concise: bullet points, max 200 words."
+                        "Compress this conversation into key facts for future reference. "
+                        "Extract ONLY:\n"
+                        "- Decisions made and why\n"
+                        "- Technical facts: names, paths, configs, versions\n"
+                        "- Task outcomes: what worked, what failed\n"
+                        "- User preferences discovered\n"
+                        "Skip greetings, small talk, tool output details.\n"
+                        "Format: bullet points, max 150 words.\n"
+                        "If nothing worth saving — reply SKIP."
                     )},
                     {"role": "user", "content": convo[:8000]},  # cap input
                 ],
@@ -1044,27 +1084,24 @@ def _run_inner(user_input: str, thread_id: str | None,
                 tool_result = tools.execute(tc["name"], args)
                 tool_ms = int((time.time() - tool_start) * 1000)
 
-                # Context guard: check if tool result would blow the budget
+                # Smart output management: summarize large outputs, truncate if needed
                 budget = config.get("context_budget")
                 current_tokens = _estimate_tokens(messages)
                 result_tokens = len(tool_result) // 4
                 headroom = budget - current_tokens - 500  # reserve 500 for response
 
+                # Large output? Summarize instead of dumb truncation
+                if len(tool_result) > TOOL_OUTPUT_SUMMARIZE_THRESHOLD and headroom > 200:
+                    tool_result = _summarize_tool_output(tc["name"], tool_result, headroom * 4)
+
+                result_tokens = len(tool_result) // 4
                 if result_tokens > headroom and headroom > 0:
-                    # Truncate tool result to fit
                     max_chars = headroom * 4
                     original_len = len(tool_result)
-                    tool_result = tool_result[:max_chars] + (
-                        f"\n\n⚠️ OUTPUT TRUNCATED ({original_len} chars → {max_chars} chars). "
-                        f"Context budget: {budget} tokens, used: {current_tokens}. "
-                        f"Try a more specific query or work with smaller chunks."
-                    )
+                    tool_result = tool_result[:max_chars] + f"\n\n[truncated {original_len} → {max_chars} chars]"
                     _log.warning(f"tool result truncated: {original_len} → {max_chars} chars (budget: {budget})")
                 elif headroom <= 0:
-                    tool_result = (
-                        f"⚠️ CONTEXT FULL — cannot fit tool output ({result_tokens} tokens needed, "
-                        f"{budget} budget used up). Summarize what you have or start fresh."
-                    )
+                    tool_result = f"[context full — output dropped ({result_tokens} tokens)]"
                     _log.warning(f"context full, tool result dropped: {tc['name']}")
 
                 logger.event("tool_call", tool=tc["name"], args_preview=args_short,
