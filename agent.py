@@ -126,6 +126,52 @@ def _repair_json(raw: str) -> dict:
         return {}
 
 
+def _repair_tool_json(raw: str) -> str | None:
+    """Aggressive JSON repair for small model tool call outputs.
+
+    Unlike _repair_json (which returns a dict), this returns the repaired
+    JSON *string* so the caller can json.loads() it explicitly.
+    Handles markdown fences, leading text, trailing commas, single quotes.
+    """
+    if not raw or not raw.strip():
+        return None
+    s = raw.strip()
+    # Strip markdown fences
+    if s.startswith("```"):
+        s = re.sub(r'^```\w*\n?', '', s)
+        s = re.sub(r'\n?```$', '', s)
+        s = s.strip()
+    # Strip leading text before first {
+    idx = s.find('{')
+    if idx < 0:
+        return None
+    if idx > 0:
+        s = s[idx:]
+    # Find matching closing brace
+    depth = 0
+    end = -1
+    for i, c in enumerate(s):
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end > 0:
+        s = s[:end + 1]
+    # Fix trailing commas
+    s = re.sub(r',\s*([}\]])', r'\1', s)
+    # Fix single quotes to double quotes (only if no double quotes in values)
+    if "'" in s and '"' not in s:
+        s = s.replace("'", '"')
+    try:
+        json.loads(s)
+        return s
+    except json.JSONDecodeError:
+        return None
+
+
 def _json_format_extra() -> dict:
     """Return response_format kwarg if provider supports structured output."""
     if _structured_output_failed:
@@ -230,6 +276,64 @@ def _retry_tool_call(client, model: str, tool_name: str,
 
 # Tools where self-check is applied before execution
 _SELF_CHECK_TOOLS = {"shell", "write_file"}
+
+# Critical tool patterns for consensus self-verification (safety check)
+_CRITICAL_TOOL_PATTERNS = {
+    "shell": re.compile(
+        r'\b(rm\s|mv\s|chmod\s|kill\s|pip\s+uninstall|git\s+reset|git\s+push'
+        r'|DROP\s|DELETE\s+FROM|TRUNCATE)\b', re.IGNORECASE),
+    "write_file": None,   # always critical
+    "secret_delete": None, # always critical
+}
+
+
+def _needs_self_check(tool_name: str, args: dict) -> bool:
+    """Check if a tool call should be self-verified for safety."""
+    if tool_name not in _CRITICAL_TOOL_PATTERNS:
+        return False
+    pattern = _CRITICAL_TOOL_PATTERNS[tool_name]
+    if pattern is None:
+        return True  # always check
+    # For shell: check command text
+    cmd = args.get("command", "")
+    return bool(pattern.search(cmd))
+
+
+def _self_verify(client, model: str, tool_name: str, args: dict,
+                 user_request: str) -> tuple[bool, str]:
+    """Quick safety verification: is this tool call correct for the user's request?
+
+    Returns (approved: bool, reason: str). Fails open on errors.
+    """
+    args_str = json.dumps(args, ensure_ascii=False)[:300]
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a safety checker. The user asked something and an AI wants to run a tool.\n"
+                    "Is this tool call correct and safe for the user's request?\n"
+                    "Reply ONLY: APPROVE or REJECT: <reason>"
+                )},
+                {"role": "user", "content": (
+                    f"User request: {user_request[:200]}\n"
+                    f"Tool: {tool_name}({args_str})"
+                )},
+            ],
+            temperature=0.0,
+            max_tokens=50,
+            stream=False,
+        )
+        answer = _strip_thinking(resp.choices[0].message.content or "").strip()
+        if answer.upper().startswith("APPROVE"):
+            return True, "approved"
+        elif answer.upper().startswith("REJECT"):
+            return False, answer
+        else:
+            return True, "unclear response, allowing"  # fail open
+    except Exception as e:
+        _log.warning(f"self-verify failed: {e}")
+        return True, f"check failed: {e}"  # fail open on errors
 
 
 def _self_check_tool_call(client, model: str, tool_name: str,
@@ -404,6 +508,61 @@ def _summarize_tool_output(tool_name: str, output: str, max_chars: int) -> str:
     if len(output) > max_chars:
         return output[:max_chars] + f"\n[... truncated, {len(output)} chars total]"
     return output
+
+
+# ── Task decomposition for complex requests ──
+# Small 9B models choke on multi-step tasks; detect and break them down.
+
+_COMPLEX_MARKERS = [
+    (r'\b(?:and|и|а также|потом|затем|после)\b.*\b(?:and|и|а также|потом|затем|после)\b', 2),  # multiple conjunctions
+    (r'(?:(?:1\.|2\.|3\.|\*|-)\s+\S+.*\n?){3,}', 3),  # numbered/bulleted list with 3+ items
+    (r'\b(?:set up|настрой|создай|сделай)\b.*\b(?:and|и)\b.*\b(?:then|потом|затем)\b', 2),  # setup + chain
+]
+
+
+def _estimate_complexity(user_input: str) -> int:
+    """Estimate task complexity. Returns 1 (simple), 2 (moderate), 3 (complex)."""
+    score = 1
+    for pattern, weight in _COMPLEX_MARKERS:
+        if re.search(pattern, user_input, re.IGNORECASE | re.MULTILINE):
+            score = max(score, weight)
+    # Length heuristic — very long requests are usually complex
+    if len(user_input) > 500:
+        score = max(score, 2)
+    if len(user_input) > 1000:
+        score = max(score, 3)
+    return score
+
+
+def _decompose_task(client, model: str, user_input: str) -> list[str] | None:
+    """Ask LLM to break a complex task into atomic steps. Returns list of steps or None."""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": (
+                    "Break this task into 2-5 small independent steps. "
+                    "Each step should be one clear action. "
+                    "Return ONLY a JSON array of strings. Example: [\"step 1\", \"step 2\"]\n"
+                    "If the task is already simple, return [\"<original task>\"]"
+                )},
+                {"role": "user", "content": user_input},
+            ],
+            temperature=0.3,
+            max_tokens=256,
+        )
+        raw = resp.choices[0].message.content or ""
+        # Strip thinking tags
+        raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL).strip()
+        # Extract JSON array
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if match:
+            steps = json.loads(match.group())
+            if isinstance(steps, list) and len(steps) >= 2:
+                return [str(s) for s in steps]
+    except Exception:
+        pass
+    return None
 
 
 def _auto_context(user_input: str, thread_id: str | None = None) -> str:
@@ -609,7 +768,7 @@ class TurnResult:
     """Result of one agent turn with debug info."""
     __slots__ = ("reply", "thinking", "prompt_tokens", "completion_tokens", "total_tokens",
                  "tool_calls_made", "model", "auto_context_hits", "json_repairs",
-                 "retry_successes", "self_check_fixes")
+                 "retry_successes", "self_check_fixes", "self_check_rejections")
 
     def __init__(self):
         self.reply = ""
@@ -623,6 +782,7 @@ class TurnResult:
         self.json_repairs = 0
         self.retry_successes = 0
         self.self_check_fixes = 0
+        self.self_check_rejections = 0
 
 
 def _estimate_tokens(messages: list[dict]) -> int:
@@ -890,6 +1050,15 @@ def _run_inner(user_input: str, thread_id: str | None,
     # Touch thread timestamp
     threads.touch(tid)
 
+    # Task decomposition: detect complex requests and inject a step-by-step plan
+    complexity = _estimate_complexity(user_input)
+    if complexity >= 3:
+        steps = _decompose_task(client, _model, user_input)
+        if steps and len(steps) > 1:
+            plan = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
+            messages.append({"role": "system", "content": f"Break this into steps:\n{plan}\nDo step 1 first, then proceed."})
+            _log.info(f"task decomposed into {len(steps)} steps (complexity={complexity})")
+
     # Count auto-context hits (memories injected into system prompt)
     system_content = messages[0]["content"]
     if "[Relevant context from memory:]" in system_content:
@@ -1030,9 +1199,20 @@ def _run_inner(user_input: str, thread_id: str | None,
                 db.kv_inc("stats:tool_calls_total")
 
                 # Parse tool call arguments (with repair + retry for small models)
+                args = None
                 try:
                     args = json.loads(tc["arguments"])
                 except Exception:
+                    # Stage 1: aggressive string-level repair (fences, leading text, etc.)
+                    repaired_str = _repair_tool_json(tc["arguments"])
+                    if repaired_str is not None:
+                        args = json.loads(repaired_str)
+                        result.json_repairs += 1
+                        db.kv_inc("stats:json_repairs")
+                        _log.info(f"_repair_tool_json succeeded for {tc['name']}")
+
+                if args is None:
+                    # Stage 2: structural JSON repair (unclosed brackets, comments, etc.)
                     _log.warning(f"json parse failed, attempting repair: {tc['arguments'][:200]}")
                     args = _repair_json(tc["arguments"])
                     if args:
@@ -1040,7 +1220,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                         db.kv_inc("stats:json_repairs")
                         _log.info(f"json repair succeeded for {tc['name']}")
                     else:
-                        # Retry: ask model to regenerate the JSON
+                        # Stage 3: retry — ask model to regenerate the JSON
                         retry_max = config.get("tool_retry_max")
                         if retry_max > 0:
                             _console.print(f"  [yellow]🔄 retrying {tc['name']} (broken JSON)...[/]")
@@ -1057,6 +1237,8 @@ def _run_inner(user_input: str, thread_id: str | None,
                             else:
                                 args = {}
                                 _console.print(f"  [red]✗ retry failed, using empty args[/]")
+                        else:
+                            args = {}
 
                 # Self-check for critical tools (shell, write_file)
                 if args and tc["name"] in _SELF_CHECK_TOOLS and config.get("self_check_enabled"):
@@ -1068,6 +1250,29 @@ def _run_inner(user_input: str, thread_id: str | None,
                         result.self_check_fixes += 1
                         db.kv_inc("stats:self_check_fixes")
                         _console.print(f"  [yellow]🔍 self-check corrected args[/]")
+
+                # Consensus self-verification for dangerous operations
+                _verify_rejected = False
+                if args and config.get("self_check_enabled") and _needs_self_check(tc["name"], args):
+                    _v_ok, _v_reason = _self_verify(
+                        client, _model, tc["name"], args, user_input
+                    )
+                    if not _v_ok:
+                        _log.warning(f"self-verify REJECTED {tc['name']}: {_v_reason}")
+                        _console.print(f"  [red]🛑 self-verify rejected: {_v_reason}[/]")
+                        result.self_check_rejections += 1
+                        db.kv_inc("stats:self_check_rejections")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": f"Self-check rejected this action: {_v_reason}",
+                        })
+                        _verify_rejected = True
+                    else:
+                        _log.info(f"self-verify approved {tc['name']}: {_v_reason}")
+
+                if _verify_rejected:
+                    continue
 
                 try:
                     args_short = json.dumps(args, ensure_ascii=False)
@@ -1239,7 +1444,9 @@ def _run_inner(user_input: str, thread_id: str | None,
                      tools_used=result.tool_calls_made, reply_len=len(result.reply),
                      est_tokens=est_tokens, context_hits=result.auto_context_hits,
                      json_repairs=result.json_repairs, retries=result.retry_successes,
-                     self_checks=result.self_check_fixes, thread=tid or "active")
+                     self_checks=result.self_check_fixes,
+                     self_check_rejections=result.self_check_rejections,
+                     thread=tid or "active")
 
         if result.tool_calls_made:
             _save_experience(user_input, result, rounds, total_tool_errors)

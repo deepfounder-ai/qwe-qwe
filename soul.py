@@ -212,57 +212,24 @@ def _get_sysinfo() -> str:
 def to_prompt(soul: dict) -> str:
     """Build structured system prompt.
 
-    Architecture (order matters for KV cache — static blocks first):
-    1. Identity & Personality — who I am
-    2. Runtime — model, OS, environment
-    3. Tools — what I can do (detailed descriptions)
-    4. Memory protocol — when/how to use memory
-    5. Rules — behavioral constraints
-    6. Examples — tool usage patterns
-    7. Dynamic — time, user profile (LAST — changes every turn)
+    Architecture (order matters for KV cache — static prefix first):
+    STATIC (identical across turns → KV cache hit):
+      1. Tools — what I can do (biggest section, pinned first)
+      2. Memory & Experience protocol — when/how to use memory
+      3. Rules — behavioral constraints
+      4. Examples — tool usage patterns
+    DYNAMIC (changes per session → KV cache miss from here):
+      5. Identity & Personality — who I am (changes if soul edited)
+      6. Self-knowledge & Runtime — model, OS, environment
+      7. Active skills — changes when skills added/removed
+      8. Time, background tasks — changes every turn
     """
     lines = []
     lang = soul['language']
 
-    # ── 1. IDENTITY ──
-    user_name = db.kv_get("user_name") or "Boss"
-    lines.append(f"You are {soul['name']}, a personal AI assistant. The user's name is {user_name}.")
+    # ── STATIC PREFIX (identical across turns → KV cache hit) ──
 
-    # Personality as behavioral instructions
-    active_traits = []
-    for trait, level in soul.items():
-        if trait in ("name", "language"):
-            continue
-        if trait in TRAIT_DESCRIPTIONS:
-            low, high = TRAIT_DESCRIPTIONS[trait]
-            if level == "high":
-                active_traits.append(f"Be VERY {high}.")
-            elif level == "moderate":
-                active_traits.append(f"Be somewhat {high}.")
-    if active_traits:
-        lines.append("Personality: " + " ".join(active_traits))
-
-    # ── 2. SELF-KNOWLEDGE & RUNTIME ──
-    data_dir = str(config.DATA_DIR)
-    lines.append(f"""
-YOUR FILE SYSTEM (you know where your own files are):
-- Data directory: {data_dir}/
-- Logs: {data_dir}/logs/qwe-qwe.log (all events), {data_dir}/logs/errors.log (errors only)
-- Database: {config.DB_PATH}
-- Memory (Qdrant): {config.QDRANT_PATH}/
-- Workspace: {data_dir}/workspace/ (user files, relative paths resolve here)
-- Skills: {data_dir}/skills/ (user-created skills)
-- Uploads: {data_dir}/uploads/
-- Backups: {data_dir}/backups/
-- Config override: environment variables with QWE_ prefix
-
-When asked about logs, errors, data location — use these paths directly. No guessing.
-To read logs: read_file("{data_dir}/logs/qwe-qwe.log") or shell("tail -50 {data_dir}/logs/errors.log")
-
-Environment: {_get_sysinfo()}
-Language: ALWAYS reply in {lang}. This is mandatory.""")
-
-    # ── 3. TOOLS ──
+    # ── 1. TOOLS ──
     lines.append("""
 Available tools:
 
@@ -301,7 +268,7 @@ OTHER:
 - spawn_task(task) — Run a task in background (for parallel work).
 - create_skill(name, description) — Create a NEW user-facing command. ONLY for things not covered by tools above.""")
 
-    # ── 4. MEMORY & EXPERIENCE PROTOCOL ──
+    # ── 2. MEMORY & EXPERIENCE PROTOCOL ──
     lines.append("""
 MEMORY & EXPERIENCE PROTOCOL — this is critical, follow exactly:
 
@@ -349,7 +316,7 @@ SECRETS & KEYS:
 
 IMPORTANT: memory_save IS your remember/store_knowledge tool. Do NOT create a skill for this — it already exists.""")
 
-    # ── 5. RULES ──
+    # ── 3. RULES ──
     lines.append("""
 Rules:
 1. ALWAYS use tools for actions. Never say "I would run..." — actually run it.
@@ -364,7 +331,7 @@ Rules:
 10. user_profile_update — ONLY when you learn a genuinely NEW fact. Not every turn.
 11. COMPLEX MULTI-STEP TASKS (3+ tool calls needed): use spawn_task() to delegate. Examples: "set up cron for Telegram logs", "write a script and schedule it". Tell user you're delegating, spawn_task will handle all steps without round limits.""")
 
-    # ── 6. EXAMPLES ──
+    # ── 4. EXAMPLES ──
     lines.append("""
 Examples:
 "install httpie" → shell({"command":"pip install httpie","timeout":120})
@@ -375,6 +342,47 @@ Examples:
 "save my API key abc123" → secret_save({"key":"api_key","value":"abc123"})
 "make a workout tracker" → create_skill({"name":"workout","description":"Track workouts..."})
 "запомни: деплой на пятницу" → memory_save({"text":"Deploy scheduled for Friday","tag":"decision"})""")
+
+    # ── DYNAMIC SUFFIX (changes per session → KV cache miss from here) ──
+    lines.append("\n--- dynamic context ---")
+
+    # ── 5. IDENTITY ──
+    user_name = db.kv_get("user_name") or "Boss"
+    lines.append(f"You are {soul['name']}, a personal AI assistant. The user's name is {user_name}.")
+
+    # Personality as behavioral instructions
+    active_traits = []
+    for trait, level in soul.items():
+        if trait in ("name", "language"):
+            continue
+        if trait in TRAIT_DESCRIPTIONS:
+            low, high = TRAIT_DESCRIPTIONS[trait]
+            if level == "high":
+                active_traits.append(f"Be VERY {high}.")
+            elif level == "moderate":
+                active_traits.append(f"Be somewhat {high}.")
+    if active_traits:
+        lines.append("Personality: " + " ".join(active_traits))
+
+    # ── 6. SELF-KNOWLEDGE & RUNTIME ──
+    data_dir = str(config.DATA_DIR)
+    lines.append(f"""
+YOUR FILE SYSTEM (you know where your own files are):
+- Data directory: {data_dir}/
+- Logs: {data_dir}/logs/qwe-qwe.log (all events), {data_dir}/logs/errors.log (errors only)
+- Database: {config.DB_PATH}
+- Memory (Qdrant): {config.QDRANT_PATH}/
+- Workspace: {data_dir}/workspace/ (user files, relative paths resolve here)
+- Skills: {data_dir}/skills/ (user-created skills)
+- Uploads: {data_dir}/uploads/
+- Backups: {data_dir}/backups/
+- Config override: environment variables with QWE_ prefix
+
+When asked about logs, errors, data location — use these paths directly. No guessing.
+To read logs: read_file("{data_dir}/logs/qwe-qwe.log") or shell("tail -50 {data_dir}/logs/errors.log")
+
+Environment: {_get_sysinfo()}
+Language: ALWAYS reply in {lang}. This is mandatory.""")
 
     # ── 7. ACTIVE SKILLS (semi-dynamic — changes rarely) ──
     try:
