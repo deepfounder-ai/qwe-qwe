@@ -110,7 +110,7 @@ def _read_file(path: Path) -> str | None:
 def index_file(filepath: str) -> dict:
     """Index a single file with dense + sparse vectors. Returns {path, chunks, status}."""
     from qdrant_client.models import PointStruct
-    import memory  # for _sparse_embed
+    import memory
 
     path = Path(filepath).expanduser().resolve()
     if not path.exists():
@@ -190,7 +190,7 @@ def search(query: str, limit: int = 5) -> list[dict]:
 
     Returns [{text, file_path, chunk_index, score}].
     """
-    import memory  # for _sparse_embed
+    import memory
     from qdrant_client.models import Prefetch, FusionQuery, Fusion
 
     qc = _get_qdrant()

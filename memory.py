@@ -85,6 +85,14 @@ def _get_qdrant() -> QdrantClient:
 def _ensure_collection(qc: QdrantClient, collection: str):
     """Ensure collection exists with v2 schema. Migrate from v1 if needed."""
     cols = [c.name for c in qc.get_collections().collections]
+
+    # Check for interrupted migration — resume from temp if found
+    temp_name = f"{collection}_v2_migration"
+    if temp_name in cols:
+        _log.info("found interrupted migration, resuming from temp collection")
+        _resume_migration(qc, collection, temp_name)
+        return
+
     if collection not in cols:
         _create_collection_v2(qc, collection)
         return
@@ -203,25 +211,50 @@ def _migrate_v1_to_v2(qc: QdrantClient, collection: str):
         for i in range(0, len(new_points), 100):
             qc.upsert(temp_name, points=new_points[i:i + 100])
 
-    # Now safe to swap: delete v1, recreate as v2, copy from temp
+    # Swap: delete v1, recreate as v2, write from memory (not re-read from temp)
     qc.delete_collection(collection)
     _create_collection_v2(qc, collection)
 
     if new_points:
-        # Re-read from temp and insert into final
-        offset = None
-        while True:
-            result = qc.scroll(temp_name, limit=100, offset=offset, with_vectors=True)
-            batch, offset = result
-            if batch:
-                pts = [PointStruct(id=p.id, vector={"dense": p.vector["dense"], "sparse": p.vector["sparse"]}, payload=p.payload or {}) for p in batch]
-                qc.upsert(collection, points=pts)
-            if offset is None:
-                break
+        for i in range(0, len(new_points), 100):
+            qc.upsert(collection, points=new_points[i:i + 100])
 
     # Cleanup temp
     qc.delete_collection(temp_name)
     _log.info(f"migrated {len(new_points)} points to v2")
+
+
+def _resume_migration(qc: QdrantClient, collection: str, temp_name: str):
+    """Resume an interrupted v1→v2 migration from temp collection."""
+    # Read all points from temp
+    all_points = []
+    offset = None
+    while True:
+        result = qc.scroll(temp_name, limit=100, offset=offset, with_vectors=True)
+        batch, offset = result
+        all_points.extend(batch)
+        if offset is None:
+            break
+
+    # Delete old collection if it exists, create fresh v2
+    cols = [c.name for c in qc.get_collections().collections]
+    if collection in cols:
+        qc.delete_collection(collection)
+    _create_collection_v2(qc, collection)
+
+    # Copy points from temp → final
+    if all_points:
+        for i in range(0, len(all_points), 100):
+            batch = all_points[i:i + 100]
+            pts = [PointStruct(
+                id=p.id,
+                vector={"dense": p.vector["dense"], "sparse": p.vector["sparse"]},
+                payload=p.payload or {},
+            ) for p in batch]
+            qc.upsert(collection, points=pts)
+
+    qc.delete_collection(temp_name)
+    _log.info(f"resumed migration: {len(all_points)} points recovered")
 
 
 # ── Embedding ──

@@ -21,7 +21,8 @@ mock_memory.search_by_vector = lambda *a, **kw: []
 mock_memory.search_grouped = lambda *a, **kw: []
 mock_memory.recommend = lambda *a, **kw: []
 mock_memory.embed = lambda text: [0.0] * 768
-mock_memory._sparse_embed = lambda text: types.SimpleNamespace(indices=[0], values=[1.0])
+mock_memory.sparse_embed = lambda text: types.SimpleNamespace(indices=[0], values=[1.0])
+mock_memory._sparse_embed = mock_memory.sparse_embed
 mock_memory.save = lambda *a, **kw: "ok"
 mock_memory.delete = lambda *a, **kw: True
 mock_memory.cleanup = lambda *a, **kw: 0
@@ -30,6 +31,7 @@ sys.modules["memory"] = mock_memory
 mock_logger = types.ModuleType("logger")
 mock_logger.get = lambda name: types.SimpleNamespace(
     info=lambda *a, **kw: None,
+    debug=lambda *a, **kw: None,
     warning=lambda *a, **kw: None,
     error=lambda *a, **kw: None,
 )
