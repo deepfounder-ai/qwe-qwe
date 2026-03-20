@@ -369,18 +369,29 @@ def _extract_thinking(text: str) -> str | None:
 
 
 def _auto_context(user_input: str, thread_id: str | None = None) -> str:
-    """Auto-retrieve relevant memories: thread-scoped first, then global.
-    
+    """Auto-retrieve relevant memories with Qdrant-side score filtering.
+
+    Philosophy: small model, limited context — every injected memory must
+    be high-quality. Qdrant filters by score_threshold BEFORE returning,
+    so we never waste context budget on low-relevance results.
+
     Strategy:
-    1. Search within current thread (if thread_id provided) — up to 2 results
-    2. Search globally — up to remaining slots
-    3. Deduplicate by content
+    1. Compute embedding once (FastEmbed, local)
+    2. Thread-scoped hybrid search (score >= 0.45) — up to 2 results
+    3. Global hybrid search (score >= 0.45) — fill remaining slots
+    4. Experience search (score >= 0.5) — only proven patterns
+    5. Deduplicate by content across all results
     """
+    # Score thresholds — higher = fewer but more precise results.
+    # For RRF fusion scores, 0.45 is a good cutoff (tested empirically).
+    MEMORY_SCORE_MIN = 0.45
+    EXPERIENCE_SCORE_MIN = 0.5
+
     try:
         seen_texts = set()
         lines = ["[Relevant context from memory:]"]
 
-        # Compute embedding once, reuse for all searches (saves 2 API calls)
+        # Compute embedding once (FastEmbed, no network)
         try:
             vector = memory.embed(user_input)
         except Exception:
@@ -391,11 +402,11 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
             thread_results = memory.search_by_vector(
                 vector, limit=2, thread_id=thread_id,
                 query_text=user_input,
+                score_threshold=MEMORY_SCORE_MIN,
             )
             for r in thread_results:
-                if r["score"] > 0.3 and r["text"] not in seen_texts:
-                    tag_info = f"{r['tag']}"
-                    lines.append(f"- [{tag_info}] {r['text']}")
+                if r["text"] not in seen_texts:
+                    lines.append(f"- [{r['tag']}] {r['text']}")
                     seen_texts.add(r["text"])
 
         # Global search (fill remaining slots)
@@ -405,24 +416,28 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
             global_results = memory.search_by_vector(
                 vector, limit=remaining + 2,
                 query_text=user_input,
+                score_threshold=MEMORY_SCORE_MIN,
             )
             for r in global_results:
                 if len(lines) - 1 >= max_memory:
                     break
-                if r["score"] > 0.3 and r["text"] not in seen_texts:
+                if r["text"] not in seen_texts:
                     lines.append(f"- [{r['tag']}] {r['text']}")
                     seen_texts.add(r["text"])
 
-        # Experience cases (separate tag, additive, higher threshold)
+        # Experience cases (higher threshold — only proven patterns)
         if config.get("experience_learning"):
             exp_hits = memory.search_by_vector(
                 vector, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience",
                 query_text=user_input,
+                score_threshold=EXPERIENCE_SCORE_MIN,
             )
             exp_lines = []
             for r in exp_hits:
                 if len(exp_lines) >= config.MAX_EXPERIENCE_RESULTS:
                     break
+                # Composite score: similarity * outcome_weight
+                # Failed experiences (outcome_score=0.2) are deprioritized
                 effective = r["score"] * r.get("outcome_score", 1.0)
                 if effective > 0.4 and r["text"] not in seen_texts:
                     exp_lines.append(f"- {r['text']}")

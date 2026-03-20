@@ -134,7 +134,9 @@ def _create_collection_v2(qc: QdrantClient, collection: str):
             ),
         },
         sparse_vectors_config={
-            "sparse": SparseVectorParams(),
+            "sparse": SparseVectorParams(
+                modifier="idf",  # IDF weighting: rare words score higher
+            ),
         },
     )
     _ensure_payload_indexes(qc, collection)
@@ -325,9 +327,10 @@ def _points_to_dicts(points) -> list[dict]:
 
 
 def _search_hybrid(qc, vector: list[float], text: str, limit: int,
-                   filt: Filter | None) -> list[dict]:
+                   filt: Filter | None,
+                   score_threshold: float | None = None) -> list[dict]:
     """Hybrid search: dense + sparse prefetch → RRF fusion."""
-    sparse = _sparse_embed(text)
+    sparse = sparse_embed(text)
     try:
         results = qc.query_points(
             config.QDRANT_COLLECTION,
@@ -339,15 +342,17 @@ def _search_hybrid(qc, vector: list[float], text: str, limit: int,
             ],
             query=FusionQuery(fusion=Fusion.RRF),
             limit=limit,
+            score_threshold=score_threshold,
         )
         return _points_to_dicts(results.points)
     except Exception as e:
         _log.debug(f"hybrid search failed, falling back to dense-only: {e}")
-        return _search_dense_only(qc, vector, limit, filt)
+        return _search_dense_only(qc, vector, limit, filt, score_threshold)
 
 
 def _search_dense_only(qc, vector: list[float], limit: int,
-                       filt: Filter | None) -> list[dict]:
+                       filt: Filter | None,
+                       score_threshold: float | None = None) -> list[dict]:
     """Fallback: dense-only search (for v1 collections or errors)."""
     try:
         results = qc.query_points(
@@ -356,22 +361,28 @@ def _search_dense_only(qc, vector: list[float], limit: int,
             using="dense",
             limit=limit,
             query_filter=filt,
+            score_threshold=score_threshold,
         )
     except Exception:
-        # Last resort: unnamed vector query (v1 compat)
         results = qc.query_points(
             config.QDRANT_COLLECTION,
             query=vector,
             limit=limit,
             query_filter=filt,
+            score_threshold=score_threshold,
         )
     return _points_to_dicts(results.points)
 
 
 def _search_impl(vector: list[float], limit: int,
                  tag: str | None, thread_id: str | None,
-                 query_text: str | None = None) -> list[dict]:
-    """Core search — uses hybrid (dense+sparse RRF) when query_text available."""
+                 query_text: str | None = None,
+                 score_threshold: float | None = None) -> list[dict]:
+    """Core search — uses hybrid (dense+sparse RRF) when query_text available.
+
+    score_threshold: if set, Qdrant filters results below this score
+    before returning — saves bandwidth and context budget.
+    """
     try:
         qc = _get_qdrant()
     except Exception as e:
@@ -380,18 +391,18 @@ def _search_impl(vector: list[float], limit: int,
 
     filt = _build_filter(tag, thread_id)
 
-    # Hybrid search if we have the original query text
     if query_text:
-        return _search_hybrid(qc, vector, query_text, limit, filt)
+        return _search_hybrid(qc, vector, query_text, limit, filt, score_threshold)
     else:
-        return _search_dense_only(qc, vector, limit, filt)
+        return _search_dense_only(qc, vector, limit, filt, score_threshold)
 
 
 def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
-           tag: str | None = None, thread_id: str | None = None) -> list[dict]:
+           tag: str | None = None, thread_id: str | None = None,
+           score_threshold: float | None = None) -> list[dict]:
     """Hybrid semantic + keyword search over memories.
 
-    Uses dense (embedding) + sparse (BM25-like) vectors with RRF fusion
+    Uses dense (embedding) + sparse (SPLADE++) vectors with RRF fusion
     for best recall on both semantic and exact keyword matches.
 
     Args:
@@ -399,6 +410,7 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
         limit: max results
         tag: filter by tag
         thread_id: filter by thread (or None for global search)
+        score_threshold: minimum score cutoff (Qdrant-side filtering)
 
     Returns [{text, tag, thread_id, score, ts, ...}]
     """
@@ -407,18 +419,21 @@ def search(query: str, limit: int = config.MAX_MEMORY_RESULTS,
     except Exception as e:
         _log.warning(f"embedding unavailable for search: {e}")
         return []
-    return _search_impl(vector, limit, tag, thread_id, query_text=query)
+    return _search_impl(vector, limit, tag, thread_id, query_text=query,
+                        score_threshold=score_threshold)
 
 
 def search_by_vector(vector: list[float], limit: int = config.MAX_MEMORY_RESULTS,
                      tag: str | None = None, thread_id: str | None = None,
-                     query_text: str | None = None) -> list[dict]:
+                     query_text: str | None = None,
+                     score_threshold: float | None = None) -> list[dict]:
     """Search using a pre-computed embedding vector.
 
     If query_text is provided, uses hybrid search (dense + sparse RRF).
     Otherwise falls back to dense-only search.
     """
-    return _search_impl(vector, limit, tag, thread_id, query_text=query_text)
+    return _search_impl(vector, limit, tag, thread_id, query_text=query_text,
+                        score_threshold=score_threshold)
 
 
 # ── Recommend (for Memento experience learning) ──

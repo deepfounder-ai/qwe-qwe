@@ -262,9 +262,12 @@ def _make_exp_result(text, score, outcome_score=1.0):
 
 def _mock_vector_search(search_fn):
     """Patch search_by_vector to delegate to a test's _search(query, ...) function."""
-    mock_memory.search_by_vector = lambda vec, limit=3, tag=None, thread_id=None, query_text=None: search_fn(
-        "", limit=limit, tag=tag, thread_id=thread_id
-    )
+    def _mock_sbv(vec, limit=3, tag=None, thread_id=None, query_text=None, score_threshold=None):
+        results = search_fn("", limit=limit, tag=tag, thread_id=thread_id)
+        if score_threshold is not None:
+            results = [r for r in results if r["score"] >= score_threshold]
+        return results
+    mock_memory.search_by_vector = _mock_sbv
 
 
 def test_2_1_experience_injected_into_context():
