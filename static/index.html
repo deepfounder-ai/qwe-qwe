@@ -2230,6 +2230,8 @@ function connect() {
 let _knCurrentPath = '';
 let _knHome = '';
 let _knSelected = new Map(); // path -> {name, type, ext, size, method}
+let _knBrowseItems = []; // current browser items for safe index-based handlers
+function _jsEsc(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
 
 function showKnowledgeTab(tab) {
   document.getElementById('knUploadTab').style.display = tab === 'upload' ? '' : 'none';
@@ -2283,11 +2285,11 @@ function knRenderBrowser(data) {
   const home = data.home || '';
   const rel = data.current.startsWith(home) ? data.current.slice(home.length) : data.current;
   const parts = rel.split('/').filter(Boolean);
-  let bcHtml = `<span onclick="knBrowse('${home}')" title="${home}">~</span>`;
+  let bcHtml = `<span onclick="knBrowse('${_jsEsc(home)}')" title="${escapeHtml(home)}">~</span>`;
   let cumPath = home;
   parts.forEach(part => {
     cumPath += '/' + part;
-    bcHtml += `<span class="kn-sep">/</span><span onclick="knBrowse('${cumPath}')">${part}</span>`;
+    bcHtml += `<span class="kn-sep">/</span><span onclick="knBrowse('${_jsEsc(cumPath)}')">${escapeHtml(part)}</span>`;
   });
   bc.innerHTML = bcHtml;
 
@@ -2301,31 +2303,32 @@ function knRenderBrowser(data) {
     return;
   }
 
+  _knBrowseItems = data.items;
   let html = '';
-  data.items.forEach(item => {
+  data.items.forEach((item, i) => {
     const fullPath = data.current + '/' + item.name;
     const icon = _fileIcon(item);
     const isSelected = _knSelected.has(fullPath);
 
     if (item.type === 'dir') {
-      html += `<div class="kn-file-item dir" ondblclick="knBrowse('${fullPath}')">
+      html += `<div class="kn-file-item dir" ondblclick="knBrowse('${_jsEsc(fullPath)}')">
         <input type="checkbox" class="kn-file-cb" ${isSelected ? 'checked' : ''}
-               onchange="knToggleDir('${fullPath}', '${item.name}', this.checked)" onclick="event.stopPropagation()">
+               onchange="knToggleDir('${_jsEsc(fullPath)}', '${_jsEsc(item.name)}', this.checked)" onclick="event.stopPropagation()">
         <span class="kn-file-icon">${icon}</span>
-        <span class="kn-file-name" onclick="knBrowse('${fullPath}')">${item.name}</span>
+        <span class="kn-file-name" onclick="knBrowse('${_jsEsc(fullPath)}')">${escapeHtml(item.name)}</span>
       </div>`;
     } else if (item.indexable) {
       html += `<div class="kn-file-item file">
         <input type="checkbox" class="kn-file-cb" ${isSelected ? 'checked' : ''}
-               onchange="knToggleFile('${fullPath}', ${JSON.stringify(item).replace(/"/g,'&quot;')}, this.checked)" onclick="event.stopPropagation()">
+               onchange="knToggleFile(${i}, this.checked)" onclick="event.stopPropagation()">
         <span class="kn-file-icon">${icon}</span>
-        <span class="kn-file-name">${item.name}</span>
+        <span class="kn-file-name">${escapeHtml(item.name)}</span>
         <span class="kn-file-size">${_formatSize(item.size)}</span>
       </div>`;
     } else {
       html += `<div class="kn-file-item file disabled">
         <span class="kn-file-icon" style="opacity:0.4">${icon}</span>
-        <span class="kn-file-name">${item.name}</span>
+        <span class="kn-file-name">${escapeHtml(item.name)}</span>
         <span class="kn-file-size">${_formatSize(item.size)}</span>
       </div>`;
     }
@@ -2340,7 +2343,9 @@ function knNavigateUp() {
   knBrowse(parent);
 }
 
-function knToggleFile(path, item, checked) {
+function knToggleFile(idx, checked) {
+  const item = _knBrowseItems[idx];
+  const path = _knCurrentPath + '/' + item.name;
   if (checked) {
     _knSelected.set(path, {
       name: item.name, type: item.type || 'file', ext: item.ext,
@@ -2425,8 +2430,8 @@ function knRenderSelection() {
 
     html += `<div class="kn-selected-item">
       <span>${icon}</span>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${path}">${info.name}</span>
-      <span class="kn-remove" onclick="_knSelected.delete('${path.replace(/'/g,"\\'")}');knRenderSelection();knRefresh()">×</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(path)}">${escapeHtml(info.name)}</span>
+      <span class="kn-remove" onclick="_knSelected.delete('${_jsEsc(path)}');knRenderSelection();knRefresh()">×</span>
     </div>`;
   }
   list.innerHTML = html;
@@ -2525,9 +2530,9 @@ async function knLoadIndexed() {
     files.forEach(f => {
       const name = f.path.split('/').pop();
       tbody.innerHTML += `<tr>
-        <td>${name}</td>
-        <td style="font-size:11px;color:var(--text-dim)" title="${f.path}">${f.path}</td>
-        <td><button class="s-btn danger-sm" onclick="knDeleteFile('${f.path.replace(/'/g,"\\'")}')">Delete</button></td>
+        <td>${escapeHtml(name)}</td>
+        <td style="font-size:11px;color:var(--text-dim)" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</td>
+        <td><button class="s-btn danger-sm" onclick="knDeleteFile('${_jsEsc(f.path)}')">Delete</button></td>
       </tr>`;
     });
   } catch(e) { console.error('knLoadIndexed error:', e); }

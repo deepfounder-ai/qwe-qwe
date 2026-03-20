@@ -1,6 +1,6 @@
 """RAG — index and search local files via Qdrant (hybrid dense + sparse)."""
 
-import os, time, uuid
+import os, time, uuid, threading
 from pathlib import Path
 import config, db, logger
 
@@ -270,6 +270,7 @@ def _delete_file_chunks(file_path: str):
 # Vision / image description
 # ---------------------------------------------------------------------------
 
+_vision_lock = threading.Lock()
 _last_vision_call = 0.0
 
 
@@ -309,11 +310,12 @@ def _describe_image(path_or_bytes, prompt=None) -> str:
 
         b64 = base64.b64encode(resized_bytes).decode("ascii")
 
-        # Rate limit
-        now = time.time()
-        wait = VISION_RATE_LIMIT - (now - _last_vision_call)
-        if wait > 0:
-            time.sleep(wait)
+        # Rate limit (thread-safe)
+        with _vision_lock:
+            elapsed = time.time() - _last_vision_call
+            if elapsed < VISION_RATE_LIMIT:
+                time.sleep(VISION_RATE_LIMIT - elapsed)
+            _last_vision_call = time.time()
 
         import providers
         client = providers.get_client()
@@ -330,7 +332,6 @@ def _describe_image(path_or_bytes, prompt=None) -> str:
             }],
             max_tokens=512,
         )
-        _last_vision_call = time.time()
         return resp.choices[0].message.content or "[image: empty response]"
     except Exception as e:
         _log.error(f"vision describe failed: {e}")
@@ -418,27 +419,13 @@ def scan_path(path_str: str, recursive: bool = True) -> dict:
             est_time_cpu += 0.1
         elif ext == PDF_EXTENSION:
             ftype, method = "pdf", "pdf_extract"
-            pages = 0
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(str(f))
-                pages = len(reader.pages)
-                # Check if scanned
-                sample_text = "".join((p.extract_text() or "") for p in reader.pages[:3])
-                avg_chars = len(sample_text) / max(pages, 1)
-                if avg_chars < SCANNED_PAGE_THRESHOLD:
-                    method = "pdf_scan"
-                    est_time_gpu += 3.0 * pages
-                    gpu_required = True
-                else:
-                    est_time_cpu += 0.2 * pages
-            except ImportError:
-                pass
-            except Exception:
-                pass
+            f_stat = f.stat()
+            # Estimate pages from file size (~50KB per page) — avoids opening every PDF during scan
+            est_pages = max(1, f_stat.st_size // 50000)
             summary["pdf"] += 1
-            est_chunks += max(1, pages * 2)
-            entry = {"path": str(f), "type": ftype, "method": method, "pages": pages}
+            est_chunks += max(1, est_pages * 2)
+            est_time_cpu += 0.2 * est_pages
+            entry = {"path": str(f), "type": ftype, "method": method, "pages": est_pages}
             files.append(entry)
             continue
         elif ext in IMAGE_EXTENSIONS:
@@ -599,8 +586,6 @@ def delete_file(file_path: str) -> dict:
     """
     path = Path(file_path).expanduser().resolve()
     _delete_file_chunks(str(path))
-    mtime_key = f"rag:mtime:{path}"
-    conn = db._get_conn()
-    conn.execute("DELETE FROM kv WHERE key = ?", (mtime_key,))
-    conn.commit()
+    # Remove mtime tracking
+    db.execute("DELETE FROM kv WHERE key = ?", (f"rag:mtime:{path}",))
     return {"path": str(path), "status": "deleted"}

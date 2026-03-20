@@ -50,6 +50,20 @@ import threads
 
 _log = logger.get("server")
 
+
+def _validate_home_path(raw: str) -> Path:
+    """Validate path is within user's home directory. Raises ValueError if not."""
+    home = Path.home().resolve()
+    p = Path(raw).expanduser().resolve()
+    try:
+        p.relative_to(home)
+    except ValueError:
+        raise ValueError(f"Access denied: path outside home directory")
+    if not p.exists():
+        raise FileNotFoundError(f"Path not found: {raw}")
+    return p
+
+
 # ── Error formatting ──
 
 def _friendly_error(e: Exception) -> str:
@@ -832,7 +846,6 @@ def _run_knowledge_index(task_id: int, files: list[dict]):
     global _knowledge_task
     import rag
 
-    total = len(files)
     errors = []
     results = []
 
@@ -896,27 +909,21 @@ async def file_browse(request: Request):
     raw_path = params.get("path", home)
     show_hidden = params.get("hidden", "false").lower() == "true"
 
-    p = Path(raw_path).expanduser().resolve()
-
-    # Security: must be within home directory
-    if not str(p).startswith(home):
-        return JSONResponse({"error": "Access denied: outside home directory"}, status_code=403)
-
-    if not p.exists():
-        return JSONResponse({"error": f"Path not found: {raw_path}"}, status_code=404)
+    try:
+        p = _validate_home_path(raw_path)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=403)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
 
     if not p.is_dir():
         # If it's a file, return its parent directory
         p = p.parent
 
     # Check depth (max 10 levels from home)
-    try:
-        rel = p.relative_to(home)
-        depth = len(rel.parts)
-        if depth > 10:
-            return JSONResponse({"error": "Maximum directory depth exceeded"}, status_code=400)
-    except ValueError:
-        return JSONResponse({"error": "Access denied"}, status_code=403)
+    depth = len(p.relative_to(Path.home().resolve()).parts)
+    if depth > 10:
+        return JSONResponse({"error": "Maximum directory depth exceeded"}, status_code=400)
 
     # Get indexable extensions from rag
     indexable_exts = getattr(rag, 'ALL_INDEXABLE', rag.SUPPORTED_EXTENSIONS | {'.pdf'})
@@ -984,9 +991,12 @@ async def knowledge_scan(data: dict):
     if not path:
         return JSONResponse({"error": "Path required"}, status_code=400)
 
-    p = Path(path).expanduser().resolve()
-    if not p.exists():
-        return JSONResponse({"error": f"Path not found: {path}"}, status_code=404)
+    try:
+        p = _validate_home_path(path)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=403)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
 
     recursive = data.get("recursive", True)
     result = rag.scan_path(str(p), recursive=recursive)
@@ -1001,6 +1011,14 @@ async def knowledge_index(data: dict):
     files = data.get("files", [])
     if not files:
         return JSONResponse({"error": "No files to index"}, status_code=400)
+
+    home = str(Path.home().resolve())
+    for f in files:
+        fp = Path(f.get("path", "")).resolve()
+        try:
+            fp.relative_to(home)
+        except ValueError:
+            return JSONResponse({"error": f"Access denied: {f.get('path')}"}, status_code=403)
 
     with _knowledge_lock:
         if _knowledge_task and _knowledge_task.get("status") == "running":
@@ -1049,6 +1067,14 @@ async def knowledge_delete(request: Request):
     path = request.query_params.get("path", "").strip()
     if not path:
         return JSONResponse({"error": "Path required"}, status_code=400)
+
+    home = str(Path.home().resolve())
+    fp = Path(path).resolve()
+    try:
+        fp.relative_to(home)
+    except ValueError:
+        return JSONResponse({"error": f"Access denied: {path}"}, status_code=403)
+
     result = rag.delete_file(path)
     return result
 

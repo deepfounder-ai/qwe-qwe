@@ -1056,7 +1056,11 @@ def _run_inner(user_input: str, thread_id: str | None,
         steps = _decompose_task(client, _model, user_input)
         if steps and len(steps) > 1:
             plan = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
-            messages.append({"role": "system", "content": f"Break this into steps:\n{plan}\nDo step 1 first, then proceed."})
+            # Enhance the existing user message with the plan (avoid injecting a system message)
+            for m in messages:
+                if m["role"] == "user" and m["content"] == user_input:
+                    m["content"] = f"{user_input}\n\n[Recommended approach]\n{plan}\nStart with step 1."
+                    break
             _log.info(f"task decomposed into {len(steps)} steps (complexity={complexity})")
 
     # Count auto-context hits (memories injected into system prompt)
