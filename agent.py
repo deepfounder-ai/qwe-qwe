@@ -390,12 +390,15 @@ def _summarize_tool_output(tool_name: str, output: str, max_chars: int) -> str:
         except Exception:
             pass
 
-    # Line-based output (ls, grep, logs) — keep head + tail
+    # Line-based output (ls, grep, logs) — keep head + tail, cap to max_chars
     lines = output.split("\n")
     if len(lines) > 30:
         head = "\n".join(lines[:15])
         tail = "\n".join(lines[-10:])
-        return f"{head}\n\n[... {len(lines)} lines total, {len(lines) - 25} omitted ...]\n\n{tail}"
+        result = f"{head}\n\n[... {len(lines)} lines total, {len(lines) - 25} omitted ...]\n\n{tail}"
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n[... capped]"
+        return result
 
     # Default: head truncation with marker
     if len(output) > max_chars:
@@ -766,7 +769,7 @@ def _maybe_compact(thread_id: str | None = None):
             )
             summary = _strip_thinking(resp.choices[0].message.content or "")
 
-            if summary and summary.strip().upper() != "SKIP":
+            if summary and not summary.strip().upper().startswith("SKIP"):
                 memory.save(summary, tag="compaction", thread_id=thread_id)
                 _log.info(f"compaction: saved summary ({len(summary)} chars)")
                 _notify_compaction("summary", {
