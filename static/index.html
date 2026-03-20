@@ -2731,7 +2731,15 @@ function startRename(tabEl, tid, cur) {
 // ── Messages ──
 function addMessage(role, text, meta, imageSrc) {
   const empty = chat.querySelector('.empty');
-  if (empty) empty.remove();
+  if (empty) {
+    empty.remove();
+    // Restore spacer so messages stick to bottom via margin-top:auto
+    if (!chat.querySelector('.chat-spacer')) {
+      const spacer = document.createElement('div');
+      spacer.className = 'chat-spacer';
+      chat.prepend(spacer);
+    }
+  }
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   if (imageSrc) {
