@@ -36,9 +36,9 @@ atexit.register(_close_qdrant)
 
 # ── FastEmbed models (lazy-loaded, ONNX-based, no server needed) ──
 
-DENSE_MODEL_NAME = "BAAI/bge-small-en-v1.5"  # 384d, fast, accurate
+DENSE_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384d, 50+ languages
 SPARSE_MODEL_NAME = "prithivida/Splade_PP_en_v1"  # learned sparse (SPLADE++)
-EMBED_DIM = 384  # bge-small-en-v1.5 output dimension
+EMBED_DIM = 384  # multilingual-MiniLM output dimension
 
 
 def _get_dense_model():

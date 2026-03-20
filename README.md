@@ -59,7 +59,7 @@ qwe-qwe makes the trade-off worth it by working *with* the model's limitations i
 - Python 3.11+
 - [LM Studio](https://lmstudio.ai) or [Ollama](https://ollama.ai) with a loaded model
 - **Recommended model:** Qwen 3.5 9B Q4_K_M (~5.5GB GGUF) — best quality/speed at 8GB VRAM
-- **Embeddings:** FastEmbed (ONNX, local) — BAAI/bge-small-en-v1.5 (384d) + SPLADE++
+- **Embeddings:** FastEmbed (ONNX, local) — multilingual-MiniLM (384d, 50+ languages) + SPLADE++
 
 ### Install
 
@@ -183,7 +183,7 @@ Switch on the fly via `/model` (CLI/Telegram) or Settings (Web UI). Auto-discove
 Thread-scoped semantic memory powered by Qdrant:
 
 - **Auto-save**: agent saves important facts, preferences, decisions
-- **Semantic search**: FastEmbed BAAI/bge-small-en-v1.5 (384d) + SPLADE++ sparse, cosine similarity
+- **Semantic search**: FastEmbed multilingual-MiniLM (384d) + SPLADE++ sparse, cosine similarity
 - **Thread isolation**: each thread/topic has its own memory context
 - **Smart compaction**: when context exceeds budget, old messages are summarized and saved to memory
 - **Auto-context**: injects top-3 relevant memories into each conversation turn
@@ -333,7 +333,7 @@ Checks 14 system components:
   ✓ Provider: qwen/qwen3.5-9b @ lmstudio
   ✓ LLM API: 2 models available
   ✓ Model loaded: in memory
-  ✓ Embeddings: FastEmbed (BAAI/bge-small-en-v1.5, 384d)
+  ✓ Embeddings: FastEmbed (multilingual-MiniLM, 384d)
   ✓ Inference: replied in 1.0s
   ✓ Telegram: @yourbot (verified)
   ✓ Threads: 4 threads
