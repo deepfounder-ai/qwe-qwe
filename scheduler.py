@@ -265,7 +265,9 @@ def _execute_task(task_desc: str) -> str:
             "You are a scheduled task worker. Execute the task and return the result.\n"
             "If the task is a reminder, just return the reminder text — do NOT create new reminders.\n"
             f"Your files: logs={data_dir}/logs/, workspace={data_dir}/workspace/\n"
-            "Use secret_get() for API keys/tokens. Use tools step by step. Be concise."
+            "Use secret_get() for API keys/tokens — secrets are in encrypted vault.\n"
+            "Use memory_search() to find saved info (tokens, configs, previous results).\n"
+            "Use tools step by step. Be concise."
         )},
         {"role": "user", "content": task_desc},
     ]
