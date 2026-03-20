@@ -258,12 +258,14 @@ def _execute_task(task_desc: str) -> str:
     if any(m in lower_task for m in reminder_markers) and len(task_desc) < 200:
         return f"🔔 Reminder: {task_desc}"
 
+    data_dir = str(config.DATA_DIR)
     client = providers.get_client()
     messages = [
         {"role": "system", "content": (
-            "You are a background task worker. Execute the task and return the result. "
-            "If the task is a reminder, just return the reminder text — do NOT create new reminders or timers. "
-            "Use tools only when needed. Be concise."
+            "You are a scheduled task worker. Execute the task and return the result.\n"
+            "If the task is a reminder, just return the reminder text — do NOT create new reminders.\n"
+            f"Your files: logs={data_dir}/logs/, workspace={data_dir}/workspace/\n"
+            "Use secret_get() for API keys/tokens. Use tools step by step. Be concise."
         )},
         {"role": "user", "content": task_desc},
     ]
@@ -271,7 +273,7 @@ def _execute_task(task_desc: str) -> str:
     all_tools = tools.get_all_tools()
     rounds = 0
 
-    while rounds < 5:
+    while rounds < 10:
         try:
             resp = client.chat.completions.create(
                 model=providers.get_model(),

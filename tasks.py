@@ -15,22 +15,36 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
 
 
+def _build_worker_prompt() -> str:
+    """Build system prompt for background worker with self-knowledge."""
+    data_dir = str(config.DATA_DIR)
+    return (
+        "You are a background worker. Complete the task step by step.\n"
+        "Use tools to accomplish the task. Be concise.\n\n"
+        f"YOUR FILE SYSTEM:\n"
+        f"- Data dir: {data_dir}/\n"
+        f"- Logs: {data_dir}/logs/qwe-qwe.log, {data_dir}/logs/errors.log\n"
+        f"- Workspace: {data_dir}/workspace/\n"
+        f"- Database: {config.DB_PATH}\n\n"
+        "SECRETS: use secret_save/secret_get for API keys, tokens, passwords.\n"
+        "SCHEDULING: use schedule_task to create cron jobs.\n"
+        "SHELL: combine steps when possible (e.g. write script + chmod in one command).\n\n"
+        "When done, summarize what you did in one sentence."
+    )
+
+
 def _run_task(task_id: int, task_desc: str):
     """Run a single task through the LLM with tools."""
     client = providers.get_client()
 
     messages = [
-        {"role": "system", "content": (
-            "You are a background worker. Complete the task efficiently.\n"
-            "Use tools to accomplish the task. Be concise.\n"
-            "When done, summarize what you did in one sentence."
-        )},
+        {"role": "system", "content": _build_worker_prompt()},
         {"role": "user", "content": task_desc},
     ]
 
     all_tools = tools.get_all_tools()
     rounds = 0
-    max_rounds = 5
+    max_rounds = 15
 
     while rounds < max_rounds:
         try:

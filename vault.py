@@ -3,7 +3,12 @@
 import os
 import base64
 import hashlib
-from cryptography.fernet import Fernet
+
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    Fernet = None  # graceful degradation — checked in _get_fernet()
+
 import db
 import logger
 
@@ -21,8 +26,13 @@ if os.path.exists(_OLD_KEY_FILE) and not os.path.exists(_KEY_FILE):
     os.chmod(_KEY_FILE, 0o600)
 
 
-def _get_fernet() -> Fernet:
+def _get_fernet():
     """Get or create Fernet cipher."""
+    if Fernet is None:
+        raise ImportError(
+            "Vault requires 'cryptography' package. "
+            "Install it: pip install cryptography"
+        )
     if os.path.exists(_KEY_FILE):
         with open(_KEY_FILE, "rb") as f:
             key = f.read()

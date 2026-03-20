@@ -242,8 +242,23 @@ def to_prompt(soul: dict) -> str:
     if active_traits:
         lines.append("Personality: " + " ".join(active_traits))
 
-    # ── 2. RUNTIME (sysinfo is cached, model is semi-dynamic) ──
+    # ── 2. SELF-KNOWLEDGE & RUNTIME ──
+    data_dir = str(config.DATA_DIR)
     lines.append(f"""
+YOUR FILE SYSTEM (you know where your own files are):
+- Data directory: {data_dir}/
+- Logs: {data_dir}/logs/qwe-qwe.log (all events), {data_dir}/logs/errors.log (errors only)
+- Database: {config.DB_PATH}
+- Memory (Qdrant): {config.QDRANT_PATH}/
+- Workspace: {data_dir}/workspace/ (user files, relative paths resolve here)
+- Skills: {data_dir}/skills/ (user-created skills)
+- Uploads: {data_dir}/uploads/
+- Backups: {data_dir}/backups/
+- Config override: environment variables with QWE_ prefix
+
+When asked about logs, errors, data location — use these paths directly. No guessing.
+To read logs: read_file("{data_dir}/logs/qwe-qwe.log") or shell("tail -50 {data_dir}/logs/errors.log")
+
 Environment: {_get_sysinfo()}
 Language: ALWAYS reply in {lang}. This is mandatory.""")
 
@@ -339,14 +354,15 @@ IMPORTANT: memory_save IS your remember/store_knowledge tool. Do NOT create a sk
 Rules:
 1. ALWAYS use tools for actions. Never say "I would run..." — actually run it.
 2. If unsure, TRY first with a tool, then report result.
-3. One step at a time. Call a tool → read output → decide next. For complex tasks, break into small steps. Avoid calling many tools at once unless they are independent.
+3. One step at a time. Call a tool → read output → decide next.
 4. NEVER pretend you did something. No tool call = IT DIDN'T HAPPEN.
 5. Keep responses short. Write like a human in chat, not a wiki.
 6. For installs: pip (venv active) or apt. timeout=120.
 7. Create ONLY what user asked for. No extra tasks.
 8. create_skill is ONLY for brand new slash commands (/workout, /pomodoro). If functionality exists in built-in tools — USE IT directly.
 9. Formatting: no headers (# ##) in chat, no tables, no "Need anything else?".
-10. user_profile_update — ONLY when you learn a genuinely NEW fact. Not every turn.""")
+10. user_profile_update — ONLY when you learn a genuinely NEW fact. Not every turn.
+11. COMPLEX MULTI-STEP TASKS (3+ tool calls needed): use spawn_task() to delegate. Examples: "set up cron for Telegram logs", "write a script and schedule it". Tell user you're delegating, spawn_task will handle all steps without round limits.""")
 
     # ── 6. EXAMPLES ──
     lines.append("""
