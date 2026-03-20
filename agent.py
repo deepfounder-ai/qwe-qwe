@@ -375,16 +375,19 @@ def _summarize_tool_output(tool_name: str, output: str, max_chars: int) -> str:
     For text, keep first and last parts with a summary marker.
     """
     # JSON output — extract structure, drop bulk data
-    if output.lstrip().startswith(("{", "[")):
+    if output.lstrip()[:1] in ("{", "["):
         try:
             data = json.loads(output)
             if isinstance(data, list) and len(data) > 5:
                 preview = json.dumps(data[:3], ensure_ascii=False, indent=1)
-                return f"{preview}\n\n[... {len(data)} total items, showing first 3]"
+                result = f"{preview}\n\n[... {len(data)} total items, showing first 3]"
+                if len(result) > max_chars:
+                    result = result[:max_chars] + "\n[... capped]"
+                return result
             elif isinstance(data, dict) and len(output) > max_chars:
                 keys = list(data.keys())[:20]
                 return f"Keys: {keys}\nFirst values preview:\n{output[:max_chars // 2]}..."
-        except (json.JSONDecodeError, TypeError):
+        except Exception:
             pass
 
     # Line-based output (ls, grep, logs) — keep head + tail
@@ -560,7 +563,7 @@ def _build_messages(user_input: str, thread_id: str | None = None,
     # Progressive context injection: skip memory for trivial queries
     # (saves ~200ms embedding + Qdrant latency + context tokens)
     query_lower = (user_input or "").strip().lower().rstrip("!?.,")
-    if query_lower not in TRIVIAL_QUERIES and len(query_lower) > 3:
+    if query_lower not in TRIVIAL_QUERIES:
         context = _auto_context(user_input, thread_id=thread_id)
         if context:
             system_text += "\n\n" + context
@@ -671,7 +674,8 @@ SYSTEM_RESERVE = 3500      # system prompt (~1500 tokens) + tool schemas + auto-
 RECENT_RESERVE = 2         # always keep last N user+assistant pairs
 TOOL_OUTPUT_SUMMARIZE_THRESHOLD = 2000  # chars — above this, auto-summarize tool output
 TRIVIAL_QUERIES = {"привет", "hello", "hi", "хай", "здравствуй", "ку", "hey", "yo",
-                   "ok", "ок", "ага", "угу", "да", "спасибо", "thanks", "thx"}
+                   "ok", "ок", "ага", "угу", "да", "нет", "пока", "спасибо", "thanks", "thx",
+                   "okay", "sure", "nope", "yep", "yup", "bye", "пасиб", "ладно"}
 
 
 def _maybe_compact(thread_id: str | None = None):
