@@ -966,6 +966,38 @@ def _fix_empty_blocks(code: str) -> str:
     return "\n".join(fixed)
 
 
+def _save_skill_result(skill_name: str, description: str, tool_names: list, success: bool):
+    """Save skill creation result to memory + chat history so the model knows about it."""
+    try:
+        import memory
+        if success:
+            tools_str = ", ".join(tool_names) if tool_names else "none"
+            text = (
+                f"Skill '{skill_name}' created successfully. "
+                f"Description: {description}. "
+                f"Available tools: {tools_str}. "
+                f"User can use /{skill_name} to interact with it."
+            )
+        else:
+            text = f"Skill '{skill_name}' creation failed. Description was: {description}. User may want to retry."
+        memory.save(text, tag="task")
+    except Exception:
+        pass
+
+    # Save to chat history so the model sees it in context next turn
+    try:
+        import db
+        status = "✅" if success else "❌"
+        if success:
+            tools_str = ", ".join(tool_names) if tool_names else ""
+            chat_msg = f"{status} Skill '{skill_name}' ready! Tools: {tools_str}. Use /{skill_name}."
+        else:
+            chat_msg = f"{status} Skill '{skill_name}' creation failed. Try with a simpler description."
+        db.save_message("assistant", chat_msg, meta={"source": "skill_creator"})
+    except Exception:
+        pass
+
+
 def _notify(skill_name: str, message: str):
     """Send notification about skill generation progress."""
     import logger
@@ -1250,10 +1282,12 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
             enable(skill_name)
 
             elapsed = int(time.time() - start)
+            tool_names = [t["function"]["name"] for t in tools_list]
             msg = f"✅ Created and enabled! ({len(tools_list)} tools, {elapsed}s)"
             if task_id:
                 tasks.update(task_id, "done", msg)
             _notify(skill_name, msg)
+            _save_skill_result(skill_name, description, tool_names, success=True)
             _log.info(f"[{skill_name}] SUCCESS in {elapsed}s, attempt {attempt}")
             return
 
@@ -1267,6 +1301,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
     if task_id:
         tasks.update(task_id, "error", msg)
     _notify(skill_name, msg)
+    _save_skill_result(skill_name, description, [], success=False)
     _log.error(f"[{skill_name}] FAILED after {max_attempts} attempts")
 
 
