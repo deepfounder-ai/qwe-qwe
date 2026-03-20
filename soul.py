@@ -243,6 +243,11 @@ FILES & SHELL:
 - write_file(path, content) — Write/create file. Only in allowed directories.
 - shell(command, timeout) — Run shell command. Returns stdout+stderr. Default timeout 120s.
 
+HTTP & NOTIFICATIONS:
+- http_request(url, method, body, headers) — Make HTTP requests to any API. Use INSTEAD of curl/wget.
+  For Telegram: http_request(url="https://api.telegram.org/bot{TOKEN}/sendMessage", method="POST", body='{"chat_id": ID, "text": "msg"}')
+- When creating scheduled tasks that send data externally, describe the task using http_request, NOT curl.
+
 KNOWLEDGE (RAG — indexed file search):
 - rag_index(path) — Index a file or directory for semantic search.
 - rag_search(query, limit) — Search indexed files. Returns text chunks with file paths.
@@ -329,7 +334,9 @@ Rules:
 8. create_skill is ONLY for brand new slash commands (/workout, /pomodoro). If functionality exists in built-in tools — USE IT directly.
 9. Formatting: no headers (# ##) in chat, no tables, no "Need anything else?".
 10. user_profile_update — ONLY when you learn a genuinely NEW fact. Not every turn.
-11. COMPLEX MULTI-STEP TASKS (3+ tool calls needed): use spawn_task() to delegate. Examples: "set up cron for Telegram logs", "write a script and schedule it". Tell user you're delegating, spawn_task will handle all steps without round limits.""")
+11. COMPLEX MULTI-STEP TASKS (3+ tool calls needed): use spawn_task() to delegate. Examples: "set up cron for Telegram logs", "write a script and schedule it". Tell user you're delegating, spawn_task will handle all steps without round limits.
+12. NEVER use curl/wget in shell for HTTP requests. Use http_request() tool instead — it bypasses shell restrictions.
+13. When creating cron tasks (schedule_task), describe them as tool-based actions, not shell scripts. Example: "Read logs with read_file, then send via http_request to Telegram API" — NOT "curl https://...".""")
 
     # ── 4. EXAMPLES ──
     lines.append("""
@@ -341,7 +348,8 @@ Examples:
 "read config.py" → read_file({"path":"config.py"})
 "save my API key abc123" → secret_save({"key":"api_key","value":"abc123"})
 "make a workout tracker" → create_skill({"name":"workout","description":"Track workouts..."})
-"запомни: деплой на пятницу" → memory_save({"text":"Deploy scheduled for Friday","tag":"decision"})""")
+"запомни: деплой на пятницу" → memory_save({"text":"Deploy scheduled for Friday","tag":"decision"})
+"send message to Telegram" → secret_get({"key":"telegram_bot_token"}) → http_request({"url":"https://api.telegram.org/bot.../sendMessage","method":"POST","body":"{\"chat_id\":...,\"text\":\"hello\"}"})""")
 
     # ── DYNAMIC SUFFIX (changes per session → KV cache miss from here) ──
     lines.append("\n--- dynamic context ---")
