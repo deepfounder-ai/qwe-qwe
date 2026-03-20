@@ -478,6 +478,59 @@ body {
 .s-btn.danger-sm { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 4px 8px; }
 .s-btn.danger-sm:hover { color: #e74c3c; }
 
+/* ── Knowledge File Browser ── */
+.kn-split { display: flex; gap: 16px; height: calc(100vh - 220px); min-height: 400px; }
+.kn-browser {
+  flex: 1; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  overflow: hidden;
+}
+.kn-browser-toolbar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--border); background: var(--bg);
+}
+.kn-breadcrumb {
+  flex: 1; font-size: 12px; font-family: var(--mono); color: var(--text-dim);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.kn-breadcrumb span { cursor: pointer; color: var(--text-dim); }
+.kn-breadcrumb span:hover { color: var(--accent); }
+.kn-breadcrumb .kn-sep { color: var(--border); margin: 0 4px; cursor: default; }
+.kn-breadcrumb .kn-sep:hover { color: var(--border); }
+.kn-toggle { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+.kn-file-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.kn-file-item {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px;
+  cursor: pointer; font-size: 13px; transition: background 0.1s;
+}
+.kn-file-item:hover { background: var(--surface2); }
+.kn-file-item.dir { color: var(--text); }
+.kn-file-item.file { color: var(--text); }
+.kn-file-item.disabled { color: var(--text-dim); opacity: 0.5; }
+.kn-file-icon { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
+.kn-file-name { flex: 1; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-file-size { font-size: 11px; color: var(--text-dim); font-family: var(--mono); min-width: 60px; text-align: right; }
+.kn-file-cb { flex-shrink: 0; }
+.kn-browser-footer { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
+.kn-selection {
+  width: 320px; flex-shrink: 0; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  overflow: hidden;
+}
+.kn-selection-header {
+  padding: 10px 12px; font-size: 13px; font-weight: 600;
+  border-bottom: 1px solid var(--border); background: var(--bg);
+}
+.kn-selected-list { flex: 1; overflow-y: auto; padding: 8px; }
+.kn-selected-item {
+  display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+  font-size: 12px; font-family: var(--mono); border-radius: 4px;
+}
+.kn-selected-item:hover { background: var(--surface2); }
+.kn-selected-item .kn-remove { cursor: pointer; color: var(--text-dim); margin-left: auto; }
+.kn-selected-item .kn-remove:hover { color: #e74c3c; }
+.kn-empty { text-align: center; padding: 20px; color: var(--text-dim); font-size: 13px; }
+
 /* Mobile */
 @media (max-width: 768px) {
   .msg { max-width: 95%; }
@@ -552,24 +605,32 @@ body {
 
     <!-- Upload tab -->
     <div id="knUploadTab">
-      <div class="knowledge-scan-row">
-        <input type="text" class="s-input" id="knPath" placeholder="/path/to/documents or file">
-        <label><input type="checkbox" id="knRecursive" checked> Recursive</label>
-        <button class="s-btn" onclick="knScan()">Scan</button>
-      </div>
-
-      <div id="knScanResults" style="display:none">
-        <div class="knowledge-summary" id="knSummary"></div>
-        <table class="knowledge-table">
-          <thead><tr>
-            <th><input type="checkbox" id="knSelectAll" checked onchange="knToggleAll(this.checked)"></th>
-            <th>File</th><th>Type</th><th>Method</th><th>Size</th><th>Details</th>
-          </tr></thead>
-          <tbody id="knFileList"></tbody>
-        </table>
-        <div class="knowledge-actions">
-          <button class="s-btn" id="knStartBtn" onclick="knStartIndex()">Start Indexing</button>
-          <span id="knEstimate" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
+      <!-- File Browser + Selection split view -->
+      <div class="kn-split">
+        <!-- Left: File Browser -->
+        <div class="kn-browser">
+          <div class="kn-browser-toolbar">
+            <button class="s-btn" id="knBtnUp" onclick="knNavigateUp()" title="Parent directory">↑</button>
+            <div class="kn-breadcrumb" id="knBreadcrumb"></div>
+            <label class="kn-toggle"><input type="checkbox" id="knShowHidden" onchange="knRefresh()"> Hidden</label>
+          </div>
+          <div class="kn-file-list" id="knFileList"></div>
+          <div class="kn-browser-footer">
+            <button class="s-btn" onclick="knSelectAllIndexable()">Select all indexable</button>
+            <button class="s-btn" onclick="knClearSelection()">Clear</button>
+          </div>
+        </div>
+        <!-- Right: Selection Summary -->
+        <div class="kn-selection">
+          <div class="kn-selection-header">Selected files</div>
+          <div class="kn-selected-list" id="knSelectedList">
+            <div class="kn-empty">No files selected</div>
+          </div>
+          <div class="knowledge-summary" id="knSummary" style="display:none"></div>
+          <div class="knowledge-actions" id="knActions" style="display:none">
+            <button class="s-btn" id="knStartBtn" onclick="knStartIndex()">Start Indexing</button>
+            <span id="knEstimate" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
+          </div>
         </div>
       </div>
 
@@ -2166,7 +2227,9 @@ function connect() {
 }
 
 // ── Knowledge ──
-let _knScanData = null;
+let _knCurrentPath = '';
+let _knHome = '';
+let _knSelected = new Map(); // path -> {name, type, ext, size, method}
 
 function showKnowledgeTab(tab) {
   document.getElementById('knUploadTab').style.display = tab === 'upload' ? '' : 'none';
@@ -2174,103 +2237,250 @@ function showKnowledgeTab(tab) {
   document.getElementById('knTabUpload').classList.toggle('tab-active', tab === 'upload');
   document.getElementById('knTabIndexed').classList.toggle('tab-active', tab === 'indexed');
   if (tab === 'indexed') knLoadIndexed();
+  if (tab === 'upload' && !_knCurrentPath) knBrowse();
 }
 
 function _formatSize(bytes) {
+  if (!bytes) return '';
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
   return (bytes/(1024*1024)).toFixed(1) + ' MB';
 }
 
-async function knScan() {
-  const path = document.getElementById('knPath').value.trim();
-  if (!path) return;
-  const recursive = document.getElementById('knRecursive').checked;
-  document.getElementById('knScanResults').style.display = 'none';
-  document.getElementById('knDone').style.display = 'none';
-  try {
-    const res = await fetch('/api/knowledge/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path, recursive})});
-    const data = await res.json();
-    if (data.error) { alert(data.error); return; }
-    _knScanData = data;
-    knRenderScan(data);
-  } catch(e) { alert('Scan failed: ' + e.message); }
+function _fileIcon(item) {
+  if (item.type === 'dir') return '📁';
+  const ext = (item.ext || '').toLowerCase();
+  if (['.png','.jpg','.jpeg','.webp','.gif','.bmp'].includes(ext)) return '🖼';
+  if (ext === '.pdf') return '📑';
+  if (['.py','.js','.ts','.go','.rs','.java','.c','.cpp','.rb','.php'].includes(ext)) return '💻';
+  if (['.md','.txt','.csv','.json','.yaml','.yml','.toml'].includes(ext)) return '📄';
+  return '📄';
 }
 
-function knRenderScan(data) {
-  const tbody = document.getElementById('knFileList');
-  const s = data.summary || {};
-  const est = data.estimate || {};
+function _fileMethod(ext) {
+  ext = (ext || '').toLowerCase();
+  if (['.png','.jpg','.jpeg','.webp','.gif','.bmp'].includes(ext)) return 'vision';
+  if (ext === '.pdf') return 'pdf';
+  return 'text';
+}
+
+async function knBrowse(path) {
+  const hidden = document.getElementById('knShowHidden')?.checked || false;
+  const url = `/api/files/browse?path=${encodeURIComponent(path || '')}&hidden=${hidden}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) { console.error(data.error); return; }
+    _knCurrentPath = data.current;
+    _knHome = data.home || _knCurrentPath;
+    knRenderBrowser(data);
+  } catch(e) { console.error('knBrowse error:', e); }
+}
+
+function knRenderBrowser(data) {
+  // Breadcrumb
+  const bc = document.getElementById('knBreadcrumb');
+  const home = data.home || '';
+  const rel = data.current.startsWith(home) ? data.current.slice(home.length) : data.current;
+  const parts = rel.split('/').filter(Boolean);
+  let bcHtml = `<span onclick="knBrowse('${home}')" title="${home}">~</span>`;
+  let cumPath = home;
+  parts.forEach(part => {
+    cumPath += '/' + part;
+    bcHtml += `<span class="kn-sep">/</span><span onclick="knBrowse('${cumPath}')">${part}</span>`;
+  });
+  bc.innerHTML = bcHtml;
+
+  // Up button
+  document.getElementById('knBtnUp').disabled = !data.parent;
+
+  // File list
+  const list = document.getElementById('knFileList');
+  if (!data.items || !data.items.length) {
+    list.innerHTML = '<div class="kn-empty">Empty directory</div>';
+    return;
+  }
+
+  let html = '';
+  data.items.forEach(item => {
+    const fullPath = data.current + '/' + item.name;
+    const icon = _fileIcon(item);
+    const isSelected = _knSelected.has(fullPath);
+
+    if (item.type === 'dir') {
+      html += `<div class="kn-file-item dir" ondblclick="knBrowse('${fullPath}')">
+        <input type="checkbox" class="kn-file-cb" ${isSelected ? 'checked' : ''}
+               onchange="knToggleDir('${fullPath}', '${item.name}', this.checked)" onclick="event.stopPropagation()">
+        <span class="kn-file-icon">${icon}</span>
+        <span class="kn-file-name" onclick="knBrowse('${fullPath}')">${item.name}</span>
+      </div>`;
+    } else if (item.indexable) {
+      html += `<div class="kn-file-item file">
+        <input type="checkbox" class="kn-file-cb" ${isSelected ? 'checked' : ''}
+               onchange="knToggleFile('${fullPath}', ${JSON.stringify(item).replace(/"/g,'&quot;')}, this.checked)" onclick="event.stopPropagation()">
+        <span class="kn-file-icon">${icon}</span>
+        <span class="kn-file-name">${item.name}</span>
+        <span class="kn-file-size">${_formatSize(item.size)}</span>
+      </div>`;
+    } else {
+      html += `<div class="kn-file-item file disabled">
+        <span class="kn-file-icon" style="opacity:0.4">${icon}</span>
+        <span class="kn-file-name">${item.name}</span>
+        <span class="kn-file-size">${_formatSize(item.size)}</span>
+      </div>`;
+    }
+  });
+  list.innerHTML = html;
+}
+
+function knNavigateUp() {
+  // Go to parent of current path, but not above home
+  if (!_knCurrentPath || _knCurrentPath === _knHome) return;
+  const parent = _knCurrentPath.split('/').slice(0, -1).join('/') || '/';
+  knBrowse(parent);
+}
+
+function knToggleFile(path, item, checked) {
+  if (checked) {
+    _knSelected.set(path, {
+      name: item.name, type: item.type || 'file', ext: item.ext,
+      size: item.size, method: _fileMethod(item.ext), path: path
+    });
+  } else {
+    _knSelected.delete(path);
+  }
+  knRenderSelection();
+}
+
+async function knToggleDir(path, name, checked) {
+  if (checked) {
+    // Scan directory to find all indexable files
+    try {
+      const res = await fetch('/api/knowledge/scan', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({path: path, recursive: true})
+      });
+      const data = await res.json();
+      if (data.files) {
+        data.files.forEach(f => {
+          if (f.type !== 'unsupported' && f.type !== 'skipped') {
+            _knSelected.set(f.path, {
+              name: f.path.split('/').pop(), type: f.type, ext: '.' + f.type,
+              size: f.size, method: f.method, path: f.path
+            });
+          }
+        });
+      }
+    } catch(e) { console.error('scan failed:', e); }
+  } else {
+    // Remove all files under this path
+    for (const [k] of _knSelected) {
+      if (k.startsWith(path + '/')) _knSelected.delete(k);
+    }
+  }
+  knRenderSelection();
+  knRefresh(); // re-render checkboxes
+}
+
+function knSelectAllIndexable() {
+  document.querySelectorAll('.kn-file-item.file:not(.disabled) .kn-file-cb').forEach(cb => {
+    if (!cb.checked) cb.click();
+  });
+}
+
+function knClearSelection() {
+  _knSelected.clear();
+  knRenderSelection();
+  knRefresh();
+}
+
+function knRefresh() {
+  knBrowse(_knCurrentPath);
+}
+
+function knRenderSelection() {
+  const list = document.getElementById('knSelectedList');
+  const summary = document.getElementById('knSummary');
+  const actions = document.getElementById('knActions');
+
+  if (_knSelected.size === 0) {
+    list.innerHTML = '<div class="kn-empty">No files selected</div>';
+    summary.style.display = 'none';
+    actions.style.display = 'none';
+    return;
+  }
+
+  // Selected files list
+  let html = '';
+  const counts = {text: 0, pdf: 0, image: 0};
+  let totalSize = 0;
+
+  for (const [path, info] of _knSelected) {
+    const icon = _fileIcon(info);
+    const method = info.method || 'text';
+    if (method === 'vision') counts.image++;
+    else if (method === 'pdf') counts.pdf++;
+    else counts.text++;
+    totalSize += info.size || 0;
+
+    html += `<div class="kn-selected-item">
+      <span>${icon}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${path}">${info.name}</span>
+      <span class="kn-remove" onclick="_knSelected.delete('${path.replace(/'/g,"\\'")}');knRenderSelection();knRefresh()">×</span>
+    </div>`;
+  }
+  list.innerHTML = html;
 
   // Summary
   const parts = [];
-  if (s.text) parts.push(`${s.text} text`);
-  if (s.pdf) parts.push(`${s.pdf} PDF`);
-  if (s.image) parts.push(`${s.image} images`);
-  if (s.unsupported) parts.push(`${s.unsupported} unsupported`);
+  if (counts.text) parts.push(`${counts.text} text`);
+  if (counts.pdf) parts.push(`${counts.pdf} PDF`);
+  if (counts.image) parts.push(`${counts.image} images`);
 
-  document.getElementById('knSummary').innerHTML =
-    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.files?.length||0}</div><div class="knowledge-stat-label">Files</div></div>` +
-    `<div class="knowledge-stat"><div class="knowledge-stat-val">~${est.chunks||0}</div><div class="knowledge-stat-label">Chunks</div></div>` +
-    `<div class="knowledge-stat"><div class="knowledge-stat-val">~${est.time_cpu_sec||0}s</div><div class="knowledge-stat-label">CPU time</div></div>` +
-    (est.gpu_required ? `<div class="knowledge-stat"><div class="knowledge-stat-val">~${est.time_gpu_sec||0}s</div><div class="knowledge-stat-label">GPU time</div></div>` : '');
+  const cpuSec = Math.round(counts.text * 0.5 + counts.pdf * 2);
+  const gpuSec = Math.round(counts.image * 2);
 
-  // File table
-  tbody.innerHTML = '';
-  (data.files || []).forEach((f, i) => {
-    const name = f.path.split('/').pop();
-    const badge = f.type || 'unsupported';
-    const details = [];
-    if (f.pages) details.push(`${f.pages} pages`);
-    if (f.reason) details.push(f.reason);
-    const disabled = f.type === 'unsupported' || f.type === 'skipped';
-    tbody.innerHTML += `<tr>
-      <td><input type="checkbox" class="kn-file-cb" data-idx="${i}" ${disabled ? 'disabled' : 'checked'}></td>
-      <td title="${f.path}">${name}</td>
-      <td><span class="knowledge-badge ${badge}">${badge}</span></td>
-      <td>${f.method || '-'}</td>
-      <td>${_formatSize(f.size || 0)}</td>
-      <td style="font-size:11px;color:var(--text-dim)">${details.join(', ')}</td>
-    </tr>`;
-  });
+  summary.innerHTML =
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${_knSelected.size}</div><div class="knowledge-stat-label">Files</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${_formatSize(totalSize)}</div><div class="knowledge-stat-label">Total size</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">~${cpuSec}s</div><div class="knowledge-stat-label">CPU time</div></div>` +
+    (gpuSec > 0 ? `<div class="knowledge-stat"><div class="knowledge-stat-val">~${gpuSec}s</div><div class="knowledge-stat-label">GPU time</div></div>` : '');
+  summary.style.display = 'flex';
 
-  // Button style
+  // Button
   const btn = document.getElementById('knStartBtn');
-  if (est.gpu_required) {
+  if (counts.image > 0) {
     btn.className = 's-btn warning';
-    btn.textContent = `Start Indexing (includes ${s.image||0} images)`;
+    btn.textContent = `Start Indexing (${counts.image} images)`;
   } else {
     btn.className = 's-btn';
     btn.textContent = 'Start Indexing';
   }
-
   document.getElementById('knEstimate').textContent = parts.join(', ');
-  document.getElementById('knScanResults').style.display = '';
-}
-
-function knToggleAll(checked) {
-  document.querySelectorAll('.kn-file-cb:not(:disabled)').forEach(cb => cb.checked = checked);
+  actions.style.display = 'flex';
 }
 
 async function knStartIndex() {
-  if (!_knScanData) return;
-  const selected = [];
-  document.querySelectorAll('.kn-file-cb:checked').forEach(cb => {
-    const idx = parseInt(cb.dataset.idx);
-    const f = _knScanData.files[idx];
-    if (f && f.type !== 'unsupported' && f.type !== 'skipped') selected.push(f);
-  });
-  if (!selected.length) { alert('No files selected'); return; }
+  if (_knSelected.size === 0) return;
 
-  document.getElementById('knScanResults').style.display = 'none';
+  const files = [];
+  for (const [path, info] of _knSelected) {
+    files.push({path, type: info.type || 'text', method: info.method || 'chunk_text', size: info.size || 0});
+  }
+
+  document.querySelector('.kn-split').style.display = 'none';
   document.getElementById('knProgress').style.display = '';
   document.getElementById('knGpuWarning').style.display = 'none';
   document.getElementById('knDone').style.display = 'none';
 
   try {
-    const res = await fetch('/api/knowledge/index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({files:selected})});
+    const res = await fetch('/api/knowledge/index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({files})});
     const data = await res.json();
-    if (data.error) { alert(data.error); document.getElementById('knProgress').style.display = 'none'; document.getElementById('knScanResults').style.display = ''; }
+    if (data.error) {
+      alert(data.error);
+      document.querySelector('.kn-split').style.display = 'flex';
+      document.getElementById('knProgress').style.display = 'none';
+    }
   } catch(e) { alert('Index failed: ' + e.message); }
 }
 
@@ -2292,11 +2502,13 @@ function knOnDone(data) {
   document.getElementById('knProgress').style.display = 'none';
   document.getElementById('knGpuWarning').style.display = 'none';
   document.getElementById('knDone').style.display = '';
+  document.querySelector('.kn-split').style.display = 'flex';
+  _knSelected.clear();
+  knRenderSelection();
   document.getElementById('knDoneSummary').innerHTML =
     `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.files}</div><div class="knowledge-stat-label">Files</div></div>` +
     `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.chunks}</div><div class="knowledge-stat-label">Chunks</div></div>` +
-    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.errors}</div><div class="knowledge-stat-label">Errors</div></div>` +
-    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.duration_sec||0}s</div><div class="knowledge-stat-label">Duration</div></div>`;
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.errors}</div><div class="knowledge-stat-label">Errors</div></div>`;
 }
 
 async function knLoadIndexed() {

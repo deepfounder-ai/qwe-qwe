@@ -884,6 +884,98 @@ def _run_knowledge_index(task_id: int, files: list[dict]):
         _knowledge_task = None
 
 
+# ── File Browser ──
+
+@app.get("/api/files/browse")
+async def file_browse(request: Request):
+    """Browse directory contents for Knowledge file picker."""
+    import rag
+
+    params = request.query_params
+    home = str(Path.home())
+    raw_path = params.get("path", home)
+    show_hidden = params.get("hidden", "false").lower() == "true"
+
+    p = Path(raw_path).expanduser().resolve()
+
+    # Security: must be within home directory
+    if not str(p).startswith(home):
+        return JSONResponse({"error": "Access denied: outside home directory"}, status_code=403)
+
+    if not p.exists():
+        return JSONResponse({"error": f"Path not found: {raw_path}"}, status_code=404)
+
+    if not p.is_dir():
+        # If it's a file, return its parent directory
+        p = p.parent
+
+    # Check depth (max 10 levels from home)
+    try:
+        rel = p.relative_to(home)
+        depth = len(rel.parts)
+        if depth > 10:
+            return JSONResponse({"error": "Maximum directory depth exceeded"}, status_code=400)
+    except ValueError:
+        return JSONResponse({"error": "Access denied"}, status_code=403)
+
+    # Get indexable extensions from rag
+    indexable_exts = getattr(rag, 'ALL_INDEXABLE', rag.SUPPORTED_EXTENSIONS | {'.pdf'})
+
+    # Build items list
+    items = []
+    try:
+        for entry in sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            name = entry.name
+
+            # Skip hidden files unless requested
+            if name.startswith('.') and not show_hidden:
+                continue
+
+            # Skip symlinks that point outside home
+            if entry.is_symlink():
+                try:
+                    target = entry.resolve()
+                    if not str(target).startswith(home):
+                        continue
+                except (OSError, ValueError):
+                    continue
+
+            try:
+                stat = entry.stat()
+            except (PermissionError, OSError):
+                continue
+
+            if entry.is_dir():
+                items.append({
+                    "name": name,
+                    "type": "dir",
+                    "size": None,
+                    "modified": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime)),
+                })
+            elif entry.is_file():
+                ext = entry.suffix.lower()
+                items.append({
+                    "name": name,
+                    "type": "file",
+                    "size": stat.st_size,
+                    "ext": ext,
+                    "indexable": ext in indexable_exts,
+                    "modified": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stat.st_mtime)),
+                })
+    except PermissionError:
+        return JSONResponse({"error": "Permission denied"}, status_code=403)
+
+    # Parent path (don't go above home)
+    parent = str(p.parent) if str(p) != home else None
+
+    return {
+        "current": str(p),
+        "parent": parent,
+        "home": home,
+        "items": items,
+    }
+
+
 @app.post("/api/knowledge/scan")
 async def knowledge_scan(data: dict):
     """Scan a path and return file preview for indexing."""
