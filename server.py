@@ -841,7 +841,7 @@ def _emit_knowledge(data: dict):
             pass
 
 
-def _run_knowledge_index(task_id: int, files: list[dict]):
+def _run_knowledge_index(task_id: int, files: list[dict], tags: list[str] | None = None):
     """Background knowledge indexing thread."""
     global _knowledge_task
     import rag
@@ -868,7 +868,7 @@ def _run_knowledge_index(task_id: int, files: list[dict]):
         })
 
     try:
-        results = rag.index_files_batch(files, progress_cb=progress_cb, phase_cb=phase_cb)
+        results = rag.index_files_batch(files, progress_cb=progress_cb, phase_cb=phase_cb, tags=tags or None)
         errors = [r for r in results if r.get("status") not in ("indexed", "already up to date")]
     except Exception as e:
         _log.error(f"knowledge indexing failed: {e}", exc_info=True)
@@ -1020,6 +1020,8 @@ async def knowledge_index(data: dict):
     global _knowledge_task
 
     files = data.get("files", [])
+    tags_raw = data.get("tags", [])
+    tags = [t.strip() for t in tags_raw if isinstance(t, str) and t.strip()] if tags_raw else []
     if not files:
         return JSONResponse({"error": "No files to index"}, status_code=400)
 
@@ -1049,7 +1051,7 @@ async def knowledge_index(data: dict):
             "errors": []
         }
 
-    thread = threading.Thread(target=_run_knowledge_index, args=(task_id, files), daemon=True)
+    thread = threading.Thread(target=_run_knowledge_index, args=(task_id, files, tags), daemon=True)
     thread.start()
 
     return {"task_id": task_id, "status": "started", "total": len(files)}
@@ -1069,6 +1071,26 @@ async def knowledge_list():
     """List all indexed files."""
     import rag
     return {"files": rag.list_indexed_files()}
+
+
+@app.post("/api/knowledge/search")
+async def knowledge_search(data: dict):
+    """Search indexed knowledge base."""
+    import rag
+    query = data.get("query", "").strip()
+    if not query:
+        return JSONResponse({"error": "Query required"}, status_code=400)
+    limit = min(int(data.get("limit", 10)), 50)
+    tags = data.get("tags")  # optional list of tags to filter by
+    if tags and isinstance(tags, list):
+        tags = [t for t in tags if isinstance(t, str) and t.strip()]
+    else:
+        tags = None
+    try:
+        results = rag.search(query, limit=limit, tags=tags)
+        return {"results": results}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.delete("/api/knowledge/file")

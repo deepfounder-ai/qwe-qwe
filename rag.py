@@ -59,6 +59,9 @@ def _get_qdrant():
             if "file_path" not in existing:
                 _qclient.create_payload_index(RAG_COLLECTION, "file_path", PayloadSchemaType.KEYWORD)
                 _log.info("created payload index: file_path")
+            if "tags" not in existing:
+                _qclient.create_payload_index(RAG_COLLECTION, "tags", PayloadSchemaType.KEYWORD)
+                _log.info("created payload index: tags")
         except Exception as e:
             _log.debug(f"RAG payload index creation skipped: {e}")
     return _qclient
@@ -115,7 +118,7 @@ def _read_file(path: Path) -> str | None:
         return None
 
 
-def index_file(filepath: str) -> dict:
+def index_file(filepath: str, tags: list[str] | None = None) -> dict:
     """Index a single file with dense + sparse vectors. Returns {path, chunks, status}."""
     from qdrant_client.models import PointStruct
     import memory
@@ -151,16 +154,19 @@ def index_file(filepath: str) -> dict:
     for i, chunk in enumerate(chunks):
         dense = _embed(chunk)
         sparse = memory.sparse_embed(chunk)
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector={"dense": dense, "sparse": sparse},
-            payload={
+        payload = {
                 "text": chunk,
                 "file_path": str(path),
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "indexed_at": time.time(),
-            },
+            }
+        if tags:
+            payload["tags"] = tags
+        points.append(PointStruct(
+            id=str(uuid.uuid4()),
+            vector={"dense": dense, "sparse": sparse},
+            payload=payload,
         ))
 
     if points:
@@ -169,8 +175,10 @@ def index_file(filepath: str) -> dict:
             batch = points[batch_start:batch_start + 100]
             qc.upsert(RAG_COLLECTION, points=batch)
 
-    # Store mtime
+    # Store mtime + tags
     db.kv_set(mtime_key, current_mtime)
+    if tags:
+        db.kv_set(f"rag:tags:{path}", ",".join(tags))
     _log.info(f"indexed {path}: {len(chunks)} chunks")
     return {"path": str(path), "chunks": len(chunks), "status": "indexed"}
 
@@ -193,10 +201,15 @@ def index_directory(dirpath: str, recursive: bool = True) -> list[dict]:
     return results
 
 
-def search(query: str, limit: int = 5) -> list[dict]:
+def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[dict]:
     """Hybrid search over indexed files (dense + sparse RRF).
 
-    Returns [{text, file_path, chunk_index, score}].
+    Args:
+        query: search text.
+        limit: max results.
+        tags: optional list of tags to filter by (OR logic — match any).
+
+    Returns [{text, file_path, chunk_index, score, tags}].
     """
     import memory
     from qdrant_client.models import Prefetch, FusionQuery, Fusion
@@ -204,6 +217,12 @@ def search(query: str, limit: int = 5) -> list[dict]:
     qc = _get_qdrant()
     dense = _embed(query)
     sparse = memory.sparse_embed(query)
+
+    # Build filter for tags if provided
+    query_filter = None
+    if tags:
+        from qdrant_client.models import Filter, FieldCondition, MatchAny
+        query_filter = Filter(must=[FieldCondition(key="tags", match=MatchAny(any=tags))])
 
     try:
         results = qc.query_points(
@@ -213,13 +232,15 @@ def search(query: str, limit: int = 5) -> list[dict]:
                 Prefetch(query=dense, using="dense", limit=limit * 4),
             ],
             query=FusionQuery(fusion=Fusion.RRF),
+            query_filter=query_filter,
             limit=limit,
         )
     except Exception as e:
         _log.debug(f"hybrid RAG search failed, falling back to dense: {e}")
         try:
             results = qc.query_points(RAG_COLLECTION, query=dense,
-                                      using="dense", limit=limit)
+                                      using="dense", limit=limit,
+                                      query_filter=query_filter)
         except Exception:
             results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit)
 
@@ -229,6 +250,7 @@ def search(query: str, limit: int = 5) -> list[dict]:
             "file_path": r.payload.get("file_path", ""),
             "chunk_index": r.payload.get("chunk_index", 0),
             "score": round(r.score, 3),
+            "tags": r.payload.get("tags", []),
         }
         for r in results.points
     ]
@@ -425,7 +447,7 @@ def scan_path(path_str: str, recursive: bool = True) -> dict:
             summary["pdf"] += 1
             est_chunks += max(1, est_pages * 2)
             est_time_cpu += 0.2 * est_pages
-            entry = {"path": str(f), "type": ftype, "method": method, "pages": est_pages}
+            entry = {"path": str(f), "type": ftype, "method": method, "pages": est_pages, "size": size}
             files.append(entry)
             continue
         elif ext in IMAGE_EXTENSIONS:
@@ -439,7 +461,7 @@ def scan_path(path_str: str, recursive: bool = True) -> dict:
             summary["unsupported"] += 1
             continue
 
-        files.append({"path": str(f), "type": ftype, "method": method})
+        files.append({"path": str(f), "type": ftype, "method": method, "size": size})
 
     return {
         "files": files,
@@ -458,13 +480,15 @@ def scan_path(path_str: str, recursive: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None) -> list[dict]:
+def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
+                      tags: list[str] | None = None) -> list[dict]:
     """Batch-index a list of file descriptors from scan_path.
 
     Args:
         files: list of dicts with ``path``, ``type``, ``method`` keys.
         progress_cb: optional ``(current, total, path, phase, detail) -> None``.
         phase_cb: optional ``(event, count, estimate_sec) -> None``.
+        tags: optional list of tag strings to attach to all indexed chunks.
 
     Returns:
         list of result dicts ``[{path, chunks, status, method}]``.
@@ -494,7 +518,7 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None) -> lis
         fpath = f["path"]
         if progress_cb:
             progress_cb(current, total, fpath, "cpu", f.get("method", ""))
-        result = index_file(fpath)
+        result = index_file(fpath, tags=tags)
         result["method"] = f.get("method", "chunk_text")
         results.append(result)
 
@@ -533,16 +557,19 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None) -> lis
                 for i, chunk in enumerate(chunks):
                     dense = _embed(chunk)
                     sparse = memory.sparse_embed(chunk)
-                    points.append(PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector={"dense": dense, "sparse": sparse},
-                        payload={
+                    payload = {
                             "text": chunk,
                             "file_path": str(path),
                             "chunk_index": i,
                             "total_chunks": len(chunks),
                             "indexed_at": time.time(),
-                        },
+                        }
+                    if tags:
+                        payload["tags"] = tags
+                    points.append(PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector={"dense": dense, "sparse": sparse},
+                        payload=payload,
                     ))
 
                 if points:
@@ -552,6 +579,8 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None) -> lis
 
                 mtime_key = f"rag:mtime:{path}"
                 db.kv_set(mtime_key, str(path.stat().st_mtime))
+                if tags:
+                    db.kv_set(f"rag:tags:{path}", ",".join(tags))
                 _log.info(f"indexed {path}: {len(chunks)} chunks (method={method})")
                 results.append({"path": str(path), "chunks": len(chunks), "status": "indexed", "method": method})
             except Exception as e:
@@ -570,17 +599,20 @@ def list_indexed_files() -> list[dict]:
     """Return all indexed files from the kv store.
 
     Returns:
-        list of ``{path, mtime, filename}`` dicts.
+        list of ``{path, mtime, filename, tags}`` dicts.
     """
     rows = db.fetchall("SELECT key, value FROM kv WHERE key LIKE 'rag:mtime:%'")
     results = []
     prefix_len = len("rag:mtime:")
     for key, value in rows:
         fpath = key[prefix_len:]
+        tags_str = db.kv_get(f"rag:tags:{fpath}") or ""
+        tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
         results.append({
             "path": fpath,
             "mtime": float(value) if value else 0.0,
             "filename": Path(fpath).name,
+            "tags": tags,
         })
     return results
 
@@ -596,6 +628,7 @@ def delete_file(file_path: str) -> dict:
     """
     path = Path(file_path).expanduser().resolve()
     _delete_file_chunks(str(path))
-    # Remove mtime tracking
+    # Remove mtime + tags tracking
     db.execute("DELETE FROM kv WHERE key = ?", (f"rag:mtime:{path}",))
+    db.execute("DELETE FROM kv WHERE key = ?", (f"rag:tags:{path}",))
     return {"path": str(path), "status": "deleted"}

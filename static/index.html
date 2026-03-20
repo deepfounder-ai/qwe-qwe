@@ -439,6 +439,16 @@ body {
 }
 .knowledge-table td { padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
 .knowledge-table tr:hover td { background: var(--surface2); }
+.kn-search-result {
+  padding: 10px 12px; margin-bottom: 8px; border-radius: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.kn-search-result:hover { border-color: var(--accent); }
+.kn-search-meta { font-size: 11px; color: var(--text-dim); font-family: var(--mono); margin-bottom: 4px; }
+.kn-search-text { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.kn-search-score { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: var(--accent); color: #fff; margin-left: 8px; }
+.kn-tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: var(--surface2); color: var(--text-dim); font-family: var(--mono); }
+.kn-search-tags { display: inline; margin-left: 6px; }
 .knowledge-badge {
   display: inline-block; padding: 2px 8px; border-radius: 10px;
   font-size: 11px; font-family: var(--mono);
@@ -472,7 +482,7 @@ body {
   border-radius: 10px; padding: 12px 16px; margin-bottom: 16px;
   color: #ff9800; font-size: 13px;
 }
-.knowledge-actions { display: flex; gap: 8px; margin-top: 16px; }
+.knowledge-actions { display: flex; gap: 8px; margin-top: 16px; padding: 0 12px 12px; }
 .s-btn.warning { background: rgba(255,152,0,0.15); color: #ff9800; border-color: rgba(255,152,0,0.3); }
 .s-btn.warning:hover { background: rgba(255,152,0,0.25); }
 .s-btn.danger-sm { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 4px 8px; }
@@ -628,6 +638,11 @@ body {
           </div>
           <div class="knowledge-summary" id="knSummary" style="display:none"></div>
           <div class="knowledge-actions" id="knActions" style="display:none">
+            <div style="display:flex;gap:6px;align-items:center;width:100%;margin-bottom:8px">
+              <span style="font-size:11px;color:var(--text-dim);white-space:nowrap">Tags:</span>
+              <input type="text" id="knTagsInput" placeholder="e.g. docs, research"
+                     style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:12px;font-family:var(--mono)">
+            </div>
             <button class="s-btn" id="knStartBtn" onclick="knStartIndex()">Start Indexing</button>
             <span id="knEstimate" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
           </div>
@@ -658,6 +673,19 @@ body {
 
     <!-- Indexed tab -->
     <div id="knIndexedTab" style="display:none">
+      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="knSearchInput" placeholder="Search indexed knowledge..."
+               style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:13px;font-family:var(--mono)"
+               onkeydown="if(event.key==='Enter')knSearch()">
+        <input type="text" id="knSearchTags" placeholder="Filter by tags..."
+               style="width:150px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px;font-family:var(--mono)"
+               onkeydown="if(event.key==='Enter')knSearch()">
+        <button class="s-btn" onclick="knSearch()">Search</button>
+      </div>
+      <div id="knSearchResults" style="display:none;margin-bottom:16px">
+        <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--text-dim)">Search Results</div>
+        <div id="knSearchList"></div>
+      </div>
       <div id="knIndexedEmpty" class="cron-empty">No files indexed yet</div>
       <table class="knowledge-table" id="knIndexedTable" style="display:none">
         <thead><tr><th>File</th><th>Path</th><th></th></tr></thead>
@@ -2311,8 +2339,10 @@ function knRenderBrowser(data) {
     const isSelected = _knSelected.has(fullPath);
 
     if (item.type === 'dir') {
+      // Directory counts as selected if any child file is selected under it
+      const dirSel = [..._knSelected.keys()].some(k => k.startsWith(fullPath + '/'));
       html += `<div class="kn-file-item dir" ondblclick="knBrowse('${_jsEsc(fullPath)}')">
-        <input type="checkbox" class="kn-file-cb" ${isSelected ? 'checked' : ''}
+        <input type="checkbox" class="kn-file-cb" ${dirSel ? 'checked' : ''}
                onchange="knToggleDir('${_jsEsc(fullPath)}', '${_jsEsc(item.name)}', this.checked)" onclick="event.stopPropagation()">
         <span class="kn-file-icon">${icon}</span>
         <span class="kn-file-name" onclick="knBrowse('${_jsEsc(fullPath)}')">${escapeHtml(item.name)}</span>
@@ -2369,9 +2399,11 @@ async function knToggleDir(path, name, checked) {
       if (data.files) {
         data.files.forEach(f => {
           if (f.type !== 'unsupported' && f.type !== 'skipped') {
+            const fname = f.path.split('/').pop();
+            const ext = '.' + (fname.split('.').pop() || '').toLowerCase();
             _knSelected.set(f.path, {
-              name: f.path.split('/').pop(), type: f.type, ext: '.' + f.type,
-              size: f.size, method: f.method, path: f.path
+              name: fname, type: f.type, ext: ext,
+              size: f.size || 0, method: f.method, path: f.path
             });
           }
         });
@@ -2474,6 +2506,8 @@ async function knStartIndex() {
   for (const [path, info] of _knSelected) {
     files.push({path, type: info.type || 'text', method: info.method || 'chunk_text', size: info.size || 0});
   }
+  const tagsRaw = (document.getElementById('knTagsInput')?.value || '').trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
 
   document.querySelector('.kn-split').style.display = 'none';
   document.getElementById('knProgress').style.display = '';
@@ -2481,7 +2515,7 @@ async function knStartIndex() {
   document.getElementById('knDone').style.display = 'none';
 
   try {
-    const res = await fetch('/api/knowledge/index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({files})});
+    const res = await fetch('/api/knowledge/index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({files, tags})});
     const data = await res.json();
     if (data.error) {
       alert(data.error);
@@ -2562,8 +2596,9 @@ async function knLoadIndexed() {
     tbody.innerHTML = '';
     files.forEach(f => {
       const name = f.path.split('/').pop();
+      const tagsHtml = (f.tags || []).map(t => `<span class="kn-tag">${escapeHtml(t)}</span>`).join(' ');
       tbody.innerHTML += `<tr>
-        <td>${escapeHtml(name)}</td>
+        <td>${escapeHtml(name)}${tagsHtml ? ' ' + tagsHtml : ''}</td>
         <td style="font-size:11px;color:var(--text-dim)" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</td>
         <td><button class="s-btn danger-sm" onclick="knDeleteFile('${_jsEsc(f.path)}')">Delete</button></td>
       </tr>`;
@@ -2577,6 +2612,41 @@ async function knDeleteFile(path) {
     await fetch(`/api/knowledge/file?path=${encodeURIComponent(path)}`, {method:'DELETE'});
     knLoadIndexed();
   } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+async function knSearch() {
+  const query = document.getElementById('knSearchInput').value.trim();
+  const resultsDiv = document.getElementById('knSearchResults');
+  const listDiv = document.getElementById('knSearchList');
+  if (!query) { resultsDiv.style.display = 'none'; return; }
+  const tagsRaw = (document.getElementById('knSearchTags')?.value || '').trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : null;
+  try {
+    const body = {query, limit: 10};
+    if (tags) body.tags = tags;
+    const res = await fetch('/api/knowledge/search', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (data.error) { listDiv.innerHTML = `<div class="kn-empty">${escapeHtml(data.error)}</div>`; resultsDiv.style.display = ''; return; }
+    const results = data.results || [];
+    if (!results.length) {
+      listDiv.innerHTML = '<div class="kn-empty">No results found</div>';
+      resultsDiv.style.display = '';
+      return;
+    }
+    listDiv.innerHTML = results.map(r => {
+      const fname = r.file_path ? r.file_path.split('/').pop() : 'unknown';
+      const text = (r.text || '').length > 300 ? r.text.slice(0, 300) + '...' : (r.text || '');
+      const rTags = (r.tags || []).map(t => `<span class="kn-tag">${escapeHtml(t)}</span>`).join(' ');
+      return `<div class="kn-search-result">
+        <div class="kn-search-meta">${escapeHtml(fname)}<span class="kn-search-score">${r.score}</span>${rTags ? '<span class="kn-search-tags">' + rTags + '</span>' : ''}</div>
+        <div class="kn-search-text">${escapeHtml(text)}</div>
+      </div>`;
+    }).join('');
+    resultsDiv.style.display = '';
+  } catch(e) { console.error('knSearch error:', e); listDiv.innerHTML = '<div class="kn-empty">Search failed</div>'; resultsDiv.style.display = ''; }
 }
 
 // ── Threads/Tabs ──
