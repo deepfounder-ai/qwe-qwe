@@ -30,9 +30,9 @@ def _ensure_table():
     """)
 
 
-def add(name: str, task: str, schedule: str) -> dict:
-    """Add a scheduled task.
-    
+def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict:
+    """Add a scheduled task with automatic dry-run validation.
+
     Schedule formats:
       "in 5m"       — run once in 5 minutes
       "in 2h"       — run once in 2 hours
@@ -40,6 +40,10 @@ def add(name: str, task: str, schedule: str) -> dict:
       "every 2h"    — repeat every 2 hours
       "daily 09:00" — every day at 09:00
       "HH:MM"       — once today/tomorrow at that time
+
+    Dry-run: executes the task once before saving. If execution fails,
+    the task is NOT saved and an error with hints is returned so the
+    model can retry with a corrected task description.
     """
     _ensure_table()
 
@@ -47,13 +51,65 @@ def add(name: str, task: str, schedule: str) -> dict:
     if next_run is None:
         return {"error": f"Can't parse schedule: '{schedule}'"}
 
+    # Dry-run validation (unless explicitly skipped)
+    if not skip_dry_run:
+        _log.info(f"dry-run for '{name}': {task[:100]}")
+        dry_result = _execute_task(task, max_rounds=5)
+        validation = _validate_dry_run(dry_result, task)
+        if not validation["ok"]:
+            _log.warning(f"dry-run failed for '{name}': {validation['reason']}")
+            return {
+                "error": f"Dry-run failed: {validation['reason']}",
+                "output": dry_result[:500],
+                "hint": validation.get("hint", ""),
+                "saved": False,
+            }
+        _log.info(f"dry-run passed for '{name}': {dry_result[:100]}")
+
     db.execute(
         "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,?,1)",
         (name, task, schedule, next_run, 1 if repeat else 0)
     )
 
     dt = datetime.fromtimestamp(next_run, _tz()).strftime("%H:%M:%S")
-    return {"ok": True, "name": name, "next_run": dt, "repeat": bool(repeat)}
+    result = {"ok": True, "name": name, "next_run": dt, "repeat": bool(repeat)}
+    if not skip_dry_run:
+        result["dry_run"] = "passed"
+        result["preview"] = dry_result[:200]
+    return result
+
+
+# ── Dry-run validation ──
+
+_DRY_RUN_ERROR_MARKERS = [
+    "command not found", "no such file", "permission denied",
+    "blocked", "not allowed", "traceback", "modulenotfounderror",
+    "task completed (max rounds)", "error:", "http error:",
+    "connection refused", "name or service not known",
+    "timed out", "errno",
+]
+
+
+def _validate_dry_run(result: str, task_description: str) -> dict:
+    """Check whether a dry-run execution succeeded."""
+    if not result or not result.strip():
+        return {"ok": False, "reason": "Empty output",
+                "hint": "Task produced no output — check if commands exist and paths are correct"}
+
+    lower = result.lower()
+    for marker in _DRY_RUN_ERROR_MARKERS:
+        if marker in lower:
+            return {"ok": False, "reason": f"Output contains error: '{marker}'",
+                    "hint": "Try using built-in tools (http_request, read_file, shell) instead of external scripts"}
+
+    # For send/notify tasks — verify delivery confirmation
+    task_lower = task_description.lower()
+    if any(w in task_lower for w in ("telegram", "send", "notify", "webhook")):
+        if "ok" not in lower and "sent" not in lower and "200" not in result:
+            return {"ok": False, "reason": "Send task didn't confirm delivery",
+                    "hint": "Use http_request tool to POST to the API directly. Check secret_get for tokens."}
+
+    return {"ok": True}
 
 
 def _parse_schedule(schedule: str) -> tuple:
@@ -115,6 +171,9 @@ def list_tasks() -> list[dict]:
 
 def remove(task_id: int) -> str:
     _ensure_table()
+    row = db.fetchone("SELECT name FROM scheduled_tasks WHERE id=?", (task_id,))
+    if row and row[0] == HEARTBEAT_TASK_NAME:
+        return f"✗ Heartbeat task cannot be removed. Use settings to disable it."
     db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
     return f"✓ Task #{task_id} removed"
 
@@ -244,8 +303,13 @@ def _check_and_run():
             db.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
 
 
-def _execute_task(task_desc: str) -> str:
-    """Run a task through the LLM."""
+def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
+    """Run a task through the LLM.
+
+    Args:
+        task_desc: task description or special name (e.g. __heartbeat__).
+        max_rounds: maximum tool call rounds (default 10, dry-run uses 5).
+    """
     import config, tools
 
     # Heartbeat tasks — special handling
@@ -267,6 +331,7 @@ def _execute_task(task_desc: str) -> str:
             f"Your files: logs={data_dir}/logs/, workspace={data_dir}/workspace/\n"
             "Use secret_get() for API keys/tokens — secrets are in encrypted vault.\n"
             "Use memory_search() to find saved info (tokens, configs, previous results).\n"
+            "Use http_request() for HTTP/API calls instead of curl.\n"
             "Use tools step by step. Be concise."
         )},
         {"role": "user", "content": task_desc},
@@ -275,7 +340,7 @@ def _execute_task(task_desc: str) -> str:
     all_tools = tools.get_all_tools()
     rounds = 0
 
-    while rounds < 10:
+    while rounds < max_rounds:
         try:
             resp = client.chat.completions.create(
                 model=providers.get_model(),

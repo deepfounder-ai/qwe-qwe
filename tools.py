@@ -183,13 +183,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "schedule_task",
-            "description": "Schedule a task to run later or repeatedly. Formats: 'in 5m', 'in 2h', 'every 30m', 'daily 09:00', '14:30'.",
+            "description": "Schedule a task to run later or repeatedly. Auto-validates via dry-run before saving. Formats: 'in 5m', 'in 2h', 'every 30m', 'daily 09:00', '14:30'.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Short name for the task"},
                     "task": {"type": "string", "description": "What to do when the time comes"},
                     "schedule": {"type": "string", "description": "When: 'in 5m', 'every 1h', 'daily 09:00', '14:30'"},
+                    "skip_dry_run": {"type": "boolean", "description": "Skip validation dry-run (default false)"},
                 },
                 "required": ["name", "task", "schedule"],
             },
@@ -458,11 +459,22 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "schedule_task":
             import scheduler
-            result = scheduler.add(args["name"], args["task"], args["schedule"])
-            if "error" in result:
-                return result["error"]
+            result = scheduler.add(
+                args["name"], args["task"], args["schedule"],
+                skip_dry_run=args.get("skip_dry_run", False),
+            )
+            if result.get("error"):
+                parts = [f"Error: {result['error']}"]
+                if result.get("output"):
+                    parts.append(f"Output: {result['output']}")
+                if result.get("hint"):
+                    parts.append(f"Hint: {result['hint']}")
+                return "\n".join(parts)
             repeat_str = " (repeating)" if result["repeat"] else " (one-time)"
-            return f"✓ Scheduled '{result['name']}' → next run: {result['next_run']}{repeat_str}"
+            msg = f"✓ Scheduled '{result['name']}' → next run: {result['next_run']}{repeat_str}"
+            if result.get("preview"):
+                msg += f"\nDry-run preview: {result['preview']}"
+            return msg
 
         elif name == "list_cron":
             import scheduler
