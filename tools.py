@@ -321,6 +321,24 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    # HTTP request tool
+    {
+        "type": "function",
+        "function": {
+            "name": "http_request",
+            "description": "Make HTTP request to any URL. Use for APIs, webhooks, Telegram bot, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL including https://"},
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE"], "description": "HTTP method (default GET)"},
+                    "body": {"type": "string", "description": "Request body (JSON string for POST/PUT)"},
+                    "headers": {"type": "object", "description": "Extra headers as key-value pairs"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
     # RAG tools
     {
         "type": "function",
@@ -507,6 +525,31 @@ def execute(name: str, args: dict) -> str:
                 return "No profile data yet."
             lines = [f"- {k.replace('user:', '')}: {v}" for k, v in sorted(profile.items())]
             return "\n".join(lines)
+
+        elif name == "http_request":
+            import urllib.request
+            import urllib.error
+            url = args["url"]
+            method = args.get("method", "GET").upper()
+            body = args.get("body")
+            hdrs = {"User-Agent": "qwe-qwe/0.5"}
+            if body:
+                hdrs["Content-Type"] = "application/json"
+            if args.get("headers"):
+                hdrs.update(args["headers"])
+            data = body.encode("utf-8") if body else None
+            req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    text = resp.read().decode("utf-8", errors="replace")
+                    if len(text) > 10000:
+                        text = text[:10000] + "\n...(truncated)"
+                    return f"HTTP {resp.status}: {text}"
+            except urllib.error.HTTPError as he:
+                body_text = he.read().decode("utf-8", errors="replace")[:5000]
+                return f"HTTP {he.code}: {body_text}"
+            except urllib.error.URLError as ue:
+                return f"HTTP error: {ue.reason}"
 
         elif name == "rag_index":
             import rag
