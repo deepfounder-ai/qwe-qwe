@@ -142,7 +142,7 @@ def index_file(filepath: str) -> dict:
     points = []
     for i, chunk in enumerate(chunks):
         dense = _embed(chunk)
-        sparse = memory._sparse_embed(chunk)
+        sparse = memory.sparse_embed(chunk)
         points.append(PointStruct(
             id=str(uuid.uuid4()),
             vector={"dense": dense, "sparse": sparse},
@@ -195,7 +195,7 @@ def search(query: str, limit: int = 5) -> list[dict]:
 
     qc = _get_qdrant()
     dense = _embed(query)
-    sparse = memory._sparse_embed(query)
+    sparse = memory.sparse_embed(query)
 
     try:
         results = qc.query_points(

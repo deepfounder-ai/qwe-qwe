@@ -1,6 +1,6 @@
 """Qdrant-backed semantic memory — hybrid search (dense + sparse), recommendations, grouping."""
 
-import atexit, re, uuid, time
+import atexit, re, uuid, time, zlib
 from collections import Counter
 from openai import OpenAI
 from qdrant_client import QdrantClient
@@ -37,24 +37,34 @@ atexit.register(_close_qdrant)
 
 # ── Sparse vector (BM25-like via word hashing) ──
 
-def _sparse_embed(text: str) -> SparseVector:
+def sparse_embed(text: str) -> SparseVector:
     """Generate sparse vector using word-frequency hashing (BM25-like).
 
-    Maps each unique token to a hash-based index, with TF saturation scoring.
+    Maps each unique token to a deterministic hash-based index (crc32,
+    stable across Python restarts), with TF saturation scoring.
+    Aggregates colliding indices via max to avoid Qdrant duplicate-index errors.
     No external model needed — runs instantly on CPU.
     """
     tokens = re.findall(r'\w{2,}', text.lower())
     if not tokens:
         return SparseVector(indices=[0], values=[1.0])
     freq = Counter(tokens)
-    indices = []
-    values = []
+    index_values: dict[int, float] = {}  # aggregate by index to handle collisions
     for token, count in freq.items():
-        idx = abs(hash(token)) % 100_000  # mod large number for sparse index space
+        idx = abs(zlib.crc32(token.encode())) % 100_000  # deterministic, stable across restarts
         tf = count / (count + 1.0)  # TF saturation: diminishing returns
-        indices.append(idx)
-        values.append(float(tf))
-    return SparseVector(indices=indices, values=values)
+        if idx in index_values:
+            index_values[idx] = max(index_values[idx], tf)
+        else:
+            index_values[idx] = tf
+    return SparseVector(
+        indices=list(index_values.keys()),
+        values=list(index_values.values()),
+    )
+
+
+# Keep private alias for backwards compat (tests mock it)
+_sparse_embed = sparse_embed
 
 
 # ── Qdrant client + collection management ──
@@ -147,7 +157,18 @@ def _ensure_payload_indexes(qc: QdrantClient, collection: str):
 
 
 def _migrate_v1_to_v2(qc: QdrantClient, collection: str):
-    """Migrate from v1 (unnamed vector) to v2 (named dense + sparse)."""
+    """Migrate from v1 (unnamed vector) to v2 (named dense + sparse).
+
+    Uses a temp collection to avoid data loss on crash:
+    1. Read all points from v1
+    2. Create temp collection with v2 schema
+    3. Populate temp collection
+    4. Delete v1 collection
+    5. Create v2 collection and copy from temp
+    6. Delete temp
+    """
+    temp_name = f"{collection}_v2_migration"
+
     # Read all existing points
     all_points = []
     offset = None
@@ -160,25 +181,47 @@ def _migrate_v1_to_v2(qc: QdrantClient, collection: str):
 
     _log.info(f"read {len(all_points)} points from v1 collection")
 
-    # Recreate collection with v2 schema
+    # Build new points with named vectors
+    new_points = []
+    for p in all_points:
+        text = p.payload.get("text", "") if p.payload else ""
+        sparse = sparse_embed(text) if text else SparseVector(indices=[0], values=[1.0])
+        new_points.append(PointStruct(
+            id=p.id,
+            vector={"dense": p.vector, "sparse": sparse},
+            payload=p.payload or {},
+        ))
+
+    # Create temp collection with v2 schema and populate it
+    # (if crash here, v1 data is still intact)
+    cols = [c.name for c in qc.get_collections().collections]
+    if temp_name in cols:
+        qc.delete_collection(temp_name)
+    _create_collection_v2(qc, temp_name)
+
+    if new_points:
+        for i in range(0, len(new_points), 100):
+            qc.upsert(temp_name, points=new_points[i:i + 100])
+
+    # Now safe to swap: delete v1, recreate as v2, copy from temp
     qc.delete_collection(collection)
     _create_collection_v2(qc, collection)
 
-    # Re-insert points with named vectors + generate sparse from text
-    if all_points:
-        new_points = []
-        for p in all_points:
-            text = p.payload.get("text", "") if p.payload else ""
-            sparse = _sparse_embed(text) if text else SparseVector(indices=[0], values=[1.0])
-            new_points.append(PointStruct(
-                id=p.id,
-                vector={"dense": p.vector, "sparse": sparse},
-                payload=p.payload or {},
-            ))
-        # Batch upsert
-        for i in range(0, len(new_points), 100):
-            qc.upsert(collection, points=new_points[i:i + 100])
-        _log.info(f"migrated {len(new_points)} points to v2")
+    if new_points:
+        # Re-read from temp and insert into final
+        offset = None
+        while True:
+            result = qc.scroll(temp_name, limit=100, offset=offset, with_vectors=True)
+            batch, offset = result
+            if batch:
+                pts = [PointStruct(id=p.id, vector={"dense": p.vector["dense"], "sparse": p.vector["sparse"]}, payload=p.payload or {}) for p in batch]
+                qc.upsert(collection, points=pts)
+            if offset is None:
+                break
+
+    # Cleanup temp
+    qc.delete_collection(temp_name)
+    _log.info(f"migrated {len(new_points)} points to v2")
 
 
 # ── Embedding ──
@@ -425,22 +468,8 @@ def search_grouped(query: str, limit: int = config.MAX_MEMORY_RESULTS,
             group_size=group_size,
             query_filter=filt,
         )
-        out = []
-        for group in results.groups:
-            for hit in group.hits:
-                item = {
-                    "id": hit.id,
-                    "text": hit.payload.get("text", ""),
-                    "tag": hit.payload.get("tag", ""),
-                    "thread_id": hit.payload.get("thread_id", ""),
-                    "score": round(hit.score, 3),
-                    "ts": hit.payload.get("ts", 0),
-                }
-                for k, v in hit.payload.items():
-                    if k not in item:
-                        item[k] = v
-                out.append(item)
-        return out
+        all_hits = [hit for group in results.groups for hit in group.hits]
+        return _points_to_dicts(all_hits)
     except Exception as e:
         _log.debug(f"grouped search failed, falling back to regular: {e}")
         return search(query, limit=limit, tag=tag)
@@ -460,8 +489,12 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         meta: extra metadata dict (source, topic_name, etc.)
     """
     qc = _get_qdrant()
-    dense_vector = _embed(text)
-    sparse_vector = _sparse_embed(text)
+    try:
+        dense_vector = _embed(text)
+    except Exception as e:
+        _log.warning(f"embedding failed in save(): {e}")
+        raise
+    sparse_vector = sparse_embed(text)
 
     payload = {
         "text": text,
