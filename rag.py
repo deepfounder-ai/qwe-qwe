@@ -133,10 +133,22 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
 
     # Check if already indexed and unchanged
     mtime_key = f"rag:mtime:{path}"
+    tags_key = f"rag:tags:{path}"
     stored_mtime = db.kv_get(mtime_key)
     current_mtime = str(path.stat().st_mtime)
-    if stored_mtime == current_mtime:
+    stored_tags = db.kv_get(tags_key) or ""
+    new_tags = ",".join(tags) if tags else ""
+    if stored_mtime == current_mtime and stored_tags == new_tags:
         return {"path": str(path), "chunks": 0, "status": "already up to date"}
+    # If only tags changed (mtime same), update kv tags without re-embedding
+    if stored_mtime == current_mtime and stored_tags != new_tags:
+        if new_tags:
+            db.kv_set(tags_key, new_tags)
+        else:
+            db.execute("DELETE FROM kv WHERE key = ?", (tags_key,))
+        # TODO: updating Qdrant payloads in-place would require scrolling all chunks;
+        # for now just re-index fully to keep payload consistent
+        pass  # fall through to full re-index
 
     # Read and chunk
     content = _read_file(path)
@@ -175,10 +187,12 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
             batch = points[batch_start:batch_start + 100]
             qc.upsert(RAG_COLLECTION, points=batch)
 
-    # Store mtime + tags
+    # Store mtime + tags (always update to clear stale tags)
     db.kv_set(mtime_key, current_mtime)
     if tags:
-        db.kv_set(f"rag:tags:{path}", ",".join(tags))
+        db.kv_set(tags_key, ",".join(tags))
+    else:
+        db.execute("DELETE FROM kv WHERE key = ?", (tags_key,))
     _log.info(f"indexed {path}: {len(chunks)} chunks")
     return {"path": str(path), "chunks": len(chunks), "status": "indexed"}
 
@@ -242,7 +256,8 @@ def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[di
                                       using="dense", limit=limit,
                                       query_filter=query_filter)
         except Exception:
-            results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit)
+            results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit,
+                                      query_filter=query_filter)
 
     return [
         {
@@ -578,9 +593,12 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
                         qc.upsert(RAG_COLLECTION, points=batch)
 
                 mtime_key = f"rag:mtime:{path}"
+                tags_key = f"rag:tags:{path}"
                 db.kv_set(mtime_key, str(path.stat().st_mtime))
                 if tags:
-                    db.kv_set(f"rag:tags:{path}", ",".join(tags))
+                    db.kv_set(tags_key, ",".join(tags))
+                else:
+                    db.execute("DELETE FROM kv WHERE key = ?", (tags_key,))
                 _log.info(f"indexed {path}: {len(chunks)} chunks (method={method})")
                 results.append({"path": str(path), "chunks": len(chunks), "status": "indexed", "method": method})
             except Exception as e:

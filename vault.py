@@ -65,7 +65,7 @@ def save(key: str, value: str) -> str:
         return "✗ Key required"
 
     f = _get_fernet()
-    encrypted = f.encrypt(value.encode())
+    encrypted = f.encrypt(str(value).encode())
     now = time.time()
 
     db.execute(
