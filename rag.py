@@ -14,6 +14,13 @@ SUPPORTED_EXTENSIONS = {".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx",
                         ".json", ".csv", ".yaml", ".yml", ".toml", ".cfg",
                         ".sh", ".bash", ".html", ".css", ".sql", ".go",
                         ".rs", ".java", ".c", ".cpp", ".h", ".rb", ".php"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+PDF_EXTENSION = ".pdf"
+ALL_INDEXABLE = SUPPORTED_EXTENSIONS | IMAGE_EXTENSIONS | {PDF_EXTENSION}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+VISION_RATE_LIMIT = 1.0  # seconds between vision API calls
+SCANNED_PAGE_THRESHOLD = 50  # chars — below this, page is likely scanned
+MAX_SCAN_FILES = 1000
 
 # Lazy imports
 _qclient = None
@@ -81,8 +88,14 @@ def _chunk_text(text: str) -> list[str]:
 
 
 def _read_file(path: Path) -> str | None:
-    """Read file content. Supports text files and optionally PDF."""
+    """Read file content. Supports text files, PDFs, and images."""
     ext = path.suffix.lower()
+    if ext in IMAGE_EXTENSIONS:
+        try:
+            return _describe_image(path)
+        except Exception as e:
+            _log.error(f"image read failed: {path}: {e}")
+            return None
     if ext == ".pdf":
         try:
             from pypdf import PdfReader
@@ -251,3 +264,343 @@ def _delete_file_chunks(file_path: str):
         )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Vision / image description
+# ---------------------------------------------------------------------------
+
+_last_vision_call = 0.0
+
+
+def _describe_image(path_or_bytes, prompt=None) -> str:
+    """Describe an image using LM Studio vision API.
+
+    Args:
+        path_or_bytes: Path object or raw bytes of an image.
+        prompt: optional text prompt for the vision model.
+
+    Returns:
+        Description string, or fallback placeholder on error.
+    """
+    import base64
+    global _last_vision_call
+
+    try:
+        from PIL import Image
+        import io
+    except ImportError:
+        _log.warning("Pillow not installed — pip install Pillow to process images")
+        return "[image: description unavailable — Pillow not installed]"
+
+    try:
+        # Read bytes
+        if isinstance(path_or_bytes, (str, Path)):
+            img_bytes = Path(path_or_bytes).read_bytes()
+        else:
+            img_bytes = path_or_bytes
+
+        # Resize to max 512px
+        img = Image.open(io.BytesIO(img_bytes))
+        img.thumbnail((512, 512))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        resized_bytes = buf.getvalue()
+
+        b64 = base64.b64encode(resized_bytes).decode("ascii")
+
+        # Rate limit
+        now = time.time()
+        wait = VISION_RATE_LIMIT - (now - _last_vision_call)
+        if wait > 0:
+            time.sleep(wait)
+
+        import providers
+        client = providers.get_client()
+        model = providers.get_model()
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt or "Describe this image in detail. Include any text, diagrams, or visual elements you can see."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            }],
+            max_tokens=512,
+        )
+        _last_vision_call = time.time()
+        return resp.choices[0].message.content or "[image: empty response]"
+    except Exception as e:
+        _log.error(f"vision describe failed: {e}")
+        return "[image: description unavailable]"
+
+
+# ---------------------------------------------------------------------------
+# PDF with vision fallback for scanned pages
+# ---------------------------------------------------------------------------
+
+
+def _read_pdf_with_vision(path) -> str:
+    """Read PDF with page markers; notes scanned pages that lack text.
+
+    Args:
+        path: Path to the PDF file.
+
+    Returns:
+        Concatenated page text with markers.
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        _log.warning("pypdf not installed — pip install pypdf to read PDFs")
+        return ""
+
+    path = Path(path)
+    reader = PdfReader(str(path))
+    parts = []
+    for i, page in enumerate(reader.pages, 1):
+        text = page.extract_text() or ""
+        if len(text.strip()) < SCANNED_PAGE_THRESHOLD:
+            parts.append(f"--- page {i} ---\n[scanned page {i} - text extraction not available]")
+        else:
+            parts.append(f"--- page {i} ---\n{text}")
+    return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Scan path — analyse files before indexing
+# ---------------------------------------------------------------------------
+
+
+def scan_path(path_str: str, recursive: bool = True) -> dict:
+    """Scan a file or directory and return indexing plan.
+
+    Args:
+        path_str: path to a file or directory.
+        recursive: whether to recurse into subdirectories (default True).
+
+    Returns:
+        dict with ``files``, ``summary``, and ``estimate`` keys.
+    """
+    path = Path(path_str).expanduser().resolve()
+    if not path.exists():
+        return {"files": [], "summary": {}, "estimate": {}, "error": f"path not found: {path}"}
+
+    # Gather file list
+    if path.is_file():
+        file_list = [path]
+    else:
+        pattern = "**/*" if recursive else "*"
+        file_list = sorted(f for f in path.glob(pattern) if f.is_file())
+
+    summary = {"text": 0, "pdf": 0, "image": 0, "unsupported": 0, "skipped": 0}
+    est_chunks = 0
+    est_time_cpu = 0.0
+    est_time_gpu = 0.0
+    gpu_required = False
+    files = []
+
+    for f in file_list[:MAX_SCAN_FILES]:
+        ext = f.suffix.lower()
+        size = f.stat().st_size
+
+        if size > MAX_FILE_SIZE:
+            files.append({"path": str(f), "type": "skipped", "reason": "too large", "size": size})
+            summary["skipped"] += 1
+            continue
+
+        if ext in SUPPORTED_EXTENSIONS:
+            ftype, method = "text", "chunk_text"
+            summary["text"] += 1
+            est_chunks += max(1, size // CHUNK_SIZE)
+            est_time_cpu += 0.1
+        elif ext == PDF_EXTENSION:
+            ftype, method = "pdf", "pdf_extract"
+            pages = 0
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(str(f))
+                pages = len(reader.pages)
+                # Check if scanned
+                sample_text = "".join((p.extract_text() or "") for p in reader.pages[:3])
+                avg_chars = len(sample_text) / max(pages, 1)
+                if avg_chars < SCANNED_PAGE_THRESHOLD:
+                    method = "pdf_scan"
+                    est_time_gpu += 3.0 * pages
+                    gpu_required = True
+                else:
+                    est_time_cpu += 0.2 * pages
+            except ImportError:
+                pass
+            except Exception:
+                pass
+            summary["pdf"] += 1
+            est_chunks += max(1, pages * 2)
+            entry = {"path": str(f), "type": ftype, "method": method, "pages": pages}
+            files.append(entry)
+            continue
+        elif ext in IMAGE_EXTENSIONS:
+            ftype, method = "image", "vision_describe"
+            summary["image"] += 1
+            est_chunks += 1
+            est_time_gpu += 2.0
+            gpu_required = True
+        else:
+            files.append({"path": str(f), "type": "unsupported", "ext": ext})
+            summary["unsupported"] += 1
+            continue
+
+        files.append({"path": str(f), "type": ftype, "method": method})
+
+    return {
+        "files": files,
+        "summary": summary,
+        "estimate": {
+            "chunks": est_chunks,
+            "time_cpu_sec": round(est_time_cpu, 1),
+            "time_gpu_sec": round(est_time_gpu, 1),
+            "gpu_required": gpu_required,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Batch indexing with progress callbacks
+# ---------------------------------------------------------------------------
+
+
+def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None) -> list[dict]:
+    """Batch-index a list of file descriptors from scan_path.
+
+    Args:
+        files: list of dicts with ``path``, ``type``, ``method`` keys.
+        progress_cb: optional ``(current, total, path, phase, detail) -> None``.
+        phase_cb: optional ``(event, count, estimate_sec) -> None``.
+
+    Returns:
+        list of result dicts ``[{path, chunks, status, method}]``.
+    """
+    from qdrant_client.models import PointStruct
+    import memory
+
+    cpu_files = [f for f in files if f.get("method") in ("chunk_text", "pdf_extract")]
+    gpu_files = [f for f in files if f.get("method") in ("vision_describe", "pdf_scan")]
+    total = len(cpu_files) + len(gpu_files)
+    results = []
+    current = 0
+
+    # Phase 1: CPU — text and normal PDF
+    for f in cpu_files:
+        current += 1
+        fpath = f["path"]
+        if progress_cb:
+            progress_cb(current, total, fpath, "cpu", f.get("method", ""))
+        result = index_file(fpath)
+        result["method"] = f.get("method", "chunk_text")
+        results.append(result)
+
+    # Phase 2: GPU — images and scanned PDFs
+    if gpu_files:
+        est_sec = sum(2.0 if f.get("method") == "vision_describe" else 3.0 * f.get("pages", 1) for f in gpu_files)
+        if phase_cb:
+            phase_cb("gpu_warning", len(gpu_files), est_sec)
+
+        for f in gpu_files:
+            current += 1
+            fpath = f["path"]
+            method = f.get("method", "vision_describe")
+            if progress_cb:
+                progress_cb(current, total, fpath, "gpu", method)
+
+            try:
+                path = Path(fpath).expanduser().resolve()
+
+                if method == "vision_describe":
+                    content = _describe_image(path)
+                elif method == "pdf_scan":
+                    content = _read_pdf_with_vision(path)
+                else:
+                    content = _read_file(path)
+
+                if not content or not content.strip():
+                    results.append({"path": str(path), "chunks": 0, "status": "empty", "method": method})
+                    continue
+
+                chunks = _chunk_text(content)
+                qc = _get_qdrant()
+                _delete_file_chunks(str(path))
+
+                points = []
+                for i, chunk in enumerate(chunks):
+                    dense = _embed(chunk)
+                    sparse = memory.sparse_embed(chunk)
+                    points.append(PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector={"dense": dense, "sparse": sparse},
+                        payload={
+                            "text": chunk,
+                            "file_path": str(path),
+                            "chunk_index": i,
+                            "total_chunks": len(chunks),
+                            "indexed_at": time.time(),
+                        },
+                    ))
+
+                if points:
+                    for batch_start in range(0, len(points), 100):
+                        batch = points[batch_start:batch_start + 100]
+                        qc.upsert(RAG_COLLECTION, points=batch)
+
+                mtime_key = f"rag:mtime:{path}"
+                db.kv_set(mtime_key, str(path.stat().st_mtime))
+                _log.info(f"indexed {path}: {len(chunks)} chunks (method={method})")
+                results.append({"path": str(path), "chunks": len(chunks), "status": "indexed", "method": method})
+            except Exception as e:
+                _log.error(f"batch index failed for {fpath}: {e}")
+                results.append({"path": fpath, "chunks": 0, "status": f"error: {e}", "method": method})
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# List / delete indexed files
+# ---------------------------------------------------------------------------
+
+
+def list_indexed_files() -> list[dict]:
+    """Return all indexed files from the kv store.
+
+    Returns:
+        list of ``{path, mtime, filename}`` dicts.
+    """
+    rows = db.fetchall("SELECT key, value FROM kv WHERE key LIKE 'rag:mtime:%'")
+    results = []
+    prefix_len = len("rag:mtime:")
+    for key, value in rows:
+        fpath = key[prefix_len:]
+        results.append({
+            "path": fpath,
+            "mtime": float(value) if value else 0.0,
+            "filename": Path(fpath).name,
+        })
+    return results
+
+
+def delete_file(file_path: str) -> dict:
+    """Delete a file from the RAG index.
+
+    Args:
+        file_path: absolute path of the file to remove.
+
+    Returns:
+        ``{path, status}`` dict.
+    """
+    path = Path(file_path).expanduser().resolve()
+    _delete_file_chunks(str(path))
+    mtime_key = f"rag:mtime:{path}"
+    conn = db._get_conn()
+    conn.execute("DELETE FROM kv WHERE key = ?", (mtime_key,))
+    conn.commit()
+    return {"path": str(path), "status": "deleted"}

@@ -423,6 +423,61 @@ body {
 .cron-help { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; }
 .cron-help code { background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-family: var(--mono); }
 
+/* ── Knowledge page ── */
+.knowledge-content { padding: 24px 32px; overflow-y: auto; flex: 1; }
+.knowledge-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.knowledge-header h2 { font-size: 20px; }
+.knowledge-tabs { display: flex; gap: 4px; }
+.knowledge-tabs .s-btn.tab-active { background: var(--accent-bg); color: var(--accent); }
+.knowledge-scan-row { display: flex; gap: 8px; margin-bottom: 16px; }
+.knowledge-scan-row .s-input { flex: 1; }
+.knowledge-scan-row label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.knowledge-table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+.knowledge-table th {
+  text-align: left; padding: 8px 12px; font-size: 11px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
+}
+.knowledge-table td { padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+.knowledge-table tr:hover td { background: var(--surface2); }
+.knowledge-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-family: var(--mono);
+}
+.knowledge-badge.text { background: rgba(39,174,96,0.15); color: var(--green); }
+.knowledge-badge.pdf { background: rgba(231,76,60,0.15); color: #e74c3c; }
+.knowledge-badge.image { background: rgba(155,89,182,0.15); color: #9b59b6; }
+.knowledge-badge.unsupported { background: var(--surface3); color: var(--text-dim); }
+.knowledge-badge.skipped { background: var(--surface3); color: var(--text-dim); }
+.knowledge-summary {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px; margin-bottom: 16px; display: flex; gap: 24px; flex-wrap: wrap;
+}
+.knowledge-stat { text-align: center; }
+.knowledge-stat-val { font-size: 24px; font-weight: 700; color: var(--text); }
+.knowledge-stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+.knowledge-progress {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px; margin-bottom: 16px;
+}
+.knowledge-progress-bar {
+  height: 8px; background: var(--surface3); border-radius: 4px; overflow: hidden; margin: 8px 0;
+}
+.knowledge-progress-fill {
+  height: 100%; background: var(--accent); border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.knowledge-progress-text { font-size: 12px; color: var(--text-dim); display: flex; justify-content: space-between; }
+.knowledge-gpu-warning {
+  background: rgba(255,152,0,0.1); border: 1px solid rgba(255,152,0,0.3);
+  border-radius: 10px; padding: 12px 16px; margin-bottom: 16px;
+  color: #ff9800; font-size: 13px;
+}
+.knowledge-actions { display: flex; gap: 8px; margin-top: 16px; }
+.s-btn.warning { background: rgba(255,152,0,0.15); color: #ff9800; border-color: rgba(255,152,0,0.3); }
+.s-btn.warning:hover { background: rgba(255,152,0,0.25); }
+.s-btn.danger-sm { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 4px 8px; }
+.s-btn.danger-sm:hover { color: #e74c3c; }
+
 /* Mobile */
 @media (max-width: 768px) {
   .msg { max-width: 95%; }
@@ -448,6 +503,7 @@ body {
     <div class="logo"><img src="/static/logo.png" alt="qwe-qwe">qwe-qwe</div>
     <div class="header-nav">
       <button class="nav-btn active" data-page="chat" onclick="showPage('chat')"><i class="ph ph-chat-circle"></i> Chat</button>
+      <button class="nav-btn" data-page="knowledge" onclick="showPage('knowledge')"><i class="ph ph-books"></i> Knowledge</button>
       <button class="nav-btn" data-page="cron" onclick="showPage('cron')"><i class="ph ph-clock"></i> Cron</button>
       <button class="nav-btn" data-page="settings" onclick="showPage('settings')"><i class="ph ph-gear"></i> Settings</button>
     </div>
@@ -479,6 +535,73 @@ body {
     <div class="input-footer">
       <span class="thinking-text" id="thinkingToggleChat" onclick="toggleThinking()">thinking</span>
       <div class="thread-stats" id="threadStats"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Knowledge page -->
+<div class="page" id="pageKnowledge">
+  <div class="knowledge-content">
+    <div class="knowledge-header">
+      <h2>📚 Knowledge Base</h2>
+      <div class="knowledge-tabs">
+        <button class="s-btn tab-active" id="knTabUpload" onclick="showKnowledgeTab('upload')">Upload</button>
+        <button class="s-btn" id="knTabIndexed" onclick="showKnowledgeTab('indexed')">Indexed</button>
+      </div>
+    </div>
+
+    <!-- Upload tab -->
+    <div id="knUploadTab">
+      <div class="knowledge-scan-row">
+        <input type="text" class="s-input" id="knPath" placeholder="/path/to/documents or file">
+        <label><input type="checkbox" id="knRecursive" checked> Recursive</label>
+        <button class="s-btn" onclick="knScan()">Scan</button>
+      </div>
+
+      <div id="knScanResults" style="display:none">
+        <div class="knowledge-summary" id="knSummary"></div>
+        <table class="knowledge-table">
+          <thead><tr>
+            <th><input type="checkbox" id="knSelectAll" checked onchange="knToggleAll(this.checked)"></th>
+            <th>File</th><th>Type</th><th>Method</th><th>Size</th><th>Details</th>
+          </tr></thead>
+          <tbody id="knFileList"></tbody>
+        </table>
+        <div class="knowledge-actions">
+          <button class="s-btn" id="knStartBtn" onclick="knStartIndex()">Start Indexing</button>
+          <span id="knEstimate" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
+        </div>
+      </div>
+
+      <div id="knProgress" style="display:none">
+        <div class="knowledge-progress">
+          <div class="knowledge-progress-text">
+            <span id="knProgressFile">Preparing...</span>
+            <span id="knProgressCount">0/0</span>
+          </div>
+          <div class="knowledge-progress-bar">
+            <div class="knowledge-progress-fill" id="knProgressFill" style="width:0%"></div>
+          </div>
+          <div id="knProgressPhase" style="font-size:11px;color:var(--text-dim);margin-top:4px"></div>
+        </div>
+      </div>
+
+      <div id="knGpuWarning" class="knowledge-gpu-warning" style="display:none">
+        ⚠️ <strong>GPU phase:</strong> <span id="knGpuText"></span>
+      </div>
+
+      <div id="knDone" style="display:none">
+        <div class="knowledge-summary" id="knDoneSummary"></div>
+      </div>
+    </div>
+
+    <!-- Indexed tab -->
+    <div id="knIndexedTab" style="display:none">
+      <div id="knIndexedEmpty" class="cron-empty">No files indexed yet</div>
+      <table class="knowledge-table" id="knIndexedTable" style="display:none">
+        <thead><tr><th>File</th><th>Path</th><th></th></tr></thead>
+        <tbody id="knIndexedList"></tbody>
+      </table>
     </div>
   </div>
 </div>
@@ -1106,6 +1229,7 @@ const tabBar = document.getElementById('tabBar');
 function showPage(page) {
   currentPage = page;
   document.getElementById('pageChatWrap').classList.toggle('active', page === 'chat');
+  document.getElementById('pageKnowledge').classList.toggle('active', page === 'knowledge');
   document.getElementById('pageCron').classList.toggle('active', page === 'cron');
   document.getElementById('pageSettings').classList.toggle('active', page === 'settings');
   document.getElementById('tabBar').style.display = page === 'chat' ? 'flex' : 'none';
@@ -1113,6 +1237,7 @@ function showPage(page) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   if (page === 'settings') loadAllSettings();
   if (page === 'cron') loadCron();
+  if (page === 'knowledge') knLoadIndexed();
   if (page === 'chat') input.focus();
 }
 
@@ -2012,6 +2137,12 @@ function connect() {
       _onUpdateProgress(data.step, data.status, data.detail);
     } else if (data.type === 'update_done') {
       _onUpdateDone(data);
+    } else if (data.type === 'knowledge_progress') {
+      knOnProgress(data);
+    } else if (data.type === 'knowledge_gpu_warning') {
+      knOnGpuWarning(data);
+    } else if (data.type === 'knowledge_done') {
+      knOnDone(data);
     } else if (data.type === 'task_update') {
       // Auto-refresh background tasks section if cron tab is active
       if (document.getElementById('cronPage')?.style.display !== 'none') loadCron();
@@ -2032,6 +2163,170 @@ function connect() {
       console.log('[task_update]', data.name, txt);
     }
   };
+}
+
+// ── Knowledge ──
+let _knScanData = null;
+
+function showKnowledgeTab(tab) {
+  document.getElementById('knUploadTab').style.display = tab === 'upload' ? '' : 'none';
+  document.getElementById('knIndexedTab').style.display = tab === 'indexed' ? '' : 'none';
+  document.getElementById('knTabUpload').classList.toggle('tab-active', tab === 'upload');
+  document.getElementById('knTabIndexed').classList.toggle('tab-active', tab === 'indexed');
+  if (tab === 'indexed') knLoadIndexed();
+}
+
+function _formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/(1024*1024)).toFixed(1) + ' MB';
+}
+
+async function knScan() {
+  const path = document.getElementById('knPath').value.trim();
+  if (!path) return;
+  const recursive = document.getElementById('knRecursive').checked;
+  document.getElementById('knScanResults').style.display = 'none';
+  document.getElementById('knDone').style.display = 'none';
+  try {
+    const res = await fetch('/api/knowledge/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path, recursive})});
+    const data = await res.json();
+    if (data.error) { alert(data.error); return; }
+    _knScanData = data;
+    knRenderScan(data);
+  } catch(e) { alert('Scan failed: ' + e.message); }
+}
+
+function knRenderScan(data) {
+  const tbody = document.getElementById('knFileList');
+  const s = data.summary || {};
+  const est = data.estimate || {};
+
+  // Summary
+  const parts = [];
+  if (s.text) parts.push(`${s.text} text`);
+  if (s.pdf) parts.push(`${s.pdf} PDF`);
+  if (s.image) parts.push(`${s.image} images`);
+  if (s.unsupported) parts.push(`${s.unsupported} unsupported`);
+
+  document.getElementById('knSummary').innerHTML =
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.files?.length||0}</div><div class="knowledge-stat-label">Files</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">~${est.chunks||0}</div><div class="knowledge-stat-label">Chunks</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">~${est.time_cpu_sec||0}s</div><div class="knowledge-stat-label">CPU time</div></div>` +
+    (est.gpu_required ? `<div class="knowledge-stat"><div class="knowledge-stat-val">~${est.time_gpu_sec||0}s</div><div class="knowledge-stat-label">GPU time</div></div>` : '');
+
+  // File table
+  tbody.innerHTML = '';
+  (data.files || []).forEach((f, i) => {
+    const name = f.path.split('/').pop();
+    const badge = f.type || 'unsupported';
+    const details = [];
+    if (f.pages) details.push(`${f.pages} pages`);
+    if (f.reason) details.push(f.reason);
+    const disabled = f.type === 'unsupported' || f.type === 'skipped';
+    tbody.innerHTML += `<tr>
+      <td><input type="checkbox" class="kn-file-cb" data-idx="${i}" ${disabled ? 'disabled' : 'checked'}></td>
+      <td title="${f.path}">${name}</td>
+      <td><span class="knowledge-badge ${badge}">${badge}</span></td>
+      <td>${f.method || '-'}</td>
+      <td>${_formatSize(f.size || 0)}</td>
+      <td style="font-size:11px;color:var(--text-dim)">${details.join(', ')}</td>
+    </tr>`;
+  });
+
+  // Button style
+  const btn = document.getElementById('knStartBtn');
+  if (est.gpu_required) {
+    btn.className = 's-btn warning';
+    btn.textContent = `Start Indexing (includes ${s.image||0} images)`;
+  } else {
+    btn.className = 's-btn';
+    btn.textContent = 'Start Indexing';
+  }
+
+  document.getElementById('knEstimate').textContent = parts.join(', ');
+  document.getElementById('knScanResults').style.display = '';
+}
+
+function knToggleAll(checked) {
+  document.querySelectorAll('.kn-file-cb:not(:disabled)').forEach(cb => cb.checked = checked);
+}
+
+async function knStartIndex() {
+  if (!_knScanData) return;
+  const selected = [];
+  document.querySelectorAll('.kn-file-cb:checked').forEach(cb => {
+    const idx = parseInt(cb.dataset.idx);
+    const f = _knScanData.files[idx];
+    if (f && f.type !== 'unsupported' && f.type !== 'skipped') selected.push(f);
+  });
+  if (!selected.length) { alert('No files selected'); return; }
+
+  document.getElementById('knScanResults').style.display = 'none';
+  document.getElementById('knProgress').style.display = '';
+  document.getElementById('knGpuWarning').style.display = 'none';
+  document.getElementById('knDone').style.display = 'none';
+
+  try {
+    const res = await fetch('/api/knowledge/index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({files:selected})});
+    const data = await res.json();
+    if (data.error) { alert(data.error); document.getElementById('knProgress').style.display = 'none'; document.getElementById('knScanResults').style.display = ''; }
+  } catch(e) { alert('Index failed: ' + e.message); }
+}
+
+function knOnProgress(data) {
+  document.getElementById('knProgress').style.display = '';
+  document.getElementById('knProgressFile').textContent = data.file || '...';
+  document.getElementById('knProgressCount').textContent = `${data.current}/${data.total}`;
+  const pct = data.total > 0 ? Math.round((data.current / data.total) * 100) : 0;
+  document.getElementById('knProgressFill').style.width = pct + '%';
+  document.getElementById('knProgressPhase').textContent = data.phase === 'gpu' ? '🖥 GPU phase — vision processing' : '⚡ CPU phase — text & embeddings';
+}
+
+function knOnGpuWarning(data) {
+  document.getElementById('knGpuWarning').style.display = '';
+  document.getElementById('knGpuText').textContent = `${data.files_count} images will be processed (~${data.estimate_sec}s). GPU will be busy.`;
+}
+
+function knOnDone(data) {
+  document.getElementById('knProgress').style.display = 'none';
+  document.getElementById('knGpuWarning').style.display = 'none';
+  document.getElementById('knDone').style.display = '';
+  document.getElementById('knDoneSummary').innerHTML =
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.files}</div><div class="knowledge-stat-label">Files</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.chunks}</div><div class="knowledge-stat-label">Chunks</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.errors}</div><div class="knowledge-stat-label">Errors</div></div>` +
+    `<div class="knowledge-stat"><div class="knowledge-stat-val">${data.duration_sec||0}s</div><div class="knowledge-stat-label">Duration</div></div>`;
+}
+
+async function knLoadIndexed() {
+  try {
+    const res = await fetch('/api/knowledge/list');
+    const data = await res.json();
+    const files = data.files || [];
+    const table = document.getElementById('knIndexedTable');
+    const empty = document.getElementById('knIndexedEmpty');
+    if (!files.length) { table.style.display = 'none'; empty.style.display = ''; return; }
+    table.style.display = ''; empty.style.display = 'none';
+    const tbody = document.getElementById('knIndexedList');
+    tbody.innerHTML = '';
+    files.forEach(f => {
+      const name = f.path.split('/').pop();
+      tbody.innerHTML += `<tr>
+        <td>${name}</td>
+        <td style="font-size:11px;color:var(--text-dim)" title="${f.path}">${f.path}</td>
+        <td><button class="s-btn danger-sm" onclick="knDeleteFile('${f.path.replace(/'/g,"\\'")}')">Delete</button></td>
+      </tr>`;
+    });
+  } catch(e) { console.error('knLoadIndexed error:', e); }
+}
+
+async function knDeleteFile(path) {
+  if (!confirm(`Delete "${path.split('/').pop()}" from index?`)) return;
+  try {
+    await fetch(`/api/knowledge/file?path=${encodeURIComponent(path)}`, {method:'DELETE'});
+    knLoadIndexed();
+  } catch(e) { alert('Delete failed: ' + e.message); }
 }
 
 // ── Threads/Tabs ──

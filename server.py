@@ -32,6 +32,10 @@ _ws_clients: set = set()
 _ws_lock = _threading.Lock()
 _ws_loop: asyncio.AbstractEventLoop | None = None
 
+# Module-level state for knowledge indexing
+_knowledge_task: dict | None = None  # {task_id, status, current, total, file, phase, errors}
+_knowledge_lock = threading.Lock()
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -809,6 +813,152 @@ async def list_tasks():
     """Get background task results."""
     import tasks as t
     return {"pending": t.pending_count(), "results": t.get_results(clear=False)}
+
+
+# ── Knowledge Upload endpoints ──
+
+
+def _emit_knowledge(data: dict):
+    """Broadcast knowledge indexing event to WS clients."""
+    if _ws_loop and _ws_clients:
+        try:
+            asyncio.run_coroutine_threadsafe(_broadcast(data), _ws_loop)
+        except Exception:
+            pass
+
+
+def _run_knowledge_index(task_id: int, files: list[dict]):
+    """Background knowledge indexing thread."""
+    global _knowledge_task
+    import rag
+
+    total = len(files)
+    errors = []
+    results = []
+
+    def progress_cb(current, total, filepath, phase, detail=""):
+        with _knowledge_lock:
+            if _knowledge_task:
+                _knowledge_task.update({"current": current, "total": total, "file": Path(filepath).name, "phase": phase})
+        _emit_knowledge({
+            "type": "knowledge_progress",
+            "current": current, "total": total,
+            "file": Path(filepath).name,
+            "phase": phase, "detail": detail
+        })
+
+    def phase_cb(phase_type, count, estimate_sec):
+        _emit_knowledge({
+            "type": "knowledge_gpu_warning",
+            "files_count": count,
+            "estimate_sec": estimate_sec
+        })
+
+    try:
+        results = rag.index_files_batch(files, progress_cb=progress_cb, phase_cb=phase_cb)
+        errors = [r for r in results if r.get("status") not in ("indexed", "already up to date")]
+    except Exception as e:
+        _log.error(f"knowledge indexing failed: {e}", exc_info=True)
+        errors.append({"error": str(e)})
+
+    # Calculate totals
+    total_chunks = sum(r.get("chunks", 0) for r in results)
+
+    with _knowledge_lock:
+        if _knowledge_task:
+            _knowledge_task["status"] = "done"
+
+    _emit_knowledge({
+        "type": "knowledge_done",
+        "files": len(results),
+        "chunks": total_chunks,
+        "errors": len(errors),
+        "duration_sec": 0  # tracked client-side
+    })
+
+    # Update tasks registry
+    import tasks as t
+    t.update(task_id, "done", f"Indexed {len(results)} files, {total_chunks} chunks")
+
+    with _knowledge_lock:
+        _knowledge_task = None
+
+
+@app.post("/api/knowledge/scan")
+async def knowledge_scan(data: dict):
+    """Scan a path and return file preview for indexing."""
+    import rag
+    path = data.get("path", "").strip()
+    if not path:
+        return JSONResponse({"error": "Path required"}, status_code=400)
+
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return JSONResponse({"error": f"Path not found: {path}"}, status_code=404)
+
+    recursive = data.get("recursive", True)
+    result = rag.scan_path(str(p), recursive=recursive)
+    return result
+
+
+@app.post("/api/knowledge/index")
+async def knowledge_index(data: dict):
+    """Start background indexing of selected files."""
+    global _knowledge_task
+
+    files = data.get("files", [])
+    if not files:
+        return JSONResponse({"error": "No files to index"}, status_code=400)
+
+    with _knowledge_lock:
+        if _knowledge_task and _knowledge_task.get("status") == "running":
+            return JSONResponse({"error": "Indexing already in progress"}, status_code=409)
+
+    import tasks as t
+    task_id = t.register("knowledge_index", f"Indexing {len(files)} files")
+
+    with _knowledge_lock:
+        _knowledge_task = {
+            "task_id": task_id,
+            "status": "running",
+            "current": 0,
+            "total": len(files),
+            "file": "",
+            "phase": "cpu",
+            "errors": []
+        }
+
+    thread = threading.Thread(target=_run_knowledge_index, args=(task_id, files), daemon=True)
+    thread.start()
+
+    return {"task_id": task_id, "status": "started", "total": len(files)}
+
+
+@app.get("/api/knowledge/status")
+async def knowledge_status():
+    """Get current indexing status."""
+    with _knowledge_lock:
+        if _knowledge_task:
+            return dict(_knowledge_task)
+    return {"status": "idle"}
+
+
+@app.get("/api/knowledge/list")
+async def knowledge_list():
+    """List all indexed files."""
+    import rag
+    return {"files": rag.list_indexed_files()}
+
+
+@app.delete("/api/knowledge/file")
+async def knowledge_delete(request: Request):
+    """Delete a file from the index."""
+    import rag
+    path = request.query_params.get("path", "").strip()
+    if not path:
+        return JSONResponse({"error": "Path required"}, status_code=400)
+    result = rag.delete_file(path)
+    return result
 
 
 # ── Skills endpoints ──
