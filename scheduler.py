@@ -13,6 +13,7 @@ def _tz():
 
 _thread_started = False
 _callbacks = []  # [(fn, args)] — called when task completes
+HEARTBEAT_TASK_NAME = "__heartbeat__"
 
 
 def _ensure_table():
@@ -41,9 +42,10 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
       "daily 09:00" — every day at 09:00
       "HH:MM"       — once today/tomorrow at that time
 
-    Dry-run: executes the task once before saving. If execution fails,
-    the task is NOT saved and an error with hints is returned so the
-    model can retry with a corrected task description.
+    Pre-validation: executes the task once (with real side effects!) before
+    saving. If execution fails, the task is NOT saved and an error with
+    hints is returned so the model can retry with a corrected task description.
+    Note: for send/notify tasks, the pre-validation WILL send a real message.
     """
     _ensure_table()
 
@@ -82,16 +84,25 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
 # ── Dry-run validation ──
 
 _DRY_RUN_ERROR_MARKERS = [
-    "command not found", "no such file", "permission denied",
-    "blocked", "not allowed", "traceback", "modulenotfounderror",
-    "task completed (max rounds)", "error:", "http error:",
+    "command not found", "no such file or directory", "permission denied",
+    "blocked:", "not allowed", "traceback (most recent call last)",
+    "modulenotfounderror", "task completed (max rounds)",
     "connection refused", "name or service not known",
-    "timed out", "errno",
+    "\nerrno ", "importerror:",
 ]
+
+# Patterns that look like errors only at line start or after newline
+_DRY_RUN_ERROR_PATTERNS = re.compile(
+    r"(?:^|\n)\s*(?:error:|http error:|fatal:|exception:)", re.IGNORECASE
+)
 
 
 def _validate_dry_run(result: str, task_description: str) -> dict:
-    """Check whether a dry-run execution succeeded."""
+    """Check whether a dry-run (pre-validation execution) succeeded.
+
+    Note: this is a real execution with side effects, not a sandboxed
+    dry-run. The task runs through the full LLM tool-call loop.
+    """
     if not result or not result.strip():
         return {"ok": False, "reason": "Empty output",
                 "hint": "Task produced no output — check if commands exist and paths are correct"}
@@ -101,6 +112,10 @@ def _validate_dry_run(result: str, task_description: str) -> dict:
         if marker in lower:
             return {"ok": False, "reason": f"Output contains error: '{marker}'",
                     "hint": "Try using built-in tools (http_request, read_file, shell) instead of external scripts"}
+    if _DRY_RUN_ERROR_PATTERNS.search(result):
+        match = _DRY_RUN_ERROR_PATTERNS.search(result).group().strip()
+        return {"ok": False, "reason": f"Output contains error pattern: '{match}'",
+                "hint": "Try using built-in tools (http_request, read_file, shell) instead of external scripts"}
 
     # For send/notify tasks — verify delivery confirmation
     task_lower = task_description.lower()
@@ -172,7 +187,9 @@ def list_tasks() -> list[dict]:
 def remove(task_id: int) -> str:
     _ensure_table()
     row = db.fetchone("SELECT name FROM scheduled_tasks WHERE id=?", (task_id,))
-    if row and row[0] == HEARTBEAT_TASK_NAME:
+    if not row:
+        return f"✗ Task #{task_id} not found"
+    if row[0] == HEARTBEAT_TASK_NAME:
         return f"✗ Heartbeat task cannot be removed. Use settings to disable it."
     db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
     return f"✓ Task #{task_id} removed"
@@ -181,9 +198,6 @@ def remove(task_id: int) -> str:
 def on_complete(fn):
     """Register callback for task completion: fn(name, task, result)."""
     _callbacks.append(fn)
-
-
-HEARTBEAT_TASK_NAME = "__heartbeat__"
 
 
 def _register_heartbeat():

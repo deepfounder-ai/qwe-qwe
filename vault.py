@@ -64,6 +64,8 @@ def save(key: str, value: str) -> str:
     if not key:
         return "✗ Key required"
 
+    if not isinstance(value, str):
+        _log.warning(f"secret_save: coercing {type(value).__name__} to str for key '{key}'")
     f = _get_fernet()
     encrypted = f.encrypt(str(value).encode())
     now = time.time()

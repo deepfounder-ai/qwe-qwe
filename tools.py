@@ -541,7 +541,24 @@ def execute(name: str, args: dict) -> str:
         elif name == "http_request":
             import urllib.request
             import urllib.error
+            import socket
+            from urllib.parse import urlparse
             url = args["url"]
+            # SSRF protection: only allow http(s), block internal/private IPs
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return f"Error: only http/https URLs allowed, got '{parsed.scheme}'"
+            hostname = parsed.hostname or ""
+            try:
+                resolved = socket.getaddrinfo(hostname, parsed.port or 443)
+                for _, _, _, _, addr in resolved:
+                    ip = addr[0]
+                    import ipaddress
+                    ip_obj = ipaddress.ip_address(ip)
+                    if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+                        return f"Error: blocked request to internal address ({ip})"
+            except socket.gaierror:
+                pass  # let urlopen handle DNS errors
             method = args.get("method", "GET").upper()
             body = args.get("body")
             hdrs = {"User-Agent": "qwe-qwe/0.5"}
@@ -562,6 +579,10 @@ def execute(name: str, args: dict) -> str:
                 return f"HTTP {he.code}: {body_text}"
             except urllib.error.URLError as ue:
                 return f"HTTP error: {ue.reason}"
+            except (socket.timeout, TimeoutError):
+                return "HTTP error: request timed out (15s)"
+            except Exception as e:
+                return f"HTTP error: {e}"
 
         elif name == "rag_index":
             import rag

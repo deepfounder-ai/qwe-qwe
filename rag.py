@@ -140,15 +140,8 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
     new_tags = ",".join(tags) if tags else ""
     if stored_mtime == current_mtime and stored_tags == new_tags:
         return {"path": str(path), "chunks": 0, "status": "already up to date"}
-    # If only tags changed (mtime same), update kv tags without re-embedding
-    if stored_mtime == current_mtime and stored_tags != new_tags:
-        if new_tags:
-            db.kv_set(tags_key, new_tags)
-        else:
-            db.execute("DELETE FROM kv WHERE key = ?", (tags_key,))
-        # TODO: updating Qdrant payloads in-place would require scrolling all chunks;
-        # for now just re-index fully to keep payload consistent
-        pass  # fall through to full re-index
+    # If only tags changed (mtime same), fall through to full re-index
+    # to keep Qdrant payloads consistent (KV tags updated after re-index below)
 
     # Read and chunk
     content = _read_file(path)
@@ -256,8 +249,12 @@ def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[di
                                       using="dense", limit=limit,
                                       query_filter=query_filter)
         except Exception:
-            results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit,
-                                      query_filter=query_filter)
+            try:
+                results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit,
+                                          query_filter=query_filter)
+            except Exception:
+                # Last resort: no filter, just return something
+                results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit)
 
     return [
         {
