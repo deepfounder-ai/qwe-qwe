@@ -832,17 +832,12 @@ def doctor():
         return f"⚠ could not check model status"
     check("Model loaded", _check_model_loaded)
 
-    # ── 5. Embeddings ──
+    # ── 5. Embeddings (FastEmbed, local ONNX) ──
     def _check_embeddings():
-        import requests as _req
         try:
-            r = _req.get(f"{config.EMBED_BASE_URL}/models", timeout=5)
-            if r.ok:
-                models = [m["id"] for m in r.json().get("data", [])]
-                if config.EMBED_MODEL in models:
-                    return f"✓ {config.EMBED_MODEL}"
-                return f"⚠ {config.EMBED_MODEL} not found (available: {', '.join(models[:3])})"
-            return f"HTTP {r.status_code}"
+            import memory
+            vec = memory.embed("test")
+            return f"✓ FastEmbed ({memory.DENSE_MODEL_NAME}, {len(vec)}d)"
         except Exception as e:
             return str(e)[:80]
     check("Embeddings", _check_embeddings)

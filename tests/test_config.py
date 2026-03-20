@@ -36,16 +36,16 @@ def test_env_override_llm_url():
         del os.environ["QWE_LLM_URL"]
 
 
-def test_embed_defaults_to_llm():
+def test_embed_handled_by_fastembed():
+    """Embeddings are now handled by FastEmbed — no EMBED_* config needed."""
     import importlib
     if "config" in sys.modules:
         del sys.modules["config"]
-    os.environ.pop("QWE_EMBED_URL", None)
-    os.environ.pop("QWE_LLM_URL", None)
     try:
         import config
         importlib.reload(config)
-        assert config.EMBED_BASE_URL == config.LLM_BASE_URL
+        assert not hasattr(config, "EMBED_BASE_URL")
+        assert not hasattr(config, "EMBED_MODEL")
     finally:
         pass
 

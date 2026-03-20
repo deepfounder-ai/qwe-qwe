@@ -1,13 +1,11 @@
-"""Qdrant-backed semantic memory — hybrid search (dense + sparse), recommendations, grouping."""
+"""Qdrant-backed semantic memory — hybrid search (dense + sparse via FastEmbed), recommendations, grouping."""
 
-import atexit, re, uuid, time, zlib
-from collections import Counter
-from openai import OpenAI
+import atexit, uuid, time
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter,
     FieldCondition, MatchValue, Range, PayloadSchemaType,
-    SparseVectorParams, SparseVector, NamedVector, NamedSparseVector,
+    SparseVectorParams, SparseVector,
     Fusion, FusionQuery, Prefetch, Datatype, TextIndexParams,
     TokenizerType, RecommendInput, RecommendQuery,
 )
@@ -17,7 +15,8 @@ import logger
 _log = logger.get("memory")
 
 _qclient: QdrantClient | None = None
-_embed_client: OpenAI | None = None
+_dense_model = None
+_sparse_model = None
 
 # Schema version — bump to force migration
 _SCHEMA_VERSION = 2  # v1: unnamed vector, v2: named dense+sparse, float16, full-text
@@ -35,32 +34,44 @@ def _close_qdrant():
 atexit.register(_close_qdrant)
 
 
-# ── Sparse vector (BM25-like via word hashing) ──
+# ── FastEmbed models (lazy-loaded, ONNX-based, no server needed) ──
+
+DENSE_MODEL_NAME = "BAAI/bge-small-en-v1.5"  # 384d, fast, accurate
+SPARSE_MODEL_NAME = "prithivida/Splade_PP_en_v1"  # learned sparse (SPLADE++)
+EMBED_DIM = 384  # bge-small-en-v1.5 output dimension
+
+
+def _get_dense_model():
+    global _dense_model
+    if _dense_model is None:
+        from fastembed import TextEmbedding
+        _dense_model = TextEmbedding(model_name=DENSE_MODEL_NAME)
+        _log.info(f"loaded dense model: {DENSE_MODEL_NAME}")
+    return _dense_model
+
+
+def _get_sparse_model():
+    global _sparse_model
+    if _sparse_model is None:
+        from fastembed import SparseTextEmbedding
+        _sparse_model = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
+        _log.info(f"loaded sparse model: {SPARSE_MODEL_NAME}")
+    return _sparse_model
+
 
 def sparse_embed(text: str) -> SparseVector:
-    """Generate sparse vector using word-frequency hashing (BM25-like).
-
-    Maps each unique token to a deterministic hash-based index (crc32,
-    stable across Python restarts), with TF saturation scoring.
-    Aggregates colliding indices via max to avoid Qdrant duplicate-index errors.
-    No external model needed — runs instantly on CPU.
-    """
-    tokens = re.findall(r'\w{2,}', text.lower())
-    if not tokens:
+    """Generate SPLADE++ sparse vector via FastEmbed (learned sparse, not BM25 hash)."""
+    text = text.encode("utf-8", errors="replace").decode("utf-8")
+    try:
+        model = _get_sparse_model()
+        result = list(model.embed([text]))[0]
+        return SparseVector(
+            indices=result.indices.tolist(),
+            values=result.values.tolist(),
+        )
+    except Exception as e:
+        _log.warning(f"sparse embedding failed: {e}")
         return SparseVector(indices=[0], values=[1.0])
-    freq = Counter(tokens)
-    index_values: dict[int, float] = {}  # aggregate by index to handle collisions
-    for token, count in freq.items():
-        idx = abs(zlib.crc32(token.encode())) % 100_000  # deterministic, stable across restarts
-        tf = count / (count + 1.0)  # TF saturation: diminishing returns
-        if idx in index_values:
-            index_values[idx] = max(index_values[idx], tf)
-        else:
-            index_values[idx] = tf
-    return SparseVector(
-        indices=list(index_values.keys()),
-        values=list(index_values.values()),
-    )
 
 
 # Keep private alias for backwards compat (tests mock it)
@@ -117,7 +128,7 @@ def _create_collection_v2(qc: QdrantClient, collection: str):
         collection,
         vectors_config={
             "dense": VectorParams(
-                size=config.EMBED_DIM,
+                size=EMBED_DIM,
                 distance=Distance.COSINE,
                 datatype=Datatype.FLOAT16,
             ),
@@ -259,22 +270,13 @@ def _resume_migration(qc: QdrantClient, collection: str, temp_name: str):
 
 # ── Embedding ──
 
-def _get_embed() -> OpenAI:
-    global _embed_client
-    if _embed_client is None:
-        _embed_client = OpenAI(
-            base_url=config.EMBED_BASE_URL,
-            api_key=config.EMBED_API_KEY,
-        )
-    return _embed_client
-
-
 def _embed(text: str) -> list[float]:
-    # Sanitize surrogates that can appear in WSL terminals
+    """Generate dense embedding via FastEmbed (ONNX, no server)."""
     text = text.encode("utf-8", errors="replace").decode("utf-8")
     try:
-        resp = _get_embed().embeddings.create(input=text, model=config.EMBED_MODEL)
-        return resp.data[0].embedding
+        model = _get_dense_model()
+        result = list(model.embed([text]))[0]
+        return result.tolist()
     except Exception as e:
         _log.warning(f"embedding failed: {e}")
         raise

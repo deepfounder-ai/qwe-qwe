@@ -830,18 +830,11 @@ def _run_doctor_checks() -> str:
     except Exception as e:
         warn("Model", str(e)[:60])
 
-    # Embeddings
+    # Embeddings (FastEmbed, local ONNX)
     try:
-        import requests as _req
-        r = _req.get(f"{config.EMBED_BASE_URL}/models", timeout=5)
-        if r.ok:
-            ids = [m["id"] for m in r.json().get("data", [])]
-            if config.EMBED_MODEL in ids:
-                ok("Embeddings", f"`{config.EMBED_MODEL}`")
-            else:
-                warn("Embeddings", f"`{config.EMBED_MODEL}` not found")
-        else:
-            fail("Embeddings", f"HTTP {r.status_code}")
+        import memory
+        vec = memory.embed("test")
+        ok("Embeddings", f"FastEmbed `{memory.DENSE_MODEL_NAME}` ({len(vec)}d)")
     except Exception as e:
         fail("Embeddings", str(e)[:60])
 

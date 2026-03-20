@@ -2,9 +2,10 @@
 
 Override any setting via environment variables with QWE_ prefix:
   QWE_LLM_URL, QWE_LLM_MODEL, QWE_LLM_KEY,
-  QWE_EMBED_URL, QWE_EMBED_MODEL, QWE_EMBED_KEY,
   QWE_QDRANT_MODE, QWE_QDRANT_PATH, QWE_QDRANT_URL,
   QWE_DB_PATH, QWE_DATA_DIR
+
+Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 """
 
 import os
@@ -20,12 +21,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 LLM_BASE_URL = _env("QWE_LLM_URL", "http://localhost:1234/v1")
 LLM_MODEL = _env("QWE_LLM_MODEL", "qwen/qwen3.5-9b")
 LLM_API_KEY = _env("QWE_LLM_KEY", "lm-studio")
-
-# Embeddings (defaults to same server as LLM)
-EMBED_BASE_URL = _env("QWE_EMBED_URL", LLM_BASE_URL)
-EMBED_MODEL = _env("QWE_EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
-EMBED_API_KEY = _env("QWE_EMBED_KEY", LLM_API_KEY)
-EMBED_DIM = int(_env("QWE_EMBED_DIM", "768"))
 
 # Qdrant (local disk for persistence, no server needed)
 QDRANT_MODE = _env("QWE_QDRANT_MODE", "disk")  # "memory" | "disk" | "server"
@@ -160,7 +155,6 @@ EDITABLE_SETTINGS = {
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
-    "embed_model":          ("setting:embed_model",           str, "nomic-embed-text", "Embedding model name", "", ""),
 }
 
 

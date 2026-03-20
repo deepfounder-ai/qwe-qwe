@@ -2,7 +2,6 @@
 
 import os, time, uuid
 from pathlib import Path
-from openai import OpenAI
 import config, db, logger
 
 _log = logger.get("rag")
@@ -18,7 +17,6 @@ SUPPORTED_EXTENSIONS = {".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx",
 
 # Lazy imports
 _qclient = None
-_embed_client = None
 
 
 def _get_qdrant():
@@ -38,7 +36,7 @@ def _get_qdrant():
                 RAG_COLLECTION,
                 vectors_config={
                     "dense": VectorParams(
-                        size=config.EMBED_DIM,
+                        size=memory.EMBED_DIM,
                         distance=Distance.COSINE,
                         datatype=Datatype.FLOAT16,
                     ),
@@ -60,12 +58,9 @@ def _get_qdrant():
 
 
 def _embed(text: str) -> list[float]:
-    global _embed_client
-    if _embed_client is None:
-        _embed_client = OpenAI(base_url=config.EMBED_BASE_URL, api_key=config.EMBED_API_KEY)
-    text = text.encode("utf-8", errors="replace").decode("utf-8")
-    resp = _embed_client.embeddings.create(input=text, model=config.EMBED_MODEL)
-    return resp.data[0].embedding
+    """Generate dense embedding via memory module's FastEmbed model."""
+    import memory
+    return memory._embed(text)
 
 
 def _chunk_text(text: str) -> list[str]:

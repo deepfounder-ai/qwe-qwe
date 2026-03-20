@@ -574,14 +574,10 @@ body {
             <span class="s-row-label">Context window (num_ctx)</span>
             <input class="s-input" id="infNumCtx" type="number" value="16384" min="2048" max="131072" style="width:100px" onchange="saveInfSettings()">
           </div>
-          <div class="s-row">
-            <span class="s-row-label">Embedding model</span>
-            <input class="s-input" id="infEmbedModel" value="nomic-embed-text" style="max-width:200px" onchange="saveInfSettings()">
+          <div class="s-row" style="opacity:0.7">
+            <span class="s-row-label">Embeddings</span>
+            <span style="font-size:13px;color:var(--text-dim)">FastEmbed (ONNX, local) — BAAI/bge-small-en + SPLADE++</span>
           </div>
-          <div class="s-btn-row">
-            <button class="s-btn" onclick="infPullEmbed()"><i class="ph ph-download"></i> Pull embedding model</button>
-          </div>
-          <div id="infEmbedStatus" style="margin:8px 0;font-size:13px;color:var(--text-dim)"></div>
         </div>
       </div>
 
@@ -1739,7 +1735,7 @@ async function loadInferenceStatus() {
       const sres = await fetch('/api/settings');
       const settings = await sres.json();
       if (settings.ollama_num_ctx) document.getElementById('infNumCtx').value = settings.ollama_num_ctx.value || settings.ollama_num_ctx;
-      if (settings.embed_model) document.getElementById('infEmbedModel').value = settings.embed_model.value || settings.embed_model;
+      // embed_model removed — FastEmbed handles embeddings locally
     } catch(e2) {}
   } catch(e) { console.error('inference status:', e); }
 }
@@ -1774,36 +1770,11 @@ async function infPullModel() {
 
 async function saveInfSettings() {
   const numCtx = document.getElementById('infNumCtx').value;
-  const embedModel = document.getElementById('infEmbedModel').value;
   await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ollama_num_ctx: parseInt(numCtx), embed_model: embedModel})});
+    body:JSON.stringify({ollama_num_ctx: parseInt(numCtx)})});
 }
 
-async function infPullEmbed() {
-  const model = document.getElementById('infEmbedModel').value;
-  const st = document.getElementById('infEmbedStatus');
-  st.innerHTML = `<i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> Pulling ${escapeHtml(model)}...`;
-  try {
-    const res = await fetch('/api/inference/pull', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
-    const d = await res.json();
-    if (d.error) { st.innerHTML = `<span style="color:var(--error)">${escapeHtml(d.error)}</span>`; return; }
-    const poll = setInterval(async () => {
-      try {
-        const pr = await fetch(`/api/inference/pull-status?model=${encodeURIComponent(model)}`);
-        const ps = await pr.json();
-        if (ps.status === 'pulling') {
-          st.innerHTML = `<i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> ${escapeHtml(ps.detail || 'Pulling...')}`;
-        } else if (ps.status === 'done') {
-          clearInterval(poll);
-          st.innerHTML = `<span style="color:var(--green)">✓ ${escapeHtml(model)} ready</span>`;
-        } else if (ps.status === 'error') {
-          clearInterval(poll);
-          st.innerHTML = `<span style="color:var(--error)">✗ ${escapeHtml(ps.detail)}</span>`;
-        }
-      } catch(e) { clearInterval(poll); }
-    }, 1500);
-  } catch(e) { st.innerHTML = `<span style="color:var(--error)">Error: ${escapeHtml(e.message)}</span>`; }
-}
+// infPullEmbed removed — FastEmbed downloads models automatically on first use
 
 async function infConfigure() {
   const model = document.getElementById('infModelSelect').value;

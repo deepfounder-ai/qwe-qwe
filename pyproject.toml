@@ -13,6 +13,7 @@ dependencies = [
     "cryptography",
     "openai>=1.0.0",
     "qdrant-client>=1.11.0",
+    "fastembed>=0.4.0",
     "rich>=13.0.0",
     "readchar>=4.0.0",
     "fastapi>=0.110.0",
