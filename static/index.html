@@ -1422,7 +1422,7 @@ async function loadSettingsProviders() {
     const card = document.createElement('div');
     card.className = `provider-card${p.active ? ' active' : ''}`;
     card.innerHTML = `
-      <div class="provider-dot ${p.has_key ? 'has-key' : 'no-key'}"></div>
+      <div class="provider-dot ${p.online !== undefined ? (p.online ? 'has-key' : 'no-key') : (p.has_key ? 'has-key' : 'no-key')}"></div>
       <div class="provider-info">
         <div class="provider-name">${p.display || p.name}</div>
         <div class="provider-url" id="provUrl_${p.name}">${p.url}</div>
@@ -1457,7 +1457,7 @@ function renderModels(activeModel) {
 }
 async function switchProvider(name) {
   const p = allProviders.find(x => x.name === name);
-  if (!p.has_key && !['lmstudio','ollama'].includes(name)) { setProviderKey(name); return; }
+  if (!p.has_key && !p.local) { setProviderKey(name); return; }
   await fetch('/api/model', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({provider: name}) });
   await loadSettingsProviders();
 }

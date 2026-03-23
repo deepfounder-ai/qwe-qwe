@@ -144,7 +144,7 @@ EDITABLE_SETTINGS = {
     "max_memory_results":   ("setting:max_memory_results",   int, 3,  "Memory results per turn", 0, 10),
     "max_tool_rounds":      ("setting:max_tool_rounds",      int, 10, "Max tool call rounds", 1, 30),
     "compaction_threshold": ("setting:compaction_threshold",  int, 20, "Auto-compact after N messages", 5, 100),
-    "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 4000, 60000),
+    "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 4000, None),
     "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, 5),
     "self_check_enabled":   ("setting:self_check_enabled",    int, 1,     "Self-check before shell/write_file (0=off, 1=on)", 0, 1),
     "heartbeat_interval_min": ("setting:heartbeat_interval_min", int, 30, "Heartbeat interval in minutes", 5, 1440),
@@ -183,8 +183,11 @@ def set(key: str, value) -> str:
         v = type_(value)
     except (ValueError, TypeError):
         return f"Invalid value: {value} (expected {type_.__name__})"
-    if isinstance(v, (int, float)) and (v < min_val or v > max_val):
-        return f"Out of range: {v} (allowed {min_val}-{max_val})"
+    if isinstance(v, (int, float)):
+        if min_val is not None and v < min_val:
+            return f"Out of range: {v} (min {min_val})"
+        if max_val is not None and v > max_val:
+            return f"Out of range: {v} (max {max_val})"
     db.kv_set(kv_key, str(v))
     return f"✓ {key} = {v}"
 

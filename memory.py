@@ -329,8 +329,24 @@ def _points_to_dicts(points) -> list[dict]:
 def _search_hybrid(qc, vector: list[float], text: str, limit: int,
                    filt: Filter | None,
                    score_threshold: float | None = None) -> list[dict]:
-    """Hybrid search: dense + sparse prefetch → RRF fusion."""
+    """3-way hybrid: BM25 (FTS5) + dense + sparse (SPLADE++) → RRF fusion."""
+    import db
+
+    # --- BM25 keyword search via FTS5 ---
+    bm25_ranked: list[tuple[str, float]] = []
+    try:
+        fts_hits = db.fts_search("fts_memory", text, limit=limit * 3)
+        for hit in fts_hits:
+            pid = hit.get("point_id", "")
+            bm25_score = -hit.get("rank", 0.0)
+            if pid:
+                bm25_ranked.append((pid, bm25_score))
+    except Exception:
+        pass
+
+    # --- Qdrant vector search (dense + SPLADE++) ---
     sparse = sparse_embed(text)
+    qdrant_results = []
     try:
         results = qc.query_points(
             config.QDRANT_COLLECTION,
@@ -341,19 +357,47 @@ def _search_hybrid(qc, vector: list[float], text: str, limit: int,
                          filter=filt),
             ],
             query=FusionQuery(fusion=Fusion.RRF),
-            limit=limit,
+            limit=limit * 3,
             score_threshold=score_threshold,
         )
-        return _points_to_dicts(results.points)
+        qdrant_results = results.points
     except Exception as e:
         _log.debug(f"hybrid search failed, falling back to dense-only: {e}")
-        return _search_dense_only(qc, vector, limit, filt, score_threshold)
+        qdrant_results = _search_dense_only_points(qc, vector, limit, filt, score_threshold)
+
+    # --- RRF merge if BM25 results exist ---
+    if bm25_ranked and qdrant_results:
+        qdrant_ranked = [(str(r.id), r.score) for r in qdrant_results]
+        qdrant_payloads = {str(r.id): r for r in qdrant_results}
+        merged = db.rrf_merge([bm25_ranked, qdrant_ranked], limit=limit)
+
+        output = []
+        for pid, score in merged:
+            if pid in qdrant_payloads:
+                r = qdrant_payloads[pid]
+                d = {k: v for k, v in (r.payload or {}).items()}
+                d["id"] = str(r.id)
+                d["score"] = round(score, 4)
+                output.append(d)
+            else:
+                # BM25-only hit — find text from FTS
+                for hit in fts_hits:
+                    if hit.get("point_id") == pid:
+                        output.append({
+                            "id": pid, "text": hit.get("text", ""),
+                            "tag": hit.get("tag", ""), "score": round(score, 4),
+                        })
+                        break
+        return output
+
+    # No BM25 results — use Qdrant only
+    return _points_to_dicts(qdrant_results if qdrant_results else [])
 
 
-def _search_dense_only(qc, vector: list[float], limit: int,
-                       filt: Filter | None,
-                       score_threshold: float | None = None) -> list[dict]:
-    """Fallback: dense-only search (for v1 collections or errors)."""
+def _search_dense_only_points(qc, vector: list[float], limit: int,
+                              filt: Filter | None,
+                              score_threshold: float | None = None) -> list:
+    """Fallback: dense-only search returning raw Qdrant points."""
     try:
         results = qc.query_points(
             config.QDRANT_COLLECTION,
@@ -371,7 +415,14 @@ def _search_dense_only(qc, vector: list[float], limit: int,
             query_filter=filt,
             score_threshold=score_threshold,
         )
-    return _points_to_dicts(results.points)
+    return results.points
+
+
+def _search_dense_only(qc, vector: list[float], limit: int,
+                       filt: Filter | None,
+                       score_threshold: float | None = None) -> list[dict]:
+    """Fallback: dense-only search (for v1 collections or errors)."""
+    return _points_to_dicts(_search_dense_only_points(qc, vector, limit, filt, score_threshold))
 
 
 def _search_impl(vector: list[float], limit: int,
@@ -577,6 +628,10 @@ def save(text: str, tag: str = "general", dedup: bool = True,
                         id=existing.id, vector=vectors, payload=payload,
                     )],
                 )
+                # Update FTS5 index
+                import db
+                db.fts_upsert("fts_memory", "point_id", str(existing.id),
+                              {"tag": tag, "text": text})
                 return str(existing.id)
         except Exception as e:
             _log.debug(f"dedup check failed, saving as new: {e}")
@@ -586,19 +641,24 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         config.QDRANT_COLLECTION,
         points=[PointStruct(id=point_id, vector=vectors, payload=payload)],
     )
+    # Mirror to FTS5 for BM25 keyword search
+    import db
+    db.fts_upsert("fts_memory", "point_id", point_id, {"tag": tag, "text": text})
     return point_id
 
 
 # ── Delete / Cleanup ──
 
 def delete(point_id: str) -> bool:
-    """Delete a single memory by its point ID."""
+    """Delete a single memory by its point ID (Qdrant + FTS5)."""
     try:
         qc = _get_qdrant()
         qc.delete(config.QDRANT_COLLECTION, points_selector=[point_id])
-        return True
     except Exception:
         return False
+    import db
+    db.fts_delete("fts_memory", "point_id", point_id)
+    return True
 
 
 def cleanup(max_age_days: int = 7, tag: str = "session"):

@@ -301,13 +301,39 @@ def set_model(model: str) -> str:
     return f"✓ Model: {model}"
 
 
+_LOCAL_PROVIDERS = {"lmstudio", "ollama"}
+
+
+def _is_local(name: str) -> bool:
+    """Check if provider is a local server (no API key required)."""
+    return name in _LOCAL_PROVIDERS
+
+
+def ping(name: str) -> bool:
+    """Check if a provider's API is reachable (GET /models with short timeout)."""
+    p = get_provider(name)
+    url = p.get("url", "")
+    if not url:
+        return False
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{url.rstrip('/')}/models", method="GET")
+        key = p.get("key", "")
+        if key:
+            req.add_header("Authorization", f"Bearer {key}")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def switch(name: str) -> str:
     """Switch to a different provider."""
     p = get_provider(name)
     if not p.get("url"):
         return f"✗ Unknown provider '{name}'. Available: {', '.join(list_providers())}"
 
-    if not p.get("key"):
+    if not p.get("key") and not _is_local(name):
         return f"✗ Provider '{name}' has no API key. Set it with: /provider {name} key <your-key>"
 
     old = get_active_name()
@@ -315,7 +341,7 @@ def switch(name: str) -> str:
 
     # Update config runtime values
     config.LLM_BASE_URL = p["url"]
-    config.LLM_API_KEY = p["key"]
+    config.LLM_API_KEY = p.get("key") or "local"  # local providers don't need a real key
 
     # Always reset model when switching providers.
     # Current model may not exist on the new provider.
@@ -395,16 +421,21 @@ def list_providers() -> list[str]:
 
 
 def list_all() -> list[dict]:
-    """List all providers with status."""
+    """List all providers with status and reachability."""
     active = get_active_name()
     result = []
     for name in list_providers():
         p = get_provider(name)
+        is_local = _is_local(name)
+        # For local providers, check reachability; for cloud, check key
+        online = ping(name) if is_local else bool(p.get("key"))
         result.append({
             "name": name,
             "display": p.get("name", name),
             "url": p.get("url", ""),
-            "has_key": bool(p.get("key")),
+            "has_key": bool(p.get("key")) or is_local,
+            "online": online,
+            "local": is_local,
             "models": p.get("models", []),
             "active": name == active,
         })

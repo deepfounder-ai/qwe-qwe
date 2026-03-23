@@ -50,6 +50,22 @@ def _migrate(conn: sqlite3.Connection):
     """)
     conn.commit()
 
+    # FTS5 tables for BM25 keyword search (hybrid with Qdrant vector search)
+    try:
+        conn.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_rag USING fts5(
+                chunk_id, file_path, text,
+                tokenize='porter unicode61'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_memory USING fts5(
+                point_id, tag, text,
+                tokenize='porter unicode61'
+            );
+        """)
+        conn.commit()
+    except Exception as e:
+        _log.warning(f"FTS5 tables not created (may not be supported): {e}")
+
     # Add meta column (JSON) for assistant message metadata: tools, duration, etc.
     try:
         conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
@@ -217,3 +233,116 @@ def kv_get_prefix(prefix: str) -> dict[str, str]:
         "SELECT key, value FROM kv WHERE key LIKE ? || '%'", (prefix,)
     ).fetchall()
     return {k: v for k, v in rows}
+
+
+# ---------------------------------------------------------------------------
+# FTS5 BM25 helpers
+# ---------------------------------------------------------------------------
+
+def _fts_escape(query: str) -> str:
+    """Escape FTS5 special characters by quoting each word."""
+    words = query.split()
+    if not words:
+        return '""'
+    return " ".join(f'"{w}"' for w in words if w.strip())
+
+
+def fts_upsert(table: str, id_col: str, id_val: str, fields: dict):
+    """Insert or replace a row in an FTS5 table.
+
+    FTS5 has no UPSERT — delete old row first, then insert.
+    ``fields`` maps column names to values (excluding id_col).
+    """
+    if table not in ("fts_rag", "fts_memory"):
+        return
+    try:
+        conn = _get_conn()
+        # Delete existing row with this id
+        conn.execute(
+            f"DELETE FROM {table} WHERE {id_col} = ?", (id_val,)
+        )
+        # Build INSERT
+        cols = [id_col] + list(fields.keys())
+        vals = [id_val] + list(fields.values())
+        placeholders = ",".join("?" for _ in cols)
+        col_names = ",".join(cols)
+        conn.execute(f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})", vals)
+        conn.commit()
+    except Exception as e:
+        _log.debug(f"fts_upsert({table}) failed: {e}")
+
+
+def fts_search(table: str, query: str, limit: int = 20) -> list[dict]:
+    """BM25 keyword search over an FTS5 table.
+
+    Returns list of dicts with all columns + ``rank`` (BM25 score, negative = better).
+    """
+    if table not in ("fts_rag", "fts_memory"):
+        return []
+    escaped = _fts_escape(query)
+    if not escaped or escaped == '""':
+        return []
+    try:
+        conn = _get_conn()
+        # Get column names (excluding internal rowid)
+        # FTS5 tables: first call pragma to get columns
+        cols_row = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        col_names = [r[1] for r in cols_row]
+
+        rows = conn.execute(
+            f"SELECT *, rank FROM {table} WHERE {table} MATCH ? ORDER BY rank LIMIT ?",
+            (escaped, limit)
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            d = {}
+            for i, col in enumerate(col_names):
+                d[col] = row[i]
+            d["rank"] = row[-1]  # BM25 rank (negative, lower = better match)
+            results.append(d)
+        return results
+    except Exception as e:
+        _log.debug(f"fts_search({table}) failed: {e}")
+        return []
+
+
+def fts_delete(table: str, id_col: str, id_val: str):
+    """Delete rows from an FTS5 table by id column match."""
+    if table not in ("fts_rag", "fts_memory"):
+        return
+    try:
+        conn = _get_conn()
+        conn.execute(f"DELETE FROM {table} WHERE {id_col} = ?", (id_val,))
+        conn.commit()
+    except Exception as e:
+        _log.debug(f"fts_delete({table}) failed: {e}")
+
+
+def fts_delete_match(table: str, col: str, value: str):
+    """Delete rows from FTS5 where a column contains a value (exact match via =)."""
+    if table not in ("fts_rag", "fts_memory"):
+        return
+    try:
+        conn = _get_conn()
+        conn.execute(f"DELETE FROM {table} WHERE {col} = ?", (value,))
+        conn.commit()
+    except Exception as e:
+        _log.debug(f"fts_delete_match({table}) failed: {e}")
+
+
+def rrf_merge(ranked_lists: list[list[tuple[str, float]]],
+              k: int = 60, limit: int = 10) -> list[tuple[str, float]]:
+    """Reciprocal Rank Fusion across multiple ranked result lists.
+
+    Each list: [(id, score), ...] sorted by relevance (best first).
+    Returns merged [(id, combined_rrf_score)] sorted by combined score desc.
+
+    RRF formula: score(d) = sum(1 / (k + rank_i(d))) for each list i.
+    """
+    scores: dict[str, float] = {}
+    for rlist in ranked_lists:
+        for rank, (item_id, _original_score) in enumerate(rlist):
+            scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank + 1)
+    merged = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return merged[:limit]

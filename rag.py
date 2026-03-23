@@ -180,6 +180,11 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
             batch = points[batch_start:batch_start + 100]
             qc.upsert(RAG_COLLECTION, points=batch)
 
+        # Mirror to FTS5 for BM25 keyword search
+        for pt in points:
+            db.fts_upsert("fts_rag", "chunk_id", pt.id,
+                          {"file_path": pt.payload["file_path"], "text": pt.payload["text"]})
+
     # Store mtime + tags (always update to clear stale tags)
     db.kv_set(mtime_key, current_mtime)
     if tags:
@@ -209,7 +214,7 @@ def index_directory(dirpath: str, recursive: bool = True) -> list[dict]:
 
 
 def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[dict]:
-    """Hybrid search over indexed files (dense + sparse RRF).
+    """3-way hybrid search: BM25 (FTS5) + dense + sparse (SPLADE++) with RRF.
 
     Args:
         query: search text.
@@ -231,6 +236,22 @@ def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[di
         from qdrant_client.models import Filter, FieldCondition, MatchAny
         query_filter = Filter(must=[FieldCondition(key="tags", match=MatchAny(any=tags))])
 
+    # --- BM25 keyword search via FTS5 ---
+    bm25_ranked: list[tuple[str, float]] = []
+    try:
+        fts_hits = db.fts_search("fts_rag", query, limit=limit * 3)
+        # rank is negative (lower = better), convert to positive descending score
+        for hit in fts_hits:
+            chunk_id = hit.get("chunk_id", "")
+            bm25_score = -hit.get("rank", 0.0)  # flip sign: higher = better
+            if chunk_id:
+                bm25_ranked.append((chunk_id, bm25_score))
+    except Exception as e:
+        _log.debug(f"FTS5 BM25 search failed (graceful skip): {e}")
+
+    # --- Qdrant vector search (dense + SPLADE++ RRF) ---
+    qdrant_ranked: list[tuple[str, float]] = []
+    qdrant_payloads: dict[str, dict] = {}
     try:
         results = qc.query_points(
             RAG_COLLECTION,
@@ -240,32 +261,65 @@ def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[di
             ],
             query=FusionQuery(fusion=Fusion.RRF),
             query_filter=query_filter,
-            limit=limit,
+            limit=limit * 3,
         )
+        for r in results.points:
+            pid = str(r.id)
+            qdrant_ranked.append((pid, r.score))
+            qdrant_payloads[pid] = r.payload
     except Exception as e:
         _log.debug(f"hybrid RAG search failed, falling back to dense: {e}")
         try:
             results = qc.query_points(RAG_COLLECTION, query=dense,
                                       using="dense", limit=limit,
                                       query_filter=query_filter)
+            for r in results.points:
+                pid = str(r.id)
+                qdrant_ranked.append((pid, r.score))
+                qdrant_payloads[pid] = r.payload
         except Exception:
-            try:
-                results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit,
-                                          query_filter=query_filter)
-            except Exception:
-                # Last resort: no filter, just return something
-                results = qc.query_points(RAG_COLLECTION, query=dense, limit=limit)
+            pass
 
-    return [
-        {
-            "text": r.payload.get("text", ""),
-            "file_path": r.payload.get("file_path", ""),
-            "chunk_index": r.payload.get("chunk_index", 0),
-            "score": round(r.score, 3),
-            "tags": r.payload.get("tags", []),
-        }
-        for r in results.points
-    ]
+    # --- RRF merge ---
+    if bm25_ranked and qdrant_ranked:
+        merged = db.rrf_merge([bm25_ranked, qdrant_ranked], limit=limit)
+    elif qdrant_ranked:
+        merged = [(pid, score) for pid, score in qdrant_ranked[:limit]]
+    elif bm25_ranked:
+        merged = [(pid, score) for pid, score in bm25_ranked[:limit]]
+    else:
+        return []
+
+    # Build output — prefer Qdrant payload (has full metadata), fallback to FTS text
+    output = []
+    for chunk_id, score in merged:
+        if chunk_id in qdrant_payloads:
+            p = qdrant_payloads[chunk_id]
+            output.append({
+                "text": p.get("text", ""),
+                "file_path": p.get("file_path", ""),
+                "chunk_index": p.get("chunk_index", 0),
+                "score": round(score, 4),
+                "tags": p.get("tags", []),
+            })
+        else:
+            # BM25-only hit — payload not in Qdrant results, fetch from FTS
+            fts_text = ""
+            fts_path = ""
+            for hit in fts_hits:
+                if hit.get("chunk_id") == chunk_id:
+                    fts_text = hit.get("text", "")
+                    fts_path = hit.get("file_path", "")
+                    break
+            if fts_text:
+                output.append({
+                    "text": fts_text,
+                    "file_path": fts_path,
+                    "chunk_index": 0,
+                    "score": round(score, 4),
+                    "tags": [],
+                })
+    return output
 
 
 def get_status() -> dict:
@@ -284,7 +338,7 @@ def get_status() -> dict:
 
 
 def _delete_file_chunks(file_path: str):
-    """Remove all chunks for a given file path."""
+    """Remove all chunks for a given file path (Qdrant + FTS5)."""
     from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
     try:
         qc = _get_qdrant()
@@ -298,6 +352,8 @@ def _delete_file_chunks(file_path: str):
         )
     except Exception:
         pass
+    # Also clean FTS5 index
+    db.fts_delete_match("fts_rag", "file_path", file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +644,11 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
                     for batch_start in range(0, len(points), 100):
                         batch = points[batch_start:batch_start + 100]
                         qc.upsert(RAG_COLLECTION, points=batch)
+
+                    # Mirror to FTS5 for BM25 keyword search
+                    for pt in points:
+                        db.fts_upsert("fts_rag", "chunk_id", pt.id,
+                                      {"file_path": pt.payload["file_path"], "text": pt.payload["text"]})
 
                 mtime_key = f"rag:mtime:{path}"
                 tags_key = f"rag:tags:{path}"
