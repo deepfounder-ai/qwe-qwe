@@ -28,7 +28,8 @@ def _check_faster_whisper() -> bool:
 def is_available() -> bool:
     """True if any STT backend is usable."""
     if _check_faster_whisper():
-        return True
+        import shutil
+        return shutil.which("ffmpeg") is not None
     try:
         import config
         return bool(config.get("stt_openai_key"))
@@ -45,6 +46,12 @@ def transcribe(audio_bytes: bytes, format: str = "ogg",
     """
     if not audio_bytes:
         return "[STT Error] empty audio"
+
+    # Validate format against allowlist
+    _ALLOWED_FORMATS = {"ogg", "mp3", "wav", "webm", "m4a", "flac", "opus", "oga"}
+    format = format.lower().strip(".")
+    if format not in _ALLOWED_FORMATS:
+        return f"[STT Error] unsupported format: {format}"
 
     try:
         import config

@@ -404,6 +404,9 @@ body {
 .thinking-text.on { color: var(--accent); opacity: 1; border-color: var(--accent); background: var(--accent-bg); }
 .thinking-text.on::before { content: '💭 '; }
 .thinking-text::before { content: '○ '; }
+#voiceModeToggle.on { color: var(--accent); opacity: 1; border-color: var(--accent); background: var(--accent-bg); }
+#voiceModeToggle.on::before { content: '🎤 '; }
+#voiceModeToggle::before { content: '○ '; }
 
 /* Cron page */
 .cron-content { padding: 24px 32px; overflow-y: auto; flex: 1; }
@@ -605,7 +608,7 @@ body {
     <div class="img-preview" id="imgPreview" style="display:none"></div>
     <div class="input-row">
       <button class="btn-attach" onclick="document.getElementById('fileInput').click()" title="Attach image"><i class="ph ph-image"></i></button>
-      <button class="btn-mic" id="micBtn" onclick="toggleRecording()" title="Voice message" style="display:none"><i class="ph ph-microphone"></i></button>
+      <button class="btn-mic" id="micBtn" onclick="toggleRecording()" title="Voice message"><i class="ph ph-microphone"></i></button>
       <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="handleFileSelect(this)">
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
@@ -618,6 +621,7 @@ body {
     </div>
     <div class="input-footer">
       <span class="thinking-text" id="thinkingToggleChat" onclick="toggleThinking()">thinking</span>
+      <span class="thinking-text" id="voiceModeToggle" onclick="toggleVoiceMode()">voice</span>
       <div class="thread-stats" id="threadStats"></div>
     </div>
   </div>
@@ -972,7 +976,7 @@ body {
 
         <!-- TTS Card -->
         <div class="s-card">
-          <div class="s-card-title"><i class="ph ph-speaker-high"></i> Text-to-Speech (TTS) — Fish Audio S2 Pro</div>
+          <div class="s-card-title"><i class="ph ph-speaker-high"></i> Text-to-Speech (TTS) — s2.cpp (S2 Pro GGUF)</div>
           <div class="s-row" style="align-items:center;">
             <span class="s-row-label">Enable TTS</span>
             <label class="toggle-switch">
@@ -986,19 +990,24 @@ body {
           </div>
           <div style="margin-top:12px;">
             <div class="s-row" style="align-items:center;">
-              <span class="s-row-label">API Key</span>
-              <input type="password" class="s-input" id="voiceTtsApiKey" style="width:200px;" placeholder="Fish Audio API key" onchange="saveAgentSetting('tts_api_key', this.value, this, 'str')">
-            </div>
-            <div class="s-row" style="align-items:center;">
-              <span class="s-row-label">Voice ID</span>
-              <input type="text" class="s-input" id="voiceTtsVoiceId" style="width:200px;" placeholder="Reference voice ID" onchange="saveAgentSetting('tts_voice_id', this.value, this, 'str')">
-            </div>
-            <div class="s-row" style="align-items:center;">
               <span class="s-row-label">API URL</span>
-              <input type="text" class="s-input" id="voiceTtsApiUrl" style="width:280px;" placeholder="https://api.fish.audio/v1/tts" onchange="saveAgentSetting('tts_api_url', this.value, this, 'str')">
+              <input type="text" class="s-input" id="voiceTtsApiUrl" style="width:280px;" placeholder="http://localhost:3030" onchange="saveAgentSetting('tts_api_url', this.value, this, 'str')">
             </div>
           </div>
-          <p style="color:var(--text-dim); font-size:11px; margin:12px 0 0;"><i class="ph ph-lightbulb"></i> Get API key at <a href="https://fish.audio" target="_blank" style="color:var(--accent);">fish.audio</a>. Voice ID: create or pick a voice in your Fish Audio dashboard.</p>
+          <details style="margin-top:12px;">
+            <summary style="cursor:pointer; color:var(--text-dim); font-size:12px;"><i class="ph ph-user-sound"></i> Voice Cloning (optional)</summary>
+            <div style="margin-top:8px;">
+              <div class="s-row" style="align-items:center;">
+                <span class="s-row-label">Reference audio</span>
+                <input type="text" class="s-input" id="voiceTtsRefAudio" style="width:280px;" placeholder="path to reference.wav (5-30s)" onchange="saveAgentSetting('tts_ref_audio', this.value, this, 'str')">
+              </div>
+              <div class="s-row" style="align-items:center;">
+                <span class="s-row-label">Reference text</span>
+                <input type="text" class="s-input" id="voiceTtsRefText" style="width:280px;" placeholder="transcript of reference audio" onchange="saveAgentSetting('tts_ref_text', this.value, this, 'str')">
+              </div>
+            </div>
+          </details>
+          <p style="color:var(--text-dim); font-size:11px; margin:12px 0 0;"><i class="ph ph-lightbulb"></i> Run s2.cpp server: <code>./s2 -m s2-pro-q6_k.gguf --server -P 8880</code> then set API URL to <code>http://localhost:8880</code></p>
         </div>
 
         <!-- Test Card -->
@@ -2033,8 +2042,8 @@ async function loadInferenceStatus() {
     document.getElementById('infMem').textContent = g.vram_gb ? g.vram_gb + ' GB' : 'Unknown';
     const olEl = document.getElementById('infOllama');
     if (d.ollama_running) olEl.innerHTML = '<span style="color:var(--green)">Running</span>';
-    else if (d.ollama_installed) olEl.innerHTML = '<span style="color:var(--yellow)">Installed (not running)</span>';
-    else olEl.innerHTML = '<span style="color:var(--red)">Not installed</span>';
+    else if (d.ollama_installed) olEl.innerHTML = '<span style="color:#f5a623">Installed (not running)</span>';
+    else olEl.innerHTML = '<span style="color:var(--error)">Not installed</span>';
 
     const sel = document.getElementById('infModelSelect');
     sel.innerHTML = '';
@@ -2099,7 +2108,7 @@ async function infConfigure() {
   try {
     const res = await fetch('/api/inference/configure', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
     const d = await res.json();
-    st.innerHTML = d.ok ? `<span style="color:var(--green)">✓ ${d.message}</span>` : `<span style="color:var(--red)">${d.error}</span>`;
+    st.innerHTML = d.ok ? `<span style="color:var(--green)">✓ ${d.message}</span>` : `<span style="color:var(--error)">${d.error}</span>`;
     if (d.ok) setTimeout(() => location.reload(), 1000);
   } catch(e) { st.textContent = 'Error: ' + e.message; }
 }
@@ -2119,13 +2128,13 @@ async function loadSettingsVoice() {
       whisperEl.innerHTML = '<span style="color:var(--green)">Installed</span>';
       installEl.style.display = 'none';
     } else {
-      whisperEl.innerHTML = '<span style="color:var(--red)">Not installed</span>';
+      whisperEl.innerHTML = '<span style="color:var(--error)">Not installed</span>';
       installEl.style.display = '';
     }
 
     ffmpegEl.innerHTML = d.has_ffmpeg
       ? '<span style="color:var(--green)">Installed</span>'
-      : '<span style="color:var(--red)">Not found — install: brew install ffmpeg</span>';
+      : '<span style="color:var(--error)">Not found — install: brew install ffmpeg</span>';
 
     // STT settings
     document.getElementById('voiceSttModel').value = d.stt_model || 'base';
@@ -2135,18 +2144,20 @@ async function loadSettingsVoice() {
     // TTS status
     document.getElementById('voiceTtsEnabled').checked = d.tts_enabled;
     const ttsStatus = document.getElementById('voiceTtsStatus');
-    if (d.tts_enabled && d.tts_api_key) {
+    if (d.tts_enabled && d.tts_api_url) {
       ttsStatus.innerHTML = '<span style="color:var(--green)">Active</span>';
-    } else if (d.tts_api_key && !d.tts_enabled) {
-      ttsStatus.innerHTML = '<span style="color:var(--yellow)">Configured but disabled</span>';
+    } else if (d.tts_api_url && !d.tts_enabled) {
+      ttsStatus.innerHTML = '<span style="color:#f5a623">URL set, TTS disabled</span>';
+    } else if (d.tts_enabled && !d.tts_api_url) {
+      ttsStatus.innerHTML = '<span style="color:var(--error)">Enabled but no API URL</span>';
     } else {
-      ttsStatus.innerHTML = '<span style="color:var(--text-dim)">Not configured</span>';
+      ttsStatus.innerHTML = '<span style="color:var(--text-dim)">Not configured — set API URL below</span>';
     }
 
     // TTS settings
-    if (d.tts_api_key) document.getElementById('voiceTtsApiKey').value = '••••••••';
-    document.getElementById('voiceTtsVoiceId').value = d.tts_voice_id || '';
     document.getElementById('voiceTtsApiUrl').value = d.tts_api_url || '';
+    document.getElementById('voiceTtsRefAudio').value = d.tts_ref_audio || '';
+    document.getElementById('voiceTtsRefText').value = d.tts_ref_text || '';
   } catch(e) { console.error('Voice settings load error:', e); }
 }
 
@@ -3051,18 +3062,45 @@ input.addEventListener('paste', (e) => {
   }
 });
 
+// ── Voice Mode Toggle ──
+let voiceModeOn = false;
+
+async function loadVoiceMode() {
+  try {
+    const r = await fetch('/api/voice/mode');
+    const d = await r.json();
+    voiceModeOn = d.enabled;
+    document.getElementById('voiceModeToggle').classList.toggle('on', d.enabled);
+  } catch(e) {}
+}
+
+async function toggleVoiceMode() {
+  try {
+    const r = await fetch('/api/voice/mode', { method: 'POST' });
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    voiceModeOn = d.enabled;
+    document.getElementById('voiceModeToggle').classList.toggle('on', d.enabled);
+  } catch(e) { console.error('voice mode toggle:', e); }
+}
+
 // ── Voice Recording ──
 let mediaRecorder = null;
 let audioChunks = [];
 let recTimerInterval = null;
 let recStartTime = 0;
+let recordingStarting = false; // guard against double-click
 
 // Check STT availability and show mic button
+let sttAvailable = false;
+let ttsAvailable = false;
 (async function checkVoice() {
   try {
     const r = await fetch('/api/voice/status');
     const s = await r.json();
-    if (s.stt) document.getElementById('micBtn').style.display = '';
+    sttAvailable = s.stt;
+    ttsAvailable = s.tts;
+    loadVoiceMode();
   } catch(e) {}
 })();
 
@@ -3072,8 +3110,16 @@ function toggleRecording() {
 }
 
 async function startRecording() {
+  if (!sttAvailable) {
+    addMessage('status', 'STT not configured. Install faster-whisper in Settings → Voice.');
+    setTimeout(removeStatus, 4000);
+    return;
+  }
+  if (recordingStarting) return; // prevent double-click race
+  recordingStarting = true;
+  let stream = null;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
       : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
@@ -3084,6 +3130,7 @@ async function startRecording() {
       stream.getTracks().forEach(t => t.stop());
       sendAudioToSTT();
     };
+    mediaRecorder.onerror = () => { stopRecording(); };
     mediaRecorder.start();
     document.getElementById('micBtn').classList.add('recording');
     document.getElementById('recBar').classList.add('active');
@@ -3091,7 +3138,11 @@ async function startRecording() {
     recTimerInterval = setInterval(updateRecTimer, 1000);
     updateRecTimer();
   } catch (err) {
-    console.error('Microphone access denied:', err);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    addMessage('status', `Microphone error: ${err.message}`);
+    setTimeout(removeStatus, 4000);
+  } finally {
+    recordingStarting = false;
   }
 }
 

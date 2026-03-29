@@ -311,6 +311,7 @@ register_command("thinking", "Toggle thinking mode on/off")
 register_command("doctor", "Run diagnostics on all components")
 register_command("profile", "View/edit user profile")
 register_command("heartbeat", "Manage periodic tasks checklist")
+register_command("voice", "Toggle voice mode (TTS) for this chat")
 register_command("help", "Show available commands")
 
 
@@ -528,6 +529,21 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
             lines.append(f"    → {t['next_run']} ({t['schedule']})")
             lines.append(f"    _{t['task'][:80]}_")
         send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
+        return True
+
+    if cmd == "voice":
+        key = f"voice_mode:{chat_id}"
+        current = db.kv_get(key) == "1"
+        new_val = not current
+        db.kv_set(key, "1" if new_val else "0")
+        import tts
+        if new_val and not tts.is_available():
+            db.kv_set(key, "0")
+            send_message(chat_id, "🎤 TTS not available. Configure s2.cpp model in Settings → Voice.", token, topic_id=topic_id)
+        elif new_val:
+            send_message(chat_id, "🎤 Voice mode: **ON**\nAll responses will include voice.", token, topic_id=topic_id)
+        else:
+            send_message(chat_id, "🔇 Voice mode: **OFF**\nText-only responses.", token, topic_id=topic_id)
         return True
 
     if cmd == "thinking":
@@ -939,6 +955,32 @@ def send_message(chat_id: int, text: str, token: str | None = None,
             _log.warning("sent as plain text (all formatting failed)")
 
 
+def _wav_to_ogg(wav_bytes: bytes) -> bytes | None:
+    """Convert WAV to OGG/Opus via ffmpeg for Telegram sendVoice."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as inp:
+        inp.write(wav_bytes)
+        inp_path = inp.name
+    out_path = inp_path + ".ogg"
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", inp_path, "-c:a", "libopus", "-b:a", "64k", out_path],
+            capture_output=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            _log.error("ffmpeg wav→ogg failed: %s", proc.stderr.decode(errors="replace")[:300])
+            return None
+        return Path(out_path).read_bytes()
+    except Exception as e:
+        _log.error("wav→ogg conversion error: %s", e)
+        return None
+    finally:
+        Path(inp_path).unlink(missing_ok=True)
+        Path(out_path).unlink(missing_ok=True)
+
+
 def _send_voice(chat_id: int, audio_bytes: bytes, token: str,
                 reply_to: int | None = None, topic_id: int | None = None):
     """Send a voice message (ogg/opus) to a Telegram chat via multipart upload."""
@@ -1176,7 +1218,8 @@ def _handle_update(update: dict, token: str, bot_username: str):
         # Use dedicated Telegram DM thread (never share with web UI active thread)
         dm_thread = _get_or_create_dm_thread(chat_id)
         _process_message(chat_id, text, user_id, username, message_id, token,
-                         topic_id=None, thread_id=dm_thread, image_b64=image_b64)
+                         topic_id=None, thread_id=dm_thread, image_b64=image_b64,
+                         is_voice=is_voice)
         return
 
     # ── Group/supergroup ──
@@ -1280,12 +1323,15 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             if response:
                 typing_active.clear()  # stop typing before sending
                 send_message(chat_id, response, token, reply_to=message_id, topic_id=topic_id)
-                # TTS: send voice reply if incoming was voice
-                if is_voice:
+                # TTS: send voice reply if voice mode or incoming was voice
+                voice_mode = db.kv_get(f"voice_mode:{chat_id}") == "1"
+                if is_voice or voice_mode:
                     try:
                         import tts
                         if tts.is_available():
-                            audio = tts.synthesize(response, format="opus")
+                            wav_audio = tts.synthesize(response, format="wav")
+                            # Convert WAV → OGG/Opus for Telegram
+                            audio = _wav_to_ogg(wav_audio) if wav_audio else None
                             if audio:
                                 _send_voice(chat_id, audio, token, reply_to=message_id, topic_id=topic_id)
                     except Exception as e:

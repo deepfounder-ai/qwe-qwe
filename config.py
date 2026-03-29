@@ -159,11 +159,11 @@ EDITABLE_SETTINGS = {
     "stt_model":            ("setting:stt_model",             str, "base", "Whisper model size (tiny/base/small/medium)", "", ""),
     "stt_language":         ("setting:stt_language",           str, "",     "STT language (empty=auto, en, ru, etc.)", "", ""),
     "stt_openai_key":       ("setting:stt_openai_key",        str, "",     "OpenAI API key for cloud STT fallback", "", ""),
-    # ── Voice: TTS ──
+    # ── Voice: TTS (s2.cpp HTTP API) ──
     "tts_enabled":          ("setting:tts_enabled",           int, 0,     "Enable TTS voice responses (0=off, 1=on)", 0, 1),
-    "tts_api_key":          ("setting:tts_api_key",           str, "",     "Fish Audio API key for TTS", "", ""),
-    "tts_api_url":          ("setting:tts_api_url",           str, "https://api.fish.audio/v1/tts", "TTS API endpoint (cloud or self-hosted)", "", ""),
-    "tts_voice_id":         ("setting:tts_voice_id",          str, "",     "Fish Audio voice/reference ID", "", ""),
+    "tts_api_url":          ("setting:tts_api_url",           str, "http://localhost:3030", "s2.cpp TTS server URL", "", ""),
+    "tts_ref_audio":        ("setting:tts_ref_audio",         str, "",     "Reference audio for voice cloning (5-30s WAV)", "", ""),
+    "tts_ref_text":         ("setting:tts_ref_text",          str, "",     "Transcript of reference audio", "", ""),
 }
 
 

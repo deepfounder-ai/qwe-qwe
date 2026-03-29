@@ -13,6 +13,7 @@ signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -342,7 +343,7 @@ async def text_to_speech(request: Request):
     import functools
     loop = asyncio.get_event_loop()
     audio = await loop.run_in_executor(
-        None, functools.partial(tts.synthesize, text, format="mp3")
+        None, functools.partial(tts.synthesize, text, format="wav")
     )
     if not audio:
         return JSONResponse({"error": "TTS synthesis failed"}, status_code=500)
@@ -369,9 +370,9 @@ async def voice_status():
         "stt_language": config.get("stt_language"),
         "stt_openai_key": bool(config.get("stt_openai_key")),
         "tts_enabled": str(config.get("tts_enabled")) == "1",
-        "tts_api_key": bool(config.get("tts_api_key")),
-        "tts_voice_id": config.get("tts_voice_id"),
         "tts_api_url": config.get("tts_api_url"),
+        "tts_ref_audio": config.get("tts_ref_audio"),
+        "tts_ref_text": config.get("tts_ref_text"),
     }
 
 
@@ -395,6 +396,25 @@ async def install_whisper():
         return {"ok": False, "error": proc.stderr[:500]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/voice/mode")
+async def get_voice_mode():
+    """Get voice mode state."""
+    enabled = db.kv_get("voice_mode:web") == "1"
+    return {"enabled": enabled}
+
+
+@app.post("/api/voice/mode")
+async def toggle_voice_mode():
+    """Toggle voice mode for web UI."""
+    import tts
+    current = db.kv_get("voice_mode:web") == "1"
+    new_val = not current
+    if new_val and not tts.is_available():
+        return {"enabled": False, "error": "TTS not available. Configure model in Settings → Voice."}
+    db.kv_set("voice_mode:web", "1" if new_val else "0")
+    return {"enabled": new_val}
 
 
 @app.get("/")
@@ -1453,11 +1473,12 @@ async def websocket_chat(ws: WebSocket):
                                             image_path=image_path)
                 )
 
-                # TTS: synthesize voice for reply if enabled
+                # TTS: synthesize voice for reply if voice mode is on
                 audio_url = None
+                voice_mode = db.kv_get("voice_mode:web") == "1"
                 try:
                     import tts
-                    if tts.is_available() and result["reply"]:
+                    if voice_mode and tts.is_available() and result["reply"]:
                         audio_data = await loop.run_in_executor(
                             None, functools.partial(tts.synthesize, result["reply"], format="mp3")
                         )
