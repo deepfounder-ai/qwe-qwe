@@ -155,6 +155,15 @@ EDITABLE_SETTINGS = {
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
+    # ── Voice: STT ──
+    "stt_model":            ("setting:stt_model",             str, "base", "Whisper model size (tiny/base/small/medium)", "", ""),
+    "stt_language":         ("setting:stt_language",           str, "",     "STT language (empty=auto, en, ru, etc.)", "", ""),
+    "stt_openai_key":       ("setting:stt_openai_key",        str, "",     "OpenAI API key for cloud STT fallback", "", ""),
+    # ── Voice: TTS ──
+    "tts_enabled":          ("setting:tts_enabled",           int, 0,     "Enable TTS voice responses (0=off, 1=on)", 0, 1),
+    "tts_api_key":          ("setting:tts_api_key",           str, "",     "Fish Audio API key for TTS", "", ""),
+    "tts_api_url":          ("setting:tts_api_url",           str, "https://api.fish.audio/v1/tts", "TTS API endpoint (cloud or self-hosted)", "", ""),
+    "tts_voice_id":         ("setting:tts_voice_id",          str, "",     "Fish Audio voice/reference ID", "", ""),
 }
 
 

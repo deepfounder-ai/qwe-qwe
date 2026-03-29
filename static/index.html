@@ -200,6 +200,21 @@ body {
   display: flex; align-items: center; justify-content: center; transition: all 0.15s; flex-shrink: 0;
 }
 .btn-attach:hover { border-color: var(--accent); color: var(--accent); }
+.btn-mic {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  width: 44px; height: 44px; border-radius: 10px; cursor: pointer; font-size: 18px;
+  display: flex; align-items: center; justify-content: center; transition: all 0.15s; flex-shrink: 0;
+}
+.btn-mic:hover { border-color: var(--accent); color: var(--accent); }
+.btn-mic.recording { border-color: #e74c3c; color: #e74c3c; animation: pulse-rec 1s infinite; }
+@keyframes pulse-rec { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.recording-bar {
+  display: none; align-items: center; gap: 8px; padding: 4px 8px; color: #e74c3c; font-size: 12px;
+}
+.recording-bar.active { display: flex; }
+.recording-dot { width: 8px; height: 8px; border-radius: 50%; background: #e74c3c; animation: pulse-rec 1s infinite; }
+.msg-audio { margin: 6px 0; }
+.msg-audio audio { max-width: 100%; height: 36px; border-radius: 8px; }
 .drag-over { border: 2px dashed var(--accent) !important; background: var(--accent-bg) !important; }
 .msg img.msg-img { max-width: 300px; max-height: 200px; border-radius: 8px; margin: 6px 0; display: block; }
 #input {
@@ -590,10 +605,16 @@ body {
     <div class="img-preview" id="imgPreview" style="display:none"></div>
     <div class="input-row">
       <button class="btn-attach" onclick="document.getElementById('fileInput').click()" title="Attach image"><i class="ph ph-image"></i></button>
+      <button class="btn-mic" id="micBtn" onclick="toggleRecording()" title="Voice message" style="display:none"><i class="ph ph-microphone"></i></button>
       <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="handleFileSelect(this)">
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
       <button id="stop" class="stop-btn" onclick="stopGeneration()" style="display:none" title="Stop generation">■</button>
+    </div>
+    <div class="recording-bar" id="recBar">
+      <span class="recording-dot"></span>
+      <span id="recTimer">0:00</span>
+      <span>Recording...</span>
     </div>
     <div class="input-footer">
       <span class="thinking-text" id="thinkingToggleChat" onclick="toggleThinking()">thinking</span>
@@ -721,6 +742,7 @@ body {
       <div class="settings-nav-item" onclick="showSection('threads')"><span class="nav-icon"><i class="ph ph-chats-circle"></i></span><span>Threads</span></div>
       <div class="settings-nav-item" onclick="showSection('profile')"><span class="nav-icon"><i class="ph ph-user-circle"></i></span><span>Profile</span></div>
       <div class="settings-nav-item" onclick="showSection('heartbeat')"><span class="nav-icon"><i class="ph ph-heartbeat"></i></span><span>Heartbeat</span></div>
+      <div class="settings-nav-item" onclick="showSection('voice')"><span class="nav-icon"><i class="ph ph-microphone"></i></span><span>Voice</span></div>
       <div class="settings-nav-item" onclick="showSection('stats')"><span class="nav-icon"><i class="ph ph-chart-bar"></i></span><span>Stats</span></div>
       <div class="settings-nav-item" onclick="showSection('system')"><span class="nav-icon"><i class="ph ph-wrench"></i></span><span>System</span></div>
     </div>
@@ -894,6 +916,99 @@ body {
           <div class="s-btn-row" style="margin-top:12px;">
             <button class="s-btn danger" onclick="resetStats()">Reset all counters</button>
           </div>
+        </div>
+      </div>
+
+      <!-- Voice -->
+      <div class="settings-section" id="sec-voice">
+        <h2>Voice</h2>
+        <p class="desc">Speech-to-Text (STT) and Text-to-Speech (TTS) configuration.</p>
+
+        <!-- STT Card -->
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-microphone"></i> Speech-to-Text (STT)</div>
+          <div class="s-row">
+            <span class="s-row-label">faster-whisper</span>
+            <span class="s-row-value" id="voiceWhisperStatus">checking...</span>
+          </div>
+          <div class="s-row">
+            <span class="s-row-label">ffmpeg</span>
+            <span class="s-row-value" id="voiceFfmpegStatus">checking...</span>
+          </div>
+          <div id="voiceWhisperInstall" style="display:none; margin-top:12px;">
+            <button class="s-btn primary" onclick="installWhisper()"><i class="ph ph-download-simple"></i> Install faster-whisper</button>
+            <span id="voiceWhisperInstallStatus" style="margin-left:8px; font-size:12px;"></span>
+          </div>
+          <div style="margin-top:12px;">
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">Model size</span>
+              <select class="s-input" id="voiceSttModel" style="width:140px;" onchange="saveAgentSetting('stt_model', this.value, this, 'str')">
+                <option value="tiny">tiny (~75MB, fast)</option>
+                <option value="base">base (~140MB, balanced)</option>
+                <option value="small">small (~460MB, better)</option>
+                <option value="medium">medium (~1.5GB, best)</option>
+              </select>
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">Language</span>
+              <select class="s-input" id="voiceSttLang" style="width:140px;" onchange="saveAgentSetting('stt_language', this.value, this, 'str')">
+                <option value="">Auto-detect</option>
+                <option value="en">English</option>
+                <option value="ru">Russian</option>
+                <option value="es">Spanish</option>
+                <option value="de">German</option>
+                <option value="fr">French</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+              </select>
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">OpenAI key (fallback)</span>
+              <input type="password" class="s-input" id="voiceSttOpenaiKey" style="width:200px;" placeholder="sk-..." onchange="saveAgentSetting('stt_openai_key', this.value, this, 'str')">
+            </div>
+          </div>
+        </div>
+
+        <!-- TTS Card -->
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-speaker-high"></i> Text-to-Speech (TTS) — Fish Audio S2 Pro</div>
+          <div class="s-row" style="align-items:center;">
+            <span class="s-row-label">Enable TTS</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="voiceTtsEnabled" onchange="saveAgentSetting('tts_enabled', this.checked ? 1 : 0, this, 'int')">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="s-row">
+            <span class="s-row-label">Status</span>
+            <span class="s-row-value" id="voiceTtsStatus">—</span>
+          </div>
+          <div style="margin-top:12px;">
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">API Key</span>
+              <input type="password" class="s-input" id="voiceTtsApiKey" style="width:200px;" placeholder="Fish Audio API key" onchange="saveAgentSetting('tts_api_key', this.value, this, 'str')">
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">Voice ID</span>
+              <input type="text" class="s-input" id="voiceTtsVoiceId" style="width:200px;" placeholder="Reference voice ID" onchange="saveAgentSetting('tts_voice_id', this.value, this, 'str')">
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">API URL</span>
+              <input type="text" class="s-input" id="voiceTtsApiUrl" style="width:280px;" placeholder="https://api.fish.audio/v1/tts" onchange="saveAgentSetting('tts_api_url', this.value, this, 'str')">
+            </div>
+          </div>
+          <p style="color:var(--text-dim); font-size:11px; margin:12px 0 0;"><i class="ph ph-lightbulb"></i> Get API key at <a href="https://fish.audio" target="_blank" style="color:var(--accent);">fish.audio</a>. Voice ID: create or pick a voice in your Fish Audio dashboard.</p>
+        </div>
+
+        <!-- Test Card -->
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-play"></i> Test</div>
+          <div class="s-row" style="align-items:center; gap:8px;">
+            <input type="text" class="s-input" id="voiceTestText" style="flex:1;" placeholder="Type text to synthesize..." value="Hello, this is a voice test.">
+            <button class="s-btn primary" onclick="testTTS()"><i class="ph ph-speaker-high"></i> Play</button>
+          </div>
+          <div id="voiceTestResult" style="margin-top:8px;"></div>
         </div>
       </div>
 
@@ -1333,6 +1448,7 @@ async function loadAllSettings() {
   loadSettingsThreads();
   loadSettingsProfile();
   loadSettingsHeartbeat();
+  loadSettingsVoice();
   loadSettingsStats();
   loadSettingsSystem();
   loadInferenceStatus();
@@ -1988,6 +2104,99 @@ async function infConfigure() {
   } catch(e) { st.textContent = 'Error: ' + e.message; }
 }
 
+// ── Voice Settings ──
+async function loadSettingsVoice() {
+  try {
+    const res = await fetch('/api/voice/status');
+    const d = await res.json();
+
+    // STT status
+    const whisperEl = document.getElementById('voiceWhisperStatus');
+    const ffmpegEl = document.getElementById('voiceFfmpegStatus');
+    const installEl = document.getElementById('voiceWhisperInstall');
+
+    if (d.has_whisper) {
+      whisperEl.innerHTML = '<span style="color:var(--green)">Installed</span>';
+      installEl.style.display = 'none';
+    } else {
+      whisperEl.innerHTML = '<span style="color:var(--red)">Not installed</span>';
+      installEl.style.display = '';
+    }
+
+    ffmpegEl.innerHTML = d.has_ffmpeg
+      ? '<span style="color:var(--green)">Installed</span>'
+      : '<span style="color:var(--red)">Not found — install: brew install ffmpeg</span>';
+
+    // STT settings
+    document.getElementById('voiceSttModel').value = d.stt_model || 'base';
+    document.getElementById('voiceSttLang').value = d.stt_language || '';
+    if (d.stt_openai_key) document.getElementById('voiceSttOpenaiKey').value = '••••••••';
+
+    // TTS status
+    document.getElementById('voiceTtsEnabled').checked = d.tts_enabled;
+    const ttsStatus = document.getElementById('voiceTtsStatus');
+    if (d.tts_enabled && d.tts_api_key) {
+      ttsStatus.innerHTML = '<span style="color:var(--green)">Active</span>';
+    } else if (d.tts_api_key && !d.tts_enabled) {
+      ttsStatus.innerHTML = '<span style="color:var(--yellow)">Configured but disabled</span>';
+    } else {
+      ttsStatus.innerHTML = '<span style="color:var(--text-dim)">Not configured</span>';
+    }
+
+    // TTS settings
+    if (d.tts_api_key) document.getElementById('voiceTtsApiKey').value = '••••••••';
+    document.getElementById('voiceTtsVoiceId').value = d.tts_voice_id || '';
+    document.getElementById('voiceTtsApiUrl').value = d.tts_api_url || '';
+  } catch(e) { console.error('Voice settings load error:', e); }
+}
+
+async function installWhisper() {
+  const st = document.getElementById('voiceWhisperInstallStatus');
+  st.innerHTML = '<i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> Installing faster-whisper... (may take a minute)';
+  try {
+    const res = await fetch('/api/voice/install-whisper', { method: 'POST' });
+    const d = await res.json();
+    if (d.ok) {
+      st.innerHTML = '<span style="color:var(--green)">Installed!</span>';
+      loadSettingsVoice();
+      // Re-check mic button visibility
+      try {
+        const vs = await fetch('/api/voice/status');
+        const s = await vs.json();
+        if (s.stt) document.getElementById('micBtn').style.display = '';
+      } catch(e) {}
+    } else {
+      st.innerHTML = `<span style="color:var(--error)">${escapeHtml(d.error || 'Install failed')}</span>`;
+    }
+  } catch(e) {
+    st.innerHTML = `<span style="color:var(--error)">Error: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function testTTS() {
+  const text = document.getElementById('voiceTestText').value.trim();
+  const result = document.getElementById('voiceTestResult');
+  if (!text) return;
+  result.innerHTML = '<i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> Synthesizing...';
+  try {
+    const res = await fetch('/api/tts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      result.innerHTML = `<span style="color:var(--error)">${escapeHtml(err.error || 'TTS failed')}</span>`;
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    result.innerHTML = `<audio controls autoplay src="${url}" style="height:36px;"></audio>`;
+  } catch(e) {
+    result.innerHTML = `<span style="color:var(--error)">Error: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
 async function loadSettingsStats() {
   try {
     const res = await fetch('/api/stats');
@@ -2031,27 +2240,33 @@ async function loadAgentSettings() {
       const row = document.createElement('div');
       row.className = 's-row';
       row.style.alignItems = 'center';
-      const modified = info.value !== info.default;
+      const modified = String(info.value) !== String(info.default);
+      const isStr = info.type === 'str';
+      const isSecret = key.includes('key') || key.includes('secret');
+      const inputType = isSecret ? 'password' : (isStr ? 'text' : 'number');
+      const inputStyle = isStr ? 'width:200px;' : 'width:80px; text-align:center;';
+      const rangeHint = isStr ? '' : ` (${info.min}–${info.max})`;
       row.innerHTML = `
         <div style="flex:1;">
-          <span class="s-row-label" style="display:block;">${key.replace(/_/g, ' ')}${modified ? ' <span style="color:var(--accent); font-size:10px;">modified</span>' : ''}</span>
-          <span style="color:var(--text-dim); font-size:11px;">${info.description} (${info.min}–${info.max})</span>
+          <span class="s-row-label" style="display:block;">${escapeHtml(key.replace(/_/g, ' '))}${modified ? ' <span style="color:var(--accent); font-size:10px;">modified</span>' : ''}</span>
+          <span style="color:var(--text-dim); font-size:11px;">${escapeHtml(info.description)}${rangeHint}</span>
         </div>
-        <input type="number" class="s-input" style="width:80px; text-align:center;" 
-          value="${info.value}" min="${info.min}" max="${info.max}"
-          onchange="saveAgentSetting('${key}', this.value, this)">
+        <input type="${inputType}" class="s-input" style="${inputStyle}"
+          value="${escapeHtml(String(info.value))}" ${!isStr ? `min="${info.min}" max="${info.max}"` : `placeholder="${escapeHtml(String(info.default))}"`}
+          onchange="saveAgentSetting('${key}', this.value, this, '${info.type}')">
       `;
       container.appendChild(row);
     }
   } catch(e) { console.error('Failed to load settings', e); }
 }
 
-async function saveAgentSetting(key, value, el) {
+async function saveAgentSetting(key, value, el, type) {
   try {
+    const parsed = type === 'str' ? value : (type === 'float' ? parseFloat(value) : parseInt(value));
     const res = await fetch('/api/settings', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({[key]: parseInt(value)})
+      body: JSON.stringify({[key]: parsed})
     });
     const data = await res.json();
     const result = data.results[key];
@@ -2768,6 +2983,13 @@ function addMessage(role, text, meta, imageSrc) {
       p.push(`<span style="color:var(--accent)">&#9889; via ${escapeHtml(meta.fallback_model)}</span>`);
     }
     m.innerHTML = p.join(' · '); div.appendChild(m);
+    // Audio player for TTS responses
+    if (meta.audio_url) {
+      const audioDiv = document.createElement('div');
+      audioDiv.className = 'msg-audio';
+      audioDiv.innerHTML = `<audio controls preload="none" src="${escapeHtml(meta.audio_url)}"></audio>`;
+      div.appendChild(audioDiv);
+    }
   }
   chat.appendChild(div); chat.scrollTop = chat.scrollHeight;
 }
@@ -2828,6 +3050,87 @@ input.addEventListener('paste', (e) => {
     }
   }
 });
+
+// ── Voice Recording ──
+let mediaRecorder = null;
+let audioChunks = [];
+let recTimerInterval = null;
+let recStartTime = 0;
+
+// Check STT availability and show mic button
+(async function checkVoice() {
+  try {
+    const r = await fetch('/api/voice/status');
+    const s = await r.json();
+    if (s.stt) document.getElementById('micBtn').style.display = '';
+  } catch(e) {}
+})();
+
+function toggleRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
+  else startRecording();
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    audioChunks = [];
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      sendAudioToSTT();
+    };
+    mediaRecorder.start();
+    document.getElementById('micBtn').classList.add('recording');
+    document.getElementById('recBar').classList.add('active');
+    recStartTime = Date.now();
+    recTimerInterval = setInterval(updateRecTimer, 1000);
+    updateRecTimer();
+  } catch (err) {
+    console.error('Microphone access denied:', err);
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+  document.getElementById('micBtn').classList.remove('recording');
+  document.getElementById('recBar').classList.remove('active');
+  clearInterval(recTimerInterval);
+}
+
+function updateRecTimer() {
+  const elapsed = Math.floor((Date.now() - recStartTime) / 1000);
+  document.getElementById('recTimer').textContent = `${Math.floor(elapsed/60)}:${(elapsed%60).toString().padStart(2,'0')}`;
+}
+
+async function sendAudioToSTT() {
+  if (audioChunks.length === 0) return;
+  const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+  const ext = (mediaRecorder.mimeType || '').includes('webm') ? 'webm' : 'ogg';
+  addMessage('status', 'Transcribing voice...');
+  try {
+    const formData = new FormData();
+    formData.append('file', blob, `voice.${ext}`);
+    const resp = await fetch('/api/transcribe', { method: 'POST', body: formData });
+    const data = await resp.json();
+    removeStatus();
+    if (data.error) {
+      addMessage('status', `STT: ${data.error}`);
+      return;
+    }
+    if (data.text && data.text.trim()) {
+      input.value = data.text.trim();
+      send();
+    }
+  } catch (err) {
+    removeStatus();
+    addMessage('status', `Transcription failed: ${err.message}`);
+  }
+}
 
 // ── Send ──
 function send() {

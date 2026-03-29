@@ -939,6 +939,26 @@ def send_message(chat_id: int, text: str, token: str | None = None,
             _log.warning("sent as plain text (all formatting failed)")
 
 
+def _send_voice(chat_id: int, audio_bytes: bytes, token: str,
+                reply_to: int | None = None, topic_id: int | None = None):
+    """Send a voice message (ogg/opus) to a Telegram chat via multipart upload."""
+    import io
+    url = f"https://api.telegram.org/bot{token}/sendVoice"
+    data = {"chat_id": chat_id}
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
+    if topic_id:
+        data["message_thread_id"] = topic_id
+    files = {"voice": ("voice.ogg", io.BytesIO(audio_bytes), "audio/ogg")}
+    try:
+        r = requests.post(url, data=data, files=files, timeout=60)
+        result = r.json()
+        if not result.get("ok"):
+            _log.warning(f"sendVoice failed: {result.get('description', '')}")
+    except Exception as e:
+        _log.error(f"sendVoice error: {e}")
+
+
 def get_me(token: str | None = None) -> dict:
     """Get bot info."""
     token = token or get_token()
@@ -1049,6 +1069,33 @@ def _handle_update(update: dict, token: str, bot_username: str):
                 _log.info(f"photo received from @{username} ({len(image_data)} bytes)")
         except Exception as e:
             _log.error(f"photo download failed: {e}")
+
+    # Handle voice messages — download, transcribe to text
+    is_voice = False
+    voice = msg.get("voice") or msg.get("audio")
+    if voice and not text:
+        try:
+            import stt
+            if not stt.is_available():
+                send_message(chat_id, "🎤 Voice not supported — install faster-whisper:\n`pip install faster-whisper`", token, topic_id=topic_id)
+                return
+            file_id = voice["file_id"]
+            file_info = _api("getFile", get_token(), file_id=file_id)
+            if file_info and file_info.get("ok"):
+                file_path = file_info["result"]["file_path"]
+                url = f"https://api.telegram.org/file/bot{get_token()}/{file_path}"
+                audio_data = requests.get(url, timeout=30).content
+                fmt = file_path.rsplit(".", 1)[-1] if "." in file_path else "ogg"
+                text = stt.transcribe(audio_data, format=fmt)
+                if text.startswith("[STT Error]"):
+                    send_message(chat_id, text, token, topic_id=topic_id)
+                    return
+                is_voice = True
+                _log.info(f"voice transcribed from @{username} ({len(audio_data)}b): {text[:100]}")
+        except Exception as e:
+            _log.error(f"voice transcription failed: {e}")
+            send_message(chat_id, "⚠️ Failed to transcribe voice message.", token, topic_id=topic_id)
+            return
 
     if not text and not image_b64:
         return
@@ -1172,12 +1219,13 @@ def _handle_update(update: dict, token: str, bot_username: str):
 
         _process_message(chat_id, text, user_id, username, message_id, token,
                          topic_id=topic_id, thread_id=thread_id,
-                         image_b64=image_b64)
+                         image_b64=image_b64, is_voice=is_voice)
 
 
 def _process_message(chat_id: int, text: str, user_id: int, username: str,
                      message_id: int, token: str, topic_id: int | None = None,
-                     thread_id: str | None = None, image_b64: str | None = None):
+                     thread_id: str | None = None, image_b64: str | None = None,
+                     is_voice: bool = False):
     """Route message to agent and send response."""
     _log.info(f"processing: @{username} in {chat_id}" +
               (f" topic={topic_id}" if topic_id else "") +
@@ -1232,6 +1280,16 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             if response:
                 typing_active.clear()  # stop typing before sending
                 send_message(chat_id, response, token, reply_to=message_id, topic_id=topic_id)
+                # TTS: send voice reply if incoming was voice
+                if is_voice:
+                    try:
+                        import tts
+                        if tts.is_available():
+                            audio = tts.synthesize(response, format="opus")
+                            if audio:
+                                _send_voice(chat_id, audio, token, reply_to=message_id, topic_id=topic_id)
+                    except Exception as e:
+                        _log.error(f"TTS failed: {e}")
         except Exception as e:
             _log.error(f"handler error: {e}", exc_info=True)
             typing_active.clear()

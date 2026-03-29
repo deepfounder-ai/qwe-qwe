@@ -38,7 +38,7 @@ _knowledge_lock = threading.Lock()
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 import config
 import db
@@ -285,6 +285,116 @@ async def upload_image(request: Request):
     b64 = base64.b64encode(data).decode()
     _log.info(f"image uploaded: {image_id} ({len(data)} bytes)")
     return {"image_id": image_id, "b64": b64}
+
+
+@app.post("/api/transcribe")
+async def transcribe_audio(request: Request):
+    """Transcribe audio to text via STT."""
+    import stt
+    if not stt.is_available():
+        return JSONResponse({"error": "STT not available. Install: pip install faster-whisper"}, status_code=503)
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart" in content_type:
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "no file"}, status_code=400)
+        data = await file.read(_MAX_UPLOAD_BYTES + 1)
+        if len(data) > _MAX_UPLOAD_BYTES:
+            return JSONResponse({"error": "file too large"}, status_code=413)
+        filename = file.filename or "audio.webm"
+    else:
+        body = await request.json()
+        data = base64.b64decode(body.get("audio_b64", ""))
+        if len(data) > _MAX_UPLOAD_BYTES:
+            return JSONResponse({"error": "file too large"}, status_code=413)
+        filename = f"audio.{body.get('format', 'webm')}"
+
+    fmt = Path(filename).suffix.lstrip(".") or "webm"
+    import functools
+    loop = asyncio.get_event_loop()
+    try:
+        text = await loop.run_in_executor(
+            None, functools.partial(stt.transcribe, data, format=fmt)
+        )
+    except Exception as e:
+        _log.error(f"transcription error: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    if text.startswith("[STT Error]"):
+        return JSONResponse({"error": text}, status_code=500)
+    return {"text": text}
+
+
+@app.post("/api/tts")
+async def text_to_speech(request: Request):
+    """Synthesize text to audio via Fish Audio TTS."""
+    import tts
+    if not tts.is_available():
+        return JSONResponse({"error": "TTS not configured"}, status_code=503)
+
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return JSONResponse({"error": "empty text"}, status_code=400)
+
+    import functools
+    loop = asyncio.get_event_loop()
+    audio = await loop.run_in_executor(
+        None, functools.partial(tts.synthesize, text, format="mp3")
+    )
+    if not audio:
+        return JSONResponse({"error": "TTS synthesis failed"}, status_code=500)
+
+    return Response(content=audio, media_type="audio/mpeg",
+                    headers={"Content-Disposition": "inline; filename=voice.mp3"})
+
+
+@app.get("/api/voice/status")
+async def voice_status():
+    """Check STT/TTS availability with details."""
+    import stt, tts
+    # Check faster-whisper
+    has_whisper = stt._check_faster_whisper()
+    # Check ffmpeg
+    import shutil
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+    return {
+        "stt": stt.is_available(),
+        "tts": tts.is_available(),
+        "has_whisper": has_whisper,
+        "has_ffmpeg": has_ffmpeg,
+        "stt_model": config.get("stt_model"),
+        "stt_language": config.get("stt_language"),
+        "stt_openai_key": bool(config.get("stt_openai_key")),
+        "tts_enabled": str(config.get("tts_enabled")) == "1",
+        "tts_api_key": bool(config.get("tts_api_key")),
+        "tts_voice_id": config.get("tts_voice_id"),
+        "tts_api_url": config.get("tts_api_url"),
+    }
+
+
+@app.post("/api/voice/install-whisper")
+async def install_whisper():
+    """Install faster-whisper via pip."""
+    import subprocess
+    try:
+        proc = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: subprocess.run(
+                [sys.executable, "-m", "pip", "install", "faster-whisper"],
+                capture_output=True, text=True, timeout=300
+            )
+        )
+        if proc.returncode == 0:
+            # Reset cached import check
+            import stt as _stt_mod
+            _stt_mod._HAS_FASTER_WHISPER = None
+            _stt_mod._check_faster_whisper()
+            return {"ok": True, "message": "faster-whisper installed successfully"}
+        return {"ok": False, "error": proc.stderr[:500]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/")
@@ -1343,8 +1453,25 @@ async def websocket_chat(ws: WebSocket):
                                             image_path=image_path)
                 )
 
+                # TTS: synthesize voice for reply if enabled
+                audio_url = None
+                try:
+                    import tts
+                    if tts.is_available() and result["reply"]:
+                        audio_data = await loop.run_in_executor(
+                            None, functools.partial(tts.synthesize, result["reply"], format="mp3")
+                        )
+                        if audio_data:
+                            import uuid as _uuid
+                            audio_id = str(_uuid.uuid4())[:8]
+                            audio_file = UPLOADS_DIR / f"{audio_id}.mp3"
+                            audio_file.write_bytes(audio_data)
+                            audio_url = f"/uploads/{audio_id}.mp3"
+                except Exception as e:
+                    _log.debug(f"ws TTS skipped: {e}")
+
                 # Send reply — abort if client disconnected
-                if not await _ws_send_safe(ws, {
+                reply_payload = {
                     "type": "reply",
                     "text": result["reply"],
                     "thinking": result.get("thinking", ""),
@@ -1352,7 +1479,10 @@ async def websocket_chat(ws: WebSocket):
                     "duration_ms": result["duration_ms"],
                     "context_hits": result["context_hits"],
                     "thread_id": result["thread_id"],
-                }):
+                }
+                if audio_url:
+                    reply_payload["audio_url"] = audio_url
+                if not await _ws_send_safe(ws, reply_payload):
                     break
 
             except Exception as e:
