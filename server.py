@@ -888,6 +888,36 @@ async def update_settings(request: Request):
     return {"results": results}
 
 
+@app.get("/api/config/export")
+async def export_config_endpoint():
+    """Export all settings as downloadable JSON."""
+    import time
+    data = config.export_config()
+    filename = f"qwe-qwe-config-{time.strftime('%Y%m%d')}.json"
+    return Response(
+        content=json.dumps(data, indent=2, ensure_ascii=False),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.post("/api/config/import")
+async def import_config_endpoint(request: Request):
+    """Import settings from JSON. Accepts multipart file or JSON body."""
+    content_type = request.headers.get("content-type", "")
+    if "multipart" in content_type:
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "no file"}, status_code=400)
+        raw = await file.read()
+        data = json.loads(raw)
+    else:
+        data = await request.json()
+    results = config.import_config(data)
+    return {"results": results, "count": len(results)}
+
+
 # ── Provider/Model endpoints ──
 
 @app.get("/api/providers")

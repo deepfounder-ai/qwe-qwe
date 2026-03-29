@@ -201,6 +201,103 @@ def set(key: str, value) -> str:
     return f"✓ {key} = {v}"
 
 
+def export_config() -> dict:
+    """Export all settings, provider, soul, heartbeat as JSON-serializable dict."""
+    import db, json, time
+
+    # Settings
+    settings = {}
+    for key in EDITABLE_SETTINGS:
+        settings[key] = get(key)
+
+    # Provider
+    try:
+        import providers
+        provider_data = {
+            "active": providers.get_active_name(),
+            "model": providers.get_model(),
+        }
+        p = providers.get_provider()
+        if p:
+            provider_data["url"] = p.get("url", "")
+            provider_data["key"] = p.get("key", "")
+    except Exception:
+        provider_data = {}
+
+    # Soul
+    try:
+        import soul
+        soul_data = soul.load()
+    except Exception:
+        soul_data = {}
+
+    # Heartbeat
+    hb_enabled = db.kv_get("heartbeat:enabled") != "0"
+    raw_items = db.kv_get("heartbeat:items")
+    hb_items = json.loads(raw_items) if raw_items else []
+
+    # Scheduled tasks
+    try:
+        import scheduler
+        tasks = scheduler.list_tasks()
+    except Exception:
+        tasks = []
+
+    return {
+        "meta": {"version": VERSION, "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
+        "settings": settings,
+        "provider": provider_data,
+        "soul": soul_data,
+        "heartbeat": {"enabled": hb_enabled, "items": hb_items},
+        "cron": tasks,
+    }
+
+
+def import_config(data: dict) -> list[str]:
+    """Import settings from exported dict. Returns list of applied changes."""
+    import db, json
+    results = []
+
+    # Settings
+    for key, value in data.get("settings", {}).items():
+        if key in EDITABLE_SETTINGS:
+            r = set(key, value)
+            results.append(r)
+
+    # Provider
+    prov = data.get("provider", {})
+    if prov.get("active"):
+        try:
+            import providers
+            providers.switch(prov["active"])
+            results.append(f"✓ provider = {prov['active']}")
+            if prov.get("model"):
+                providers.set_model(prov["model"])
+                results.append(f"✓ model = {prov['model']}")
+        except Exception as e:
+            results.append(f"✗ provider: {e}")
+
+    # Soul
+    soul_data = data.get("soul")
+    if soul_data and isinstance(soul_data, dict):
+        try:
+            import soul
+            soul.save(soul_data)
+            results.append("✓ soul traits restored")
+        except Exception as e:
+            results.append(f"✗ soul: {e}")
+
+    # Heartbeat
+    hb = data.get("heartbeat")
+    if hb and isinstance(hb, dict):
+        db.kv_set("heartbeat:enabled", "1" if hb.get("enabled") else "0")
+        if hb.get("items"):
+            db.kv_set("heartbeat:items", json.dumps(hb["items"]))
+        results.append("✓ heartbeat restored")
+
+    return results
+
+
 def get_all() -> dict:
     """Get all editable settings with current values and metadata."""
     result = {}

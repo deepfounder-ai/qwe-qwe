@@ -981,9 +981,22 @@ def main_entry():
     parser.add_argument("--setup-inference", action="store_true", help="Setup inference backend (Ollama)")
     parser.add_argument("--host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=7860, help="Web server port (default: 7860)")
+    parser.add_argument("--export-config", action="store_true", help="Export settings to JSON (stdout)")
+    parser.add_argument("--import-config", type=str, metavar="FILE", help="Import settings from JSON file")
     args = parser.parse_args()
 
-    if args.update:
+    if args.export_config:
+        import json, config
+        print(json.dumps(config.export_config(), indent=2, ensure_ascii=False))
+    elif args.import_config:
+        import json, config
+        from pathlib import Path
+        data = json.loads(Path(args.import_config).read_text())
+        results = config.import_config(data)
+        for r in results:
+            print(r)
+        print(f"\n{len(results)} settings applied.")
+    elif args.update:
         _run_update_cli()
     elif args.setup_inference:
         import inference_setup

@@ -535,15 +535,15 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         key = f"voice_mode:{chat_id}"
         current = db.kv_get(key) == "1"
         new_val = not current
-        db.kv_set(key, "1" if new_val else "0")
         import tts
         if new_val and not tts.is_available():
-            db.kv_set(key, "0")
-            send_message(chat_id, "🎤 TTS not available. Configure s2.cpp model in Settings → Voice.", token, topic_id=topic_id)
-        elif new_val:
-            send_message(chat_id, "🎤 Voice mode: **ON**\nAll responses will include voice.", token, topic_id=topic_id)
+            send_message(chat_id, "TTS not available.\n\ntts_enabled = " + str(config.get("tts_enabled")) + "\ntts_api_url = " + (config.get("tts_api_url") or "(empty)") + "\n\nEnable TTS and set API URL in Settings → Voice.", token, topic_id=topic_id)
+            return True
+        db.kv_set(key, "1" if new_val else "0")
+        if new_val:
+            send_message(chat_id, "Voice mode ON\nAll responses will include voice.", token, topic_id=topic_id)
         else:
-            send_message(chat_id, "🔇 Voice mode: **OFF**\nText-only responses.", token, topic_id=topic_id)
+            send_message(chat_id, "Voice mode OFF\nText-only responses.", token, topic_id=topic_id)
         return True
 
     if cmd == "thinking":
@@ -955,50 +955,24 @@ def send_message(chat_id: int, text: str, token: str | None = None,
             _log.warning("sent as plain text (all formatting failed)")
 
 
-def _wav_to_ogg(wav_bytes: bytes) -> bytes | None:
-    """Convert WAV to OGG/Opus via ffmpeg for Telegram sendVoice."""
-    import tempfile
-    from pathlib import Path
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as inp:
-        inp.write(wav_bytes)
-        inp_path = inp.name
-    out_path = inp_path + ".ogg"
-    try:
-        import subprocess
-        proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", inp_path, "-c:a", "libopus", "-b:a", "64k", out_path],
-            capture_output=True, timeout=30,
-        )
-        if proc.returncode != 0:
-            _log.error("ffmpeg wav→ogg failed: %s", proc.stderr.decode(errors="replace")[:300])
-            return None
-        return Path(out_path).read_bytes()
-    except Exception as e:
-        _log.error("wav→ogg conversion error: %s", e)
-        return None
-    finally:
-        Path(inp_path).unlink(missing_ok=True)
-        Path(out_path).unlink(missing_ok=True)
-
-
-def _send_voice(chat_id: int, audio_bytes: bytes, token: str,
+def _send_audio(chat_id: int, audio_bytes: bytes, token: str,
                 reply_to: int | None = None, topic_id: int | None = None):
-    """Send a voice message (ogg/opus) to a Telegram chat via multipart upload."""
+    """Send an audio file (mp3) to a Telegram chat via multipart upload."""
     import io
-    url = f"https://api.telegram.org/bot{token}/sendVoice"
-    data = {"chat_id": chat_id}
+    url = f"https://api.telegram.org/bot{token}/sendAudio"
+    data = {"chat_id": chat_id, "title": "Voice reply"}
     if reply_to:
         data["reply_to_message_id"] = reply_to
     if topic_id:
         data["message_thread_id"] = topic_id
-    files = {"voice": ("voice.ogg", io.BytesIO(audio_bytes), "audio/ogg")}
+    files = {"audio": ("voice.mp3", io.BytesIO(audio_bytes), "audio/mpeg")}
     try:
         r = requests.post(url, data=data, files=files, timeout=60)
         result = r.json()
         if not result.get("ok"):
-            _log.warning(f"sendVoice failed: {result.get('description', '')}")
+            _log.warning(f"sendAudio failed: {result.get('description', '')}")
     except Exception as e:
-        _log.error(f"sendVoice error: {e}")
+        _log.error(f"sendAudio error: {e}")
 
 
 def get_me(token: str | None = None) -> dict:
@@ -1329,11 +1303,14 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
                     try:
                         import tts
                         if tts.is_available():
-                            wav_audio = tts.synthesize(response, format="wav")
-                            # Convert WAV → OGG/Opus for Telegram
-                            audio = _wav_to_ogg(wav_audio) if wav_audio else None
+                            audio = tts.synthesize(response, format="mp3")
                             if audio:
-                                _send_voice(chat_id, audio, token, reply_to=message_id, topic_id=topic_id)
+                                _send_audio(chat_id, audio, token, reply_to=message_id, topic_id=topic_id)
+                                _log.info(f"TTS voice sent to {chat_id} ({len(audio)} bytes)")
+                            else:
+                                _log.warning("TTS returned None — server may be down")
+                        else:
+                            _log.warning(f"TTS not available for voice mode in {chat_id}")
                     except Exception as e:
                         _log.error(f"TTS failed: {e}")
         except Exception as e:

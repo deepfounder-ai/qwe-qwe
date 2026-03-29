@@ -1122,6 +1122,16 @@ body {
           <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">Fine-tune agent behavior. Changes take effect immediately.</p>
           <div id="agentSettings">Loading...</div>
         </div>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-database"></i> Config Backup</div>
+          <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">Export settings to keep them safe across updates. Import to restore.</p>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="s-btn primary" onclick="exportConfig()"><i class="ph ph-export"></i> Export</button>
+            <button class="s-btn" onclick="document.getElementById('configImportFile').click()"><i class="ph ph-upload-simple"></i> Import</button>
+            <input type="file" id="configImportFile" accept=".json" style="display:none" onchange="importConfig(this)">
+            <span id="configBackupStatus" style="font-size:12px;"></span>
+          </div>
+        </div>
         <div class="s-card" id="updateCard">
           <div class="s-card-title"><i class="ph ph-download-simple"></i> Update</div>
           <div class="s-row">
@@ -2239,6 +2249,29 @@ async function resetStats() {
   if (!confirm('Reset all counters to zero?')) return;
   await fetch('/api/stats/reset', {method:'POST'});
   loadSettingsStats();
+}
+
+// ── Config Export/Import ──
+function exportConfig() {
+  window.location.href = '/api/config/export';
+}
+
+async function importConfig(inp) {
+  const file = inp.files[0];
+  if (!file) return;
+  const st = document.getElementById('configBackupStatus');
+  st.innerHTML = '<i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> Importing...';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/config/import', { method: 'POST', body: formData });
+    const data = await res.json();
+    st.innerHTML = `<span style="color:var(--green)">${data.count} settings restored</span>`;
+    loadAllSettings();
+  } catch(e) {
+    st.innerHTML = `<span style="color:var(--error)">Import failed: ${e.message}</span>`;
+  }
+  inp.value = '';
 }
 
 async function loadAgentSettings() {
