@@ -887,6 +887,67 @@ def _run_doctor_checks() -> str:
     active_skills = skills.get_active()
     ok("Skills", f"{len(active_skills)} active")
 
+    # Scheduler & Heartbeat
+    try:
+        import scheduler
+        tasks = scheduler.list_tasks()
+        ok("Cron", f"{len(tasks)} tasks")
+    except Exception:
+        warn("Cron", "scheduler not available")
+
+    hb_enabled = _db.kv_get("heartbeat:enabled") != "0"
+    raw = _db.kv_get("heartbeat:items")
+    import json as _json
+    hb_items = _json.loads(raw) if raw else []
+    ok("Heartbeat", f"{'ON' if hb_enabled else 'OFF'}, {len(hb_items)} items")
+
+    # Voice (STT / TTS)
+    try:
+        import stt
+        if stt._check_faster_whisper():
+            import shutil
+            if shutil.which("ffmpeg"):
+                ok("STT", f"whisper + ffmpeg (model: {config.get('stt_model')})")
+            else:
+                warn("STT", "faster-whisper OK, ffmpeg missing")
+        else:
+            warn("STT", "faster-whisper not installed")
+    except Exception:
+        warn("STT", "module not available")
+
+    try:
+        import tts
+        if tts.is_available():
+            url = config.get("tts_api_url") or ""
+            import requests as _req2
+            try:
+                _req2.get(url, timeout=3)
+                ok("TTS", f"server reachable at {url}")
+            except Exception:
+                warn("TTS", f"server unreachable at {url}")
+        elif str(config.get("tts_enabled")) != "1":
+            warn("TTS", "disabled")
+        else:
+            warn("TTS", "no API URL configured")
+    except Exception:
+        warn("TTS", "module not available")
+
+    # BM25 / FTS5
+    try:
+        rag_count = _db.fetchone("SELECT COUNT(*) FROM fts_rag")[0]
+        mem_count = _db.fetchone("SELECT COUNT(*) FROM fts_memory")[0]
+        ok("BM25", f"{rag_count} rag + {mem_count} memory entries")
+    except Exception:
+        warn("BM25", "FTS5 tables not found")
+
+    # RAG / Knowledge
+    try:
+        import rag
+        stats = rag.stats()
+        ok("RAG", f"{stats.get('total_chunks', 0)} chunks, {stats.get('total_files', 0)} files")
+    except Exception:
+        warn("RAG", "not available")
+
     # Disk
     try:
         import shutil

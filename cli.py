@@ -924,7 +924,84 @@ def doctor():
         return f"✓ {len(all_tools)} tools registered"
     check("Tools", _check_tools)
 
-    # ── 11. Disk ──
+    # ── 11. Scheduler & Heartbeat ──
+    console.print("  [dim]── Scheduler ──[/]")
+    def _check_scheduler():
+        try:
+            import scheduler
+            tasks = scheduler.list_tasks()
+            return f"✓ {len(tasks)} scheduled tasks"
+        except Exception as e:
+            return f"⚠ {e}"
+    check("Cron", _check_scheduler)
+
+    def _check_heartbeat():
+        hb_enabled = db.kv_get("heartbeat:enabled") != "0"
+        raw = db.kv_get("heartbeat:items")
+        import json
+        items = json.loads(raw) if raw else []
+        status = "ON" if hb_enabled else "OFF"
+        return f"✓ {status}, {len(items)} items"
+    check("Heartbeat", _check_heartbeat)
+
+    # ── 12. Voice (STT/TTS) ──
+    console.print("  [dim]── Voice ──[/]")
+    def _check_stt():
+        try:
+            import stt
+            if not stt._check_faster_whisper():
+                return "⚠ faster-whisper not installed (pip install faster-whisper)"
+            import shutil
+            if not shutil.which("ffmpeg"):
+                return "⚠ ffmpeg not found"
+            return f"✓ faster-whisper + ffmpeg (model: {config.get('stt_model')})"
+        except Exception:
+            return "⚠ stt module not available"
+    check("STT", _check_stt)
+
+    def _check_tts():
+        try:
+            import tts
+            if str(config.get("tts_enabled")) != "1":
+                return "⚠ disabled (set tts_enabled=1)"
+            url = config.get("tts_api_url") or ""
+            if not url:
+                return "⚠ no tts_api_url configured"
+            import requests as _req
+            try:
+                r = _req.get(url, timeout=3)
+                return f"✓ server reachable at {url}"
+            except _req.ConnectionError:
+                return f"⚠ server not reachable at {url}"
+        except Exception:
+            return "⚠ tts module not available"
+    check("TTS", _check_tts)
+
+    # ── 13. RAG / Knowledge ──
+    console.print("  [dim]── Knowledge ──[/]")
+    def _check_rag():
+        try:
+            import rag
+            stats = rag.stats()
+            return f"✓ {stats.get('total_chunks', 0)} chunks, {stats.get('total_files', 0)} files"
+        except Exception:
+            try:
+                count = db.fetchone("SELECT COUNT(*) FROM fts_rag")[0]
+                return f"✓ {count} FTS entries"
+            except Exception:
+                return "⚠ no indexed knowledge"
+    check("RAG", _check_rag)
+
+    def _check_fts():
+        try:
+            count = db.fetchone("SELECT COUNT(*) FROM fts_rag")[0]
+            mem_count = db.fetchone("SELECT COUNT(*) FROM fts_memory")[0]
+            return f"✓ BM25 index: {count} rag + {mem_count} memory entries"
+        except Exception:
+            return "⚠ FTS5 tables not found (BM25 not active)"
+    check("BM25", _check_fts)
+
+    # ── 14. Disk ──
     console.print("  [dim]── System ──[/]")
     def _check_disk():
         import shutil
