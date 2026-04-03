@@ -386,6 +386,11 @@ TOOLS = [
 def execute(name: str, args: dict) -> str:
     """Execute a tool and return result as string."""
     try:
+        # MCP tools: mcp__servername__toolname
+        if name.startswith("mcp__"):
+            import mcp_client
+            return mcp_client.execute_mcp_tool(name, args)
+
         if name == "memory_search":
             results = memory.search(args["query"], tag=args.get("tag"))
             if not results:
@@ -447,7 +452,7 @@ def execute(name: str, args: dict) -> str:
                 timeout=t, env=env, cwd=str(WORKSPACE),
                 stdin=subprocess.DEVNULL  # prevent interactive prompts
             )
-            output = result.stdout
+            output = result.stdout or ""
             if result.stderr:
                 output += f"\nSTDERR: {result.stderr}"
             if result.returncode != 0:
@@ -632,6 +637,12 @@ def execute(name: str, args: dict) -> str:
 
 
 def get_all_tools(compact: bool = False) -> list[dict]:
-    """Get base tools + active skill tools."""
+    """Get base tools + active skill tools + MCP tools."""
     import skills
-    return TOOLS + skills.get_tools(compact=compact)
+    all_tools = TOOLS + skills.get_tools(compact=compact)
+    try:
+        import mcp_client
+        all_tools += mcp_client.get_all_mcp_tools()
+    except Exception:
+        pass
+    return all_tools

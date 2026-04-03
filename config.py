@@ -142,9 +142,9 @@ THINKING_ENABLED = False   # send enable_thinking to model (toggle via /thinking
 EDITABLE_SETTINGS = {
     "max_history_messages": ("setting:max_history_messages", int, 10, "Messages kept in context", 2, 50),
     "max_memory_results":   ("setting:max_memory_results",   int, 3,  "Memory results per turn", 0, 10),
-    "max_tool_rounds":      ("setting:max_tool_rounds",      int, 10, "Max tool call rounds", 1, 30),
+    "max_tool_rounds":      ("setting:max_tool_rounds",      int, 10, "Max tool call rounds", 1, None),
     "compaction_threshold": ("setting:compaction_threshold",  int, 20, "Auto-compact after N messages", 5, 100),
-    "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 4000, None),
+    "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 1000, None),
     "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, 5),
     "self_check_enabled":   ("setting:self_check_enabled",    int, 1,     "Self-check before shell/write_file (0=off, 1=on)", 0, 1),
     "heartbeat_interval_min": ("setting:heartbeat_interval_min", int, 30, "Heartbeat interval in minutes", 5, 1440),

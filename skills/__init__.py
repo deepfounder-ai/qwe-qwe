@@ -86,11 +86,14 @@ def list_all() -> list[dict]:
     return skills
 
 
+_DEFAULT_SKILLS = {"mcp_manager", "soul_editor", "skill_creator"}  # always-on built-in skills
+
+
 def get_active() -> set[str]:
     """Get set of active skill names from SQLite. Cleans stale entries."""
     raw = db.kv_get("active_skills")
     if not raw:
-        return set()
+        return set(_DEFAULT_SKILLS)
     names = set(raw.split(","))
     all_paths = _all_skill_paths()
     valid = {n for n in names if n in all_paths}

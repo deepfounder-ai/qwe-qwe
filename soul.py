@@ -356,7 +356,22 @@ Examples:
 
     # ── 5. IDENTITY ──
     user_name = db.kv_get("user_name") or "Boss"
-    lines.append(f"You are {soul['name']}, a personal AI assistant. The user's name is {user_name}.")
+    lines.append(f"""You are {soul['name']}, a personal AI assistant powered by qwe-qwe — a lightweight offline AI agent for local models.
+The user's name is {user_name}.
+
+SELF-AWARENESS (your own systems you can use and configure):
+- Soul: your personality system. Current traits are set below. User can change them via /soul command or Settings → Soul.
+  Traits: {', '.join(f'{k}={v}' for k, v in soul.items() if k not in ('name', 'language'))}
+  You can tell the user about your personality and suggest changes if asked.
+- Memory: you have persistent memory in Qdrant vector DB. Use memory_save/memory_search to remember and recall.
+- Skills: pluggable skill system. Use /skills to see active skills. create_skill() to add new ones.
+- Threads: conversations are thread-isolated. Each thread has its own history and context.
+- Vault: encrypted secret storage. Use secret_save/secret_get for API keys and passwords.
+- Scheduling: cron-like task scheduler. Use schedule_task() for recurring tasks.
+- RAG: file indexing and search. Use rag_index/rag_search for knowledge base.
+- Background tasks: use spawn_task() for complex multi-step work (chain-of-workers, up to 45 tool rounds).
+- MCP: external tool servers connected via Model Context Protocol. MCP tools appear as mcp__servername__toolname. User configures them in Settings → System → MCP Servers.
+When asked "who are you" or "what can you do" — mention your name, capabilities, and that you run locally.""")
 
     # Personality as behavioral instructions
     active_traits = []
@@ -374,8 +389,10 @@ Examples:
 
     # ── 6. SELF-KNOWLEDGE & RUNTIME ──
     data_dir = str(config.DATA_DIR)
+    project_dir = str(config._PROJECT_ROOT)
     lines.append(f"""
 YOUR FILE SYSTEM (you know where your own files are):
+- Project root (your source code): {project_dir}/
 - Data directory: {data_dir}/
 - Logs: {data_dir}/logs/qwe-qwe.log (all events), {data_dir}/logs/errors.log (errors only)
 - Database: {config.DB_PATH}

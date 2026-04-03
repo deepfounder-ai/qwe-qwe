@@ -161,9 +161,20 @@ async def lifespan(app: FastAPI):
     # Startup
     import scheduler
     scheduler.start()
+    # Start MCP servers
+    try:
+        import mcp_client
+        mcp_client.start_all()
+    except Exception as e:
+        _log.warning(f"MCP startup: {e}")
     _log.info("web server started")
     yield
     # Shutdown
+    try:
+        import mcp_client
+        mcp_client.stop_all()
+    except Exception:
+        pass
     _log.info("web server stopped")
 
 
@@ -1611,9 +1622,11 @@ async def websocket_chat(ws: WebSocket):
                     break
 
     except WebSocketDisconnect:
-        pass
+        _abort_event.set()  # abort agent if client disconnected
+        _log.info("websocket client disconnected — aborting agent")
     except (ConnectionResetError, RuntimeError, OSError):
-        _log.debug("websocket connection reset")
+        _abort_event.set()
+        _log.debug("websocket connection reset — aborting agent")
     except Exception as e:
         _log.error(f"websocket error: {e}", exc_info=True)
     finally:
@@ -1851,6 +1864,72 @@ async def inference_configure(request: Request):
     import inference_setup
     inference_setup.configure_provider(model)
     return {"ok": True, "message": f"Configured: ollama / {model}"}
+
+
+# ── MCP Server Management ──
+
+@app.get("/api/mcp/servers")
+async def mcp_list_servers():
+    """List all configured MCP servers with status."""
+    import mcp_client
+    return mcp_client.list_servers()
+
+
+@app.post("/api/mcp/servers")
+async def mcp_add_server(request: Request):
+    """Add or update an MCP server."""
+    import mcp_client
+    data = await request.json()
+    name = data.get("name", "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    mcp_client.add_server(
+        name,
+        command=data.get("command", ""),
+        args=data.get("args", []),
+        env=data.get("env", {}),
+        url=data.get("url", ""),
+        transport=data.get("transport", "stdio"),
+        enabled=data.get("enabled", True),
+    )
+    # Auto-start if enabled
+    if data.get("enabled", True):
+        result = mcp_client.start_server(name)
+        return {"ok": True, "message": result}
+    return {"ok": True, "message": f"MCP '{name}' saved (disabled)"}
+
+
+@app.delete("/api/mcp/servers/{name}")
+async def mcp_remove_server(name: str):
+    """Remove an MCP server."""
+    import mcp_client
+    return {"ok": True, "message": mcp_client.remove_server(name)}
+
+
+@app.post("/api/mcp/servers/{name}/restart")
+async def mcp_restart_server(name: str):
+    """Restart an MCP server connection."""
+    import mcp_client
+    result = mcp_client.start_server(name)
+    return {"ok": True, "message": result}
+
+
+@app.post("/api/mcp/servers/{name}/toggle")
+async def mcp_toggle_server(name: str, request: Request):
+    """Enable or disable an MCP server."""
+    import mcp_client
+    data = await request.json()
+    enabled = bool(data.get("enabled", True))
+    config = mcp_client.load_config()
+    if name not in config:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    config[name]["enabled"] = enabled
+    mcp_client.save_config(config)
+    if enabled:
+        result = mcp_client.start_server(name)
+    else:
+        result = mcp_client.stop_server(name)
+    return {"ok": True, "message": result}
 
 
 @app.get("/api/telegram/status")
