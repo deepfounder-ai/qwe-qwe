@@ -35,6 +35,18 @@ def _emit_thinking(text: str):
             pass
 
 
+_content_callback = None  # set by server.py / cli.py for live content streaming
+
+
+def _emit_content(text: str):
+    """Emit a content (reply) chunk to connected clients."""
+    if _content_callback:
+        try:
+            _content_callback(text)
+        except Exception:
+            pass
+
+
 def _resize_image_b64(b64: str, max_side: int = 512, quality: int = 80) -> str:
     """Resize image to fit within max_side px and re-encode as JPEG."""
     try:
@@ -1165,11 +1177,18 @@ def _run_inner(user_input: str, thread_id: str | None,
                     _console.print()  # newline after thinking block
                     in_think = False
                     _emit_status("✍️ writing reply...")
+                    # Emit any reply content after </think> in same chunk
+                    after_close = text.split("</think>", 1)[1] if "</think>" in text else ""
+                    if after_close:
+                        _emit_content(after_close)
                 elif in_think:
                     # Stream thinking chunk (skip partial tag fragments)
                     if text and not text.startswith("<"):
                         _console.print(f"  [dim]{text}[/]", end="")
                         _emit_thinking(text)
+                else:
+                    # Normal reply content — stream to clients
+                    _emit_content(text)
 
             # Stream tool calls
             if delta.tool_calls:

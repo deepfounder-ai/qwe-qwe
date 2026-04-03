@@ -46,16 +46,43 @@ fi
 source .venv/bin/activate
 
 # 3. Install package
-pip install -q -e "." 2>/dev/null
+pip install -q --upgrade pip 2>/dev/null
+pip install -q -e "." 2>/dev/null || pip install -q -r requirements.txt 2>/dev/null
 step "Installed qwe-qwe + dependencies"
 
-# 4. Create dirs
-mkdir -p logs
-mkdir -p memory
-mkdir -p skills
-step "Created directories (logs/, memory/, skills/)"
+# 4. Verify critical dependencies
+MISSING=""
+python3 -c "import cryptography" 2>/dev/null || MISSING="$MISSING cryptography"
+python3 -c "import openai" 2>/dev/null || MISSING="$MISSING openai"
+python3 -c "from qdrant_client import QdrantClient" 2>/dev/null || MISSING="$MISSING qdrant-client"
+python3 -c "from fastembed import TextEmbedding" 2>/dev/null || MISSING="$MISSING fastembed"
+python3 -c "import rich" 2>/dev/null || MISSING="$MISSING rich"
+python3 -c "import fastapi" 2>/dev/null || MISSING="$MISSING fastapi"
+python3 -c "import uvicorn" 2>/dev/null || MISSING="$MISSING uvicorn"
+python3 -c "import requests" 2>/dev/null || MISSING="$MISSING requests"
+python3 -c "from PIL import Image" 2>/dev/null || MISSING="$MISSING Pillow"
 
-# 5. Auto-discover LLM servers
+if [ -n "$MISSING" ]; then
+    warn "Missing packages:$MISSING — installing..."
+    pip install -q $MISSING 2>/dev/null
+    step "Installed missing packages"
+else
+    step "All dependencies verified"
+fi
+
+# 5. Pre-download embedding model (first run takes ~2min otherwise)
+info "Pre-loading embedding model (one-time, ~200MB)..."
+if python3 -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')" 2>/dev/null; then
+    step "Embedding model ready"
+else
+    warn "Embedding model download failed — will retry on first use"
+fi
+
+# 6. Create dirs
+mkdir -p logs memory skills uploads
+step "Created directories (logs/, memory/, skills/, uploads/)"
+
+# 7. Auto-discover LLM servers
 echo ""
 info "Searching for LLM servers..."
 LM_FOUND=false
@@ -76,7 +103,7 @@ if ! $LM_FOUND; then
     info "Or set QWE_LLM_URL=http://<ip>:<port>/v1"
 fi
 
-# 6. Summary
+# 8. Summary
 echo ""
 echo "  ─────────────────────"
 echo -e "  ${GREEN}Ready!${NC}"

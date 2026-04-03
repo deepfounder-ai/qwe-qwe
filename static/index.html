@@ -159,7 +159,7 @@ body {
 .toggle-switch input:checked + .toggle-track { background:var(--accent); }
 .toggle-switch input:checked + .toggle-track + .toggle-thumb { left:23px; }
 .msg.error { background: #2d1515; border: 1px solid var(--error); align-self: center; color: var(--error); font-size: 13px; }
-.msg.status { align-self: center; color: var(--text-dim); font-size: 12px; padding: 4px 12px; background: transparent; font-family: var(--mono); }
+.msg.status { align-self: flex-start; color: var(--text-dim); font-size: 14px; padding: 8px 16px; background: transparent; font-family: var(--mono); }
 .task-progress { border-left: 3px solid var(--accent); background: rgba(245,166,35,0.04); padding: 8px 14px; font-size: 13px; font-family: var(--mono); }
 .task-progress.task-done { border-left-color: #4ade80; background: rgba(74,222,128,0.04); }
 .task-progress-inner { display: flex; align-items: center; gap: 8px; }
@@ -176,9 +176,15 @@ body {
 .live-thinking-header { font-size: 11px; color: var(--accent-dim); margin-bottom: 4px; }
 .live-thinking-text { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; margin: 0; font-family: var(--mono); max-height: 300px; overflow-y: auto; line-height: 1.5; }
 @keyframes think-pulse { 0%,100% { border-left-color: var(--accent-dim); } 50% { border-left-color: var(--accent); } }
+.live-content { animation: think-pulse 2s ease-in-out infinite; border-left: 2px solid var(--accent-dim); }
+.live-content .msg-content { min-height: 1.2em; }
 .msg-meta { font-size: 11px; color: var(--text-dim); margin-top: 6px; font-family: var(--mono); }
 .msg-meta .tool-tag { display: inline-block; background: var(--surface2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 4px; margin-right: 4px; font-size: 10px; }
-.msg pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 8px 0; overflow-x: auto; font-family: var(--mono); font-size: 13px; }
+.msg pre { position: relative; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 8px 0; overflow-x: auto; font-family: var(--mono); font-size: 13px; }
+.code-copy { position: absolute; top: 6px; right: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 11px; color: var(--text-dim); cursor: pointer; opacity: 0; transition: opacity 0.15s; font-family: var(--sans); }
+.msg pre:hover .code-copy { opacity: 1; }
+.code-copy:hover { color: var(--accent); border-color: var(--accent); }
+.code-copy.copied { color: #4ade80; border-color: #4ade80; }
 .msg code { background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-family: var(--mono); font-size: 13px; }
 .msg pre code { background: transparent; padding: 0; }
 .msg p { margin: 4px 0; } .msg ul, .msg ol { padding-left: 20px; margin: 4px 0; }
@@ -1108,6 +1114,15 @@ body {
             </label>
           </div>
           <p style="color:var(--text-dim); font-size:11px; margin:8px 0 0;"><i class="ph ph-lightbulb"></i> In supergroups, each Telegram topic maps to a separate qwe-qwe thread with its own context</p>
+          <div class="s-row" style="margin-top:8px;">
+            <span class="s-row-label">Streaming in Telegram</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="tgStreaming" onchange="toggleTgStreaming(this.checked)">
+              <span class="toggle-track"></span>
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+          <p style="color:var(--text-dim); font-size:11px; margin:4px 0 0;"><i class="ph ph-lightning"></i> Stream tokens in real-time via editMessageText. Disable for slower connections.</p>
           <div style="margin-top:8px;">
             <label style="color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:1px;"><i class="ph ph-plus"></i> Add group by ID</label>
             <div class="s-input-row" style="margin-top:6px;">
@@ -1837,6 +1852,7 @@ async function loadTelegramStatus() {
     if (s.verified) {
       document.getElementById('tgGroupMode').value = s.group_mode;
       document.getElementById('tgTopics').checked = s.topics_enabled;
+      loadTgStreamingState();
       // Render allowed groups
       const groupList = document.getElementById('tgGroupList');
       groupList.innerHTML = (s.allowed_groups || []).map(g =>
@@ -2354,6 +2370,18 @@ async function toggleThinking() {
   btn.classList.toggle('on', !isOn);
 }
 
+async function toggleTgStreaming(enabled) {
+  await fetch('/api/streaming', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+}
+async function loadTgStreamingState() {
+  try {
+    const r = await fetch('/api/streaming');
+    const d = await r.json();
+    const el = document.getElementById('tgStreaming');
+    if (el) el.checked = d.enabled;
+  } catch(e) {}
+}
+
 // ── Cron ──
 async function loadCron() {
   try {
@@ -2424,6 +2452,26 @@ async function removeCron(id) {
 }
 
 // ── WebSocket ──
+let _liveContentRaw = '';       // accumulated raw text for live content streaming
+let _liveRenderTimer = null;    // debounce timer for markdown re-render
+const _LIVE_RENDER_MS = 80;     // debounce interval for live markdown render
+
+function _renderLiveContent() {
+  const el = document.getElementById('liveContent');
+  if (!el || !_liveContentRaw) return;
+  const target = el.querySelector('.msg-content');
+  if (target) {
+    target.innerHTML = renderMarkdown(_liveContentRaw);
+    chat.scrollTop = chat.scrollHeight;
+  }
+}
+
+function _clearLiveContent() {
+  document.getElementById('liveContent')?.remove();
+  _liveContentRaw = '';
+  if (_liveRenderTimer) { clearTimeout(_liveRenderTimer); _liveRenderTimer = null; }
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -2441,8 +2489,9 @@ function connect() {
     const data = JSON.parse(e.data);
     removeStatus();
     if (data.type === 'reply') {
-      // Remove live thinking block — final thinking is in data.thinking
+      // Remove live streaming elements — final content is in data.text
       document.getElementById('liveThinking')?.remove();
+      _clearLiveContent();
       addMessage('assistant', data.text, data);
       setGenerating(false); loadThreadStats(); loadStatus();
       // Refresh thread list without reloading history (preserves inline images)
@@ -2460,13 +2509,31 @@ function connect() {
       }
       el.querySelector('.live-thinking-text').textContent += data.text;
       chat.scrollTop = chat.scrollHeight;
+    } else if (data.type === 'content_delta') {
+      // Live content (reply) streaming with debounced Markdown render
+      let el = document.getElementById('liveContent');
+      if (!el) {
+        document.getElementById('liveThinking')?.remove();
+        removeStatus();
+        el = document.createElement('div');
+        el.id = 'liveContent';
+        el.className = 'msg assistant live-content';
+        el.innerHTML = '<div class="msg-content"></div>';
+        chat.appendChild(el);
+      }
+      _liveContentRaw += data.text;
+      if (_liveRenderTimer) clearTimeout(_liveRenderTimer);
+      _liveRenderTimer = setTimeout(_renderLiveContent, _LIVE_RENDER_MS);
     } else if (data.type === 'error') {
       document.getElementById('liveThinking')?.remove();
+      _clearLiveContent();
       addMessage('error', data.text); setGenerating(false);
     } else if (data.type === 'cron') {
       addMessage('assistant', `⏰ **${data.name}**\n${data.text}`, {});
       chat.scrollTop = chat.scrollHeight;
     } else if (data.type === 'status') {
+      // Only clear live content on tool-related status (not "writing reply" transition)
+      if (!data.text.includes('writing reply')) _clearLiveContent();
       showStatus(data.text);
     } else if (data.type === 'update_progress') {
       _onUpdateProgress(data.step, data.status, data.detail);
@@ -3401,7 +3468,7 @@ async function restartAfterUpdate() {
 function renderMarkdown(text) {
   if (!text) return '';
   let h = escapeHtml(text);
-  h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');
+  h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><button class="code-copy" onclick="copyCode(this)"><i class="ph ph-copy"></i> Copy</button><code>$2</code></pre>');
   h=h.replace(/`([^`]+)`/g,'<code>$1</code>');
   h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   h=h.replace(/\*(.+?)\*/g,'<em>$1</em>');
@@ -3417,6 +3484,15 @@ function renderMarkdown(text) {
   return `<p>${h}</p>`;
 }
 function escapeHtml(t) { const d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
+function copyCode(btn) {
+  const code = btn.parentElement.querySelector('code');
+  if (!code) return;
+  navigator.clipboard.writeText(code.textContent).then(() => {
+    btn.innerHTML = '<i class="ph ph-check"></i> Copied';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.innerHTML = '<i class="ph ph-copy"></i> Copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
 
 // ── Keys ──
 document.addEventListener('keydown', (e) => {

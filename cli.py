@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """qwe-qwe CLI — lightweight AI agent for local models."""
 
-import sys, time, readline
+import sys, time, readline, threading
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.live import Live
 import agent, config, db, soul, skills, tasks, scheduler, providers, threads
 import logger
 
@@ -640,16 +641,42 @@ def main():
             console.print(f"  [dim]Unknown command: {user_input.split()[0]}[/]")
             continue
 
+        # Stream response tokens with Rich Live progressive Markdown
+        _cli_content_buf = ""
+        _cli_content_lock = threading.Lock()
+        _cli_live_ref = [None]  # mutable ref for callback access
+
+        def _on_content_token(text: str):
+            nonlocal _cli_content_buf
+            with _cli_content_lock:
+                _cli_content_buf += text
+                buf_snapshot = _cli_content_buf
+            live = _cli_live_ref[0]
+            if live:
+                try:
+                    live.update(Markdown(buf_snapshot))
+                except Exception:
+                    pass
+
+        agent._content_callback = _on_content_token
+
         try:
-            result = agent.run(user_input)
+            console.print()
+            console.print("  🦆 ", end="")
+            with Live(Markdown("▍"), console=console, refresh_per_second=8, vertical_overflow="visible") as live:
+                _cli_live_ref[0] = live
+                result = agent.run(user_input)
+                _cli_live_ref[0] = None
+                # Final render with complete reply
+                live.update(Markdown(result.reply))
         except Exception as e:
+            _cli_live_ref[0] = None
             _log.error(f"agent.run crashed: {e}", exc_info=True)
             console.print(f"  [red]✗ {str(e).replace('[', '(').replace(']', ')')}[/]")
             continue
+        finally:
+            agent._content_callback = None
 
-        console.print()
-        console.print(f"  🦆 ", end="")
-        console.print(Markdown(result.reply))
         console.print()
 
 

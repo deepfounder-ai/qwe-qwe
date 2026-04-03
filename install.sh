@@ -74,11 +74,33 @@ else
 fi
 
 source .venv/bin/activate
-pip install -q -e "." 2>&1 | tail -1
+pip install -q --upgrade pip 2>/dev/null
+pip install -q -e "." 2>&1 | tail -1 || pip install -q -r requirements.txt 2>/dev/null
 step "Installed qwe-qwe + dependencies"
 
+# ── verify deps ──────────────────────────────────────────
+MISSING=""
+python3 -c "import cryptography" 2>/dev/null || MISSING="$MISSING cryptography"
+python3 -c "from fastembed import TextEmbedding" 2>/dev/null || MISSING="$MISSING fastembed"
+python3 -c "from qdrant_client import QdrantClient" 2>/dev/null || MISSING="$MISSING qdrant-client"
+python3 -c "import openai" 2>/dev/null || MISSING="$MISSING openai"
+python3 -c "import rich" 2>/dev/null || MISSING="$MISSING rich"
+python3 -c "import fastapi" 2>/dev/null || MISSING="$MISSING fastapi"
+python3 -c "import requests" 2>/dev/null || MISSING="$MISSING requests"
+if [ -n "$MISSING" ]; then
+    warn "Missing:$MISSING — installing..."
+    pip install -q $MISSING 2>/dev/null
+fi
+step "Dependencies verified"
+
+# ── pre-download embedding model ─────────────────────────
+info "Pre-loading embedding model (~200MB, one-time)..."
+python3 -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')" 2>/dev/null \
+    && step "Embedding model ready" \
+    || warn "Embedding model will download on first use"
+
 # ── dirs ──────────────────────────────────────────────────
-mkdir -p logs memory skills
+mkdir -p logs memory skills uploads
 step "Created directories"
 
 # ── shell integration ─────────────────────────────────────

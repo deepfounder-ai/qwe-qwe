@@ -910,20 +910,99 @@ def _run_doctor_checks() -> str:
     return "\n".join(lines)
 
 
+# ── Inline keyboards ──
+
+def _build_reply_keyboard(tool_names: list[str] | None = None) -> dict:
+    """Build an inline keyboard to attach to bot responses."""
+    buttons = [[{"text": "🔄 Retry", "callback_data": "retry"}]]
+    return {"inline_keyboard": buttons}
+
+
+def _handle_callback_query(query: dict, token: str):
+    """Handle inline keyboard button presses."""
+    query_id = query.get("id")
+    data = query.get("data", "")
+    msg = query.get("message", {})
+    chat_id = msg.get("chat", {}).get("id")
+    user_id = query.get("from", {}).get("id")
+    topic_id = msg.get("message_thread_id")
+    thread_id = None
+    if topic_id:
+        thread_id = get_thread_for_topic(chat_id, topic_id)
+
+    if not chat_id:
+        _api("answerCallbackQuery", token, callback_query_id=query_id, text="⚠️ Error")
+        return
+
+    # Only owner can press buttons
+    owner_id = get_owner_id()
+    if owner_id and user_id != owner_id:
+        _api("answerCallbackQuery", token, callback_query_id=query_id,
+             text="⛔ Only the owner can use this")
+        return
+
+    if data == "retry":
+        # Re-send the last user message
+        tid = thread_id or db.kv_get("telegram:thread_id") or None
+        recent = db.get_recent_messages(limit=4, thread_id=tid)
+        last_user = None
+        for m in reversed(recent):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
+        if last_user:
+            _api("answerCallbackQuery", token, callback_query_id=query_id, text="🔄 Retrying...")
+            _process_message(chat_id, last_user, user_id, "",
+                             msg.get("message_id", 0), token,
+                             topic_id=topic_id, thread_id=thread_id)
+        else:
+            _api("answerCallbackQuery", token, callback_query_id=query_id,
+                 text="No message to retry")
+
+    elif data == "clear":
+        tid = thread_id or db.kv_get("telegram:thread_id") or None
+        db.clear_history(thread_id=tid)
+        _api("answerCallbackQuery", token, callback_query_id=query_id,
+             text="🗑 History cleared")
+
+    elif data == "toggle_thinking":
+        current = db.kv_get("thinking_enabled") == "true"
+        new_val = not current
+        db.kv_set("thinking_enabled", str(new_val).lower())
+        state = "ON ✅" if new_val else "OFF"
+        _api("answerCallbackQuery", token, callback_query_id=query_id,
+             text=f"🧠 Thinking: {state}")
+
+    elif data == "toggle_voice":
+        current = db.kv_get(f"voice_mode:{chat_id}") == "1"
+        new_val = not current
+        db.kv_set(f"voice_mode:{chat_id}", "1" if new_val else "0")
+        state = "ON ✅" if new_val else "OFF"
+        _api("answerCallbackQuery", token, callback_query_id=query_id,
+             text=f"🔊 Voice: {state}")
+
+    else:
+        _api("answerCallbackQuery", token, callback_query_id=query_id, text="Unknown action")
+
+
 def send_message(chat_id: int, text: str, token: str | None = None,
-                 reply_to: int | None = None, topic_id: int | None = None):
+                 reply_to: int | None = None, topic_id: int | None = None,
+                 reply_markup: dict | None = None):
     """Send a message to a Telegram chat with MarkdownV2 formatting."""
     token = token or get_token()
     if not token:
         return
     # Split long messages (Telegram limit: 4096 chars)
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
-    for chunk in chunks:
+    for ci, chunk in enumerate(chunks):
         base_kwargs = {"chat_id": chat_id}
         if reply_to:
             base_kwargs["reply_to_message_id"] = reply_to
         if topic_id:
             base_kwargs["message_thread_id"] = topic_id
+        # Attach keyboard only to last chunk
+        if reply_markup and ci == len(chunks) - 1:
+            base_kwargs["reply_markup"] = reply_markup
 
         # Try MarkdownV2 → HTML → Markdown → plain text
         sent = False
@@ -953,6 +1032,46 @@ def send_message(chat_id: int, text: str, token: str | None = None,
         if not sent:
             _api("sendMessage", token, **base_kwargs, text=chunk)
             _log.warning("sent as plain text (all formatting failed)")
+
+
+def send_draft(chat_id: int, text: str, token: str | None = None,
+               topic_id: int | None = None, reply_to: int | None = None) -> dict:
+    """Send a message draft (streaming) via sendMessageDraft (Bot API 9.3+).
+
+    The draft is shown to the user in real-time and gets replaced when
+    a final send_message() is sent. Falls back silently on older API.
+    """
+    token = token or get_token()
+    if not token or not text:
+        return {"ok": False}
+    kwargs: dict = {"chat_id": chat_id, "text": text[:4000]}
+    if topic_id:
+        kwargs["message_thread_id"] = topic_id
+    if reply_to:
+        kwargs["reply_parameters"] = {"message_id": reply_to}
+    return _api("sendMessageDraft", token, **kwargs)
+
+
+_draft_supported: bool | None = None  # cached: does bot API support sendMessageDraft?
+
+
+def _send_draft_safe(chat_id: int, text: str, token: str,
+                     topic_id: int | None = None, reply_to: int | None = None) -> bool:
+    """Send draft, return True if supported. Caches API support check."""
+    global _draft_supported
+    if _draft_supported is False:
+        return False
+    result = send_draft(chat_id, text, token, topic_id=topic_id, reply_to=reply_to)
+    if result.get("ok"):
+        _draft_supported = True
+        return True
+    # Check if method is not supported (older Bot API)
+    desc = result.get("description", "").lower()
+    if "not found" in desc or "unknown method" in desc or "bad request" in desc:
+        _draft_supported = False
+        _log.info("sendMessageDraft not supported — falling back to final-only mode")
+        return False
+    return False
 
 
 def _send_audio(chat_id: int, audio_bytes: bytes, token: str,
@@ -1024,9 +1143,11 @@ def _poll_loop(token: str):
         _running = False
         return
 
-    # Delete any existing webhook (required for long polling)
-    _api("deleteWebhook", token, drop_pending_updates=False)
-    _log.info("webhook cleared")
+    # Delete any existing webhook and flush pending updates to kill stale long-poll
+    _api("deleteWebhook", token, drop_pending_updates=True)
+    # Flush stale getUpdates connection by requesting with short timeout
+    _api("getUpdates", token, offset=-1, timeout=1)
+    _log.info("webhook cleared, pending updates flushed")
 
     bot_username = me.get("username", "")
     _log.info(f"connected as @{bot_username}")
@@ -1055,6 +1176,12 @@ def _poll_loop(token: str):
 
 def _handle_update(update: dict, token: str, bot_username: str):
     """Process a single Telegram update."""
+    # Handle inline keyboard callback queries
+    callback_query = update.get("callback_query")
+    if callback_query:
+        _handle_callback_query(callback_query, token)
+        return
+
     msg = update.get("message")
     if not msg:
         return
@@ -1282,7 +1409,6 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             if topic_id:
                 kwargs["message_thread_id"] = topic_id
             _api("sendChatAction", token, **kwargs)
-            # Wait 4s before next (typing lasts 5s, refresh before expiry)
             typing_active.wait(4)
             if not typing_active.is_set():
                 break
@@ -1290,13 +1416,129 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
     typing_thread = threading.Thread(target=_keep_typing, daemon=True)
     typing_thread.start()
 
+    # ── Streaming via sendMessageDraft / editMessageText + agent callbacks ──
+    import agent
+
+    _stream_buf = ""          # accumulated content for streaming
+    _stream_lock = threading.Lock()
+    _last_update_ts = [0.0]   # last time we updated the stream message
+    _STREAM_INTERVAL = 1.5    # update at most every 1.5s (Telegram rate limits)
+    _stream_msg_id = [None]   # message_id of the streaming placeholder (for editMessageText)
+    _thinking_buf = []        # accumulated thinking chunks
+    _status_text = [""]       # latest tool status
+
+    def _update_stream():
+        """Send or update the streaming message with current buffer."""
+        with _stream_lock:
+            text = _stream_buf.strip()
+            if not text:
+                return
+            # Append status if any
+            status = _status_text[0]
+            display = text + (f"\n\n_{status}_" if status else "") + " ▍"
+
+        # Try sendMessageDraft first
+        if _send_draft_safe(chat_id, display, token,
+                            topic_id=topic_id, reply_to=message_id):
+            return
+
+        # Fallback: sendMessage + editMessageText
+        if _stream_msg_id[0] is None:
+            # Send initial placeholder
+            kwargs = {"chat_id": chat_id, "text": display}
+            if topic_id:
+                kwargs["message_thread_id"] = topic_id
+            if message_id:
+                kwargs["reply_to_message_id"] = message_id
+            result = _api("sendMessage", token, **kwargs)
+            if result.get("ok"):
+                _stream_msg_id[0] = result["result"]["message_id"]
+                _log.info(f"streaming placeholder sent: msg_id={_stream_msg_id[0]}")
+        else:
+            # Edit existing message
+            result = _api("editMessageText", token,
+                 chat_id=chat_id, message_id=_stream_msg_id[0], text=display)
+            if not result.get("ok"):
+                _log.debug(f"editMessageText: {result.get('description', '')}")
+
+    def _tg_content_cb(text_chunk: str):
+        nonlocal _stream_buf
+        with _stream_lock:
+            _stream_buf += text_chunk
+        now = time.time()
+        if now - _last_update_ts[0] >= _STREAM_INTERVAL:
+            _update_stream()
+            _last_update_ts[0] = now
+
+    def _tg_thinking_cb(text_chunk: str):
+        _thinking_buf.append(text_chunk)
+
+    def _tg_status_cb(status_text: str):
+        _status_text[0] = status_text
+        # Immediately update stream with tool progress
+        now = time.time()
+        if now - _last_update_ts[0] >= _STREAM_INTERVAL:
+            _update_stream()
+            _last_update_ts[0] = now
+
+    # Set agent callbacks for this request
+    streaming_on = db.kv_get("streaming_enabled") != "false"
+    agent._content_callback = _tg_content_cb if streaming_on else None
+    agent._thinking_callback = _tg_thinking_cb
+    agent._status_callback = _tg_status_cb if streaming_on else None
+
     if _on_message:
         try:
             response = _on_message(chat_id, text, user_id, username, thread_id,
                                     image_b64=image_b64)
             if response:
-                typing_active.clear()  # stop typing before sending
-                send_message(chat_id, response, token, reply_to=message_id, topic_id=topic_id)
+                typing_active.clear()
+
+                # Get thinking and tool info from agent result
+                thinking_text = "".join(_thinking_buf).strip()
+                tool_names = getattr(agent, '_last_tools', []) or []
+
+                # Build enriched response
+                parts = []
+                if thinking_text:
+                    # Telegram spoiler for thinking (collapsed by default)
+                    short_thinking = thinking_text[:500]
+                    if len(thinking_text) > 500:
+                        short_thinking += "..."
+                    parts.append(f"💭 ||{short_thinking}||")
+                parts.append(response)
+                if tool_names:
+                    tools_str = ", ".join(f"`{t}`" for t in tool_names)
+                    parts.append(f"\n🔧 {tools_str}")
+
+                enriched = "\n\n".join(parts)
+
+                # Build inline keyboard
+                keyboard = _build_reply_keyboard(tool_names)
+
+                if _stream_msg_id[0]:
+                    # Edit the streaming message into the final formatted version
+                    # Try MarkdownV2 → HTML → plain text
+                    md2 = _to_markdownv2(enriched)
+                    result = _api("editMessageText", token,
+                                  chat_id=chat_id, message_id=_stream_msg_id[0],
+                                  text=md2, parse_mode="MarkdownV2",
+                                  reply_markup=keyboard)
+                    if not result.get("ok"):
+                        html = _to_html(enriched)
+                        result = _api("editMessageText", token,
+                                      chat_id=chat_id, message_id=_stream_msg_id[0],
+                                      text=html, parse_mode="HTML",
+                                      reply_markup=keyboard)
+                    if not result.get("ok"):
+                        _api("editMessageText", token,
+                             chat_id=chat_id, message_id=_stream_msg_id[0],
+                             text=enriched, reply_markup=keyboard)
+                else:
+                    # No streaming message was sent — send fresh
+                    send_message(chat_id, enriched, token, reply_to=message_id,
+                                 topic_id=topic_id, reply_markup=keyboard)
+
                 # TTS: send voice reply if voice mode or incoming was voice
                 voice_mode = db.kv_get(f"voice_mode:{chat_id}") == "1"
                 if is_voice or voice_mode:
@@ -1319,6 +1561,9 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token, topic_id=topic_id)
         finally:
             typing_active.clear()
+            agent._content_callback = None
+            agent._thinking_callback = None
+            agent._status_callback = None
 
 
 # ── Status ──

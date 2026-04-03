@@ -113,6 +113,17 @@ def _emit_agent_thinking(text: str):
             pass
 
 
+def _emit_agent_content(text: str):
+    """Broadcast live content (reply) chunk from agent thread to WS clients."""
+    if _ws_loop and _ws_clients:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _broadcast({"type": "content_delta", "text": text}), _ws_loop
+            )
+        except Exception:
+            pass
+
+
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
                     image_path: str | None = None) -> dict:
@@ -122,9 +133,13 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
     agent._abort_event = _abort_event  # share abort flag with agent
     # Pass image_path so agent can store it in user message meta
     agent._pending_image_path = image_path
-    # Set live status callback for tool progress
-    agent._status_callback = _emit_agent_status
-    agent._thinking_callback = _emit_agent_thinking
+    # Set live callbacks (only if not already set by caller, e.g. _run_with_queue)
+    if not agent._status_callback:
+        agent._status_callback = _emit_agent_status
+    if not agent._thinking_callback:
+        agent._thinking_callback = _emit_agent_thinking
+    if not agent._content_callback:
+        agent._content_callback = _emit_agent_content
     t0 = time.time()
     result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
@@ -838,6 +853,18 @@ async def set_thinking(data: dict):
     return {"enabled": val}
 
 
+@app.get("/api/streaming")
+async def get_streaming():
+    return {"enabled": db.kv_get("streaming_enabled") != "false"}  # on by default
+
+
+@app.post("/api/streaming")
+async def set_streaming(data: dict):
+    val = bool(data.get("enabled", True))
+    db.kv_set("streaming_enabled", str(val).lower())
+    return {"enabled": val}
+
+
 @app.get("/api/soul")
 async def get_soul():
     """Get soul config with trait descriptions."""
@@ -1494,14 +1521,55 @@ async def websocket_chat(ws: WebSocket):
                 break
 
             try:
-                # Run agent in thread pool (it's blocking)
+                # Run agent in thread pool with streaming via queue
                 loop = asyncio.get_event_loop()
                 import functools
-                result = await loop.run_in_executor(
-                    None, functools.partial(_run_agent_sync, user_input,
-                                            thread_id, image_b64=image_b64,
-                                            image_path=image_path)
-                )
+                stream_queue: asyncio.Queue = asyncio.Queue()
+
+                async def _drain_stream_queue():
+                    """Forward streamed chunks from agent thread to this WS client."""
+                    while True:
+                        msg = await stream_queue.get()
+                        if msg is None:
+                            break  # agent finished
+                        await _ws_send_safe(ws, msg)
+
+                def _run_with_queue(user_input, thread_id, image_b64, image_path):
+                    """Wrap _run_agent_sync, routing content/thinking/status to queue."""
+                    import agent as _agent
+
+                    def _queue_content(text):
+                        asyncio.run_coroutine_threadsafe(
+                            stream_queue.put({"type": "content_delta", "text": text}), loop)
+
+                    def _queue_thinking(text):
+                        asyncio.run_coroutine_threadsafe(
+                            stream_queue.put({"type": "thinking_delta", "text": text}), loop)
+
+                    def _queue_status(text):
+                        asyncio.run_coroutine_threadsafe(
+                            stream_queue.put({"type": "status", "text": text}), loop)
+
+                    # Set per-request callbacks (override broadcast ones)
+                    # Web UI always streams
+                    _agent._content_callback = _queue_content
+                    _agent._thinking_callback = _queue_thinking
+                    _agent._status_callback = _queue_status
+                    try:
+                        return _run_agent_sync(user_input, thread_id,
+                                               image_b64=image_b64,
+                                               image_path=image_path)
+                    finally:
+                        # Signal queue drain to stop
+                        asyncio.run_coroutine_threadsafe(stream_queue.put(None), loop)
+
+                # Run agent + queue drain concurrently
+                agent_task = loop.run_in_executor(
+                    None, functools.partial(_run_with_queue, user_input,
+                                            thread_id, image_b64, image_path))
+                drain_task = asyncio.ensure_future(_drain_stream_queue())
+                result = await agent_task
+                await drain_task  # ensure all queued messages are sent
 
                 # TTS: synthesize voice for reply if voice mode is on
                 audio_url = None
@@ -1661,6 +1729,9 @@ def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
     import agent
     tid = thread_id or db.kv_get("telegram:thread_id") or None
     result = agent.run(text, thread_id=tid, source="telegram", image_b64=image_b64)
+
+    # Store tool names so telegram_bot can access them for enriched display
+    agent._last_tools = list(result.tool_calls_made) if result.tool_calls_made else []
 
     # Also broadcast to WebSocket
     if _ws_loop and _ws_clients:
