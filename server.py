@@ -1561,9 +1561,9 @@ async def websocket_chat(ws: WebSocket):
                         asyncio.run_coroutine_threadsafe(
                             stream_queue.put({"type": "status", "text": text}), loop)
 
-                    def _queue_tool_call(name, args_preview):
+                    def _queue_tool_call(name, args_preview, result_preview=""):
                         asyncio.run_coroutine_threadsafe(
-                            stream_queue.put({"type": "tool_call", "name": name, "args": args_preview}), loop)
+                            stream_queue.put({"type": "tool_call", "name": name, "args": args_preview, "result": result_preview}), loop)
 
                     # Set per-request callbacks (override broadcast ones)
                     # Web UI always streams

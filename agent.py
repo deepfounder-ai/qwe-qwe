@@ -68,11 +68,11 @@ def _emit_content(text: str):
 _tool_call_callback = None  # set by server.py for tool call events
 
 
-def _emit_tool_call(name: str, args_preview: str):
+def _emit_tool_call(name: str, args_preview: str, result_preview: str = ""):
     """Emit a tool call event to connected clients (Claude Code style)."""
     if _tool_call_callback:
         try:
-            _tool_call_callback(name, args_preview)
+            _tool_call_callback(name, args_preview, result_preview)
         except Exception:
             pass
 
@@ -1097,6 +1097,9 @@ def _run_inner(user_input: str, thread_id: str | None,
 
     _log.info(f"turn started | thread={tid or 'active'} | input: {user_input[:100]}")
 
+    # Reset tool_search activations for new turn
+    tools._reset_active_tools()
+
     # Check if this is a fallback confirmation ("да", "yes")
     if user_input.lower().strip() in ("да", "yes", "y", "давай", "go"):
         recent = db.get_recent_messages(limit=2, thread_id=tid)
@@ -1277,13 +1280,16 @@ def _run_inner(user_input: str, thread_id: str | None,
                         _emit_thinking(text)
                 else:
                     # Gemma thinking: <|channel>thought ... detect and redirect
-                    if "<|channel>thought" in full_content and not in_think:
+                    if "<|channel>" in full_content and not in_think:
                         in_think = True
                         think_shown = True
                         _console.print("  [dim]💭 thinking...[/]")
                         _emit_status("💭 thinking...")
+                        # Don't emit any of this as content
                     elif in_think:
-                        pass  # already handled above
+                        _emit_thinking(text)  # stream as thinking, not content
+                    elif "<|" in text:
+                        pass  # skip special tokens from content stream
                     else:
                         # Normal reply content — stream to clients
                         _emit_content(text)
@@ -1407,8 +1413,6 @@ def _run_inner(user_input: str, thread_id: str | None,
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
                 _emit_status(f"🔧 {tc['name']}")
-                # Emit tool call event for UI (like Claude Code style)
-                _emit_tool_call(tc['name'], args_short)
 
                 # Lazy skill instruction injection (append to system msg, not insert new one)
                 import skills
@@ -1421,6 +1425,10 @@ def _run_inner(user_input: str, thread_id: str | None,
                 tool_start = time.time()
                 tool_result = tools.execute(tc["name"], args)
                 tool_ms = int((time.time() - tool_start) * 1000)
+
+                # Emit tool call with result to UI (Claude Code style)
+                result_short = tool_result.replace("\n", " ")[:150] if tool_result else ""
+                _emit_tool_call(tc['name'], args_short, result_short)
 
                 # Smart output management: summarize large outputs, truncate if needed
                 budget = config.get("context_budget")
@@ -1534,11 +1542,12 @@ def _run_inner(user_input: str, thread_id: str | None,
         raw_reply = _strip_thinking(full_content)
 
         # Retry: if model hedges instead of acting (no tool calls on round 0)
-        if (rounds == 0 and not tool_calls_data and len(raw_reply) < 600
+        if (rounds == 0 and not tool_calls_data and len(raw_reply) < 3000
                 and len(raw_reply) > 20):
             messages.append({"role": "assistant", "content": raw_reply})
-            messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools. Не спрашивай — делай. Используй инструменты."})
+            messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools NOW. Не спрашивай — ДЕЛАЙ. Используй инструменты СЕЙЧАС."})
             _console.print(f"  [dim]🔄 nudging to use tools...[/]")
+            _emit_status("🔄 nudging to act...")
             rounds += 1
             continue
 

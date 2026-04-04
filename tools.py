@@ -105,6 +105,24 @@ def _check_shell_safety(cmd: str) -> str | None:
     return None
 
 
+# ── Core tools (always loaded) vs Extended (loaded via tool_search) ──
+
+_CORE_TOOL_NAMES = {
+    "memory_search", "memory_save",
+    "read_file", "write_file", "shell",
+    "http_request", "spawn_task",
+    "tool_search",  # meta-tool to discover more tools
+}
+
+# Session-level: tools activated by tool_search (persists within agent turn)
+_active_extra_tools: set[str] = set()
+
+
+def _reset_active_tools():
+    """Reset extra tools between turns."""
+    _active_extra_tools.clear()
+
+
 # ── Tool definitions — SHORT descriptions, small models need clarity ──
 
 TOOLS = [
@@ -394,7 +412,109 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    # Meta-tool: discover additional tools
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_search",
+            "description": "Find and activate additional tools by keyword. Use when you need a capability not in your current tools (e.g. 'browser', 'notes', 'schedule', 'secret', 'mcp', 'profile', 'rag', 'model', 'skill', 'timer').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword: browser, notes, schedule, secret, mcp, profile, rag, skill, timer, cron, model"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
+
+
+# ── Tool search index ──
+# Maps keywords to tool names for discovery
+
+_TOOL_SEARCH_INDEX = {
+    "browser": ["browser_open", "browser_snapshot", "browser_screenshot", "browser_click", "browser_fill", "browser_eval", "browser_close"],
+    "web": ["browser_open", "browser_snapshot", "browser_screenshot", "http_request"],
+    "search": ["browser_open", "memory_search", "rag_search"],
+    "google": ["browser_open"],
+    "notes": ["create_note", "list_notes", "read_note", "delete_note", "edit_note"],
+    "note": ["create_note", "list_notes", "read_note", "delete_note", "edit_note"],
+    "schedule": ["schedule_task", "list_cron", "remove_cron"],
+    "cron": ["schedule_task", "list_cron", "remove_cron"],
+    "timer": ["set_timer", "schedule_task"],
+    "secret": ["secret_save", "secret_get", "secret_list", "secret_delete"],
+    "vault": ["secret_save", "secret_get", "secret_list", "secret_delete"],
+    "password": ["secret_save", "secret_get"],
+    "key": ["secret_save", "secret_get"],
+    "mcp": ["mcp_list_servers", "mcp_add_server", "mcp_remove_server", "mcp_restart_server", "mcp_toggle_server"],
+    "profile": ["user_profile_update", "user_profile_get"],
+    "user": ["user_profile_update", "user_profile_get", "memory_search"],
+    "rag": ["rag_index", "rag_search", "rag_status"],
+    "index": ["rag_index", "rag_status"],
+    "knowledge": ["rag_index", "rag_search"],
+    "model": ["switch_model"],
+    "switch": ["switch_model"],
+    "skill": ["create_skill", "delete_skill", "list_skill_files"],
+    "soul": ["add_trait", "remove_trait", "list_traits"],
+    "trait": ["add_trait", "remove_trait", "list_traits"],
+    "personality": ["add_trait", "remove_trait", "list_traits"],
+    "memory": ["memory_search", "memory_save", "memory_delete"],
+    "delete": ["memory_delete", "secret_delete", "delete_note"],
+    "file": ["read_file", "write_file"],
+    "screenshot": ["browser_screenshot"],
+    "navigate": ["browser_open"],
+    "click": ["browser_click", "browser_fill"],
+}
+
+
+def _do_tool_search(query: str) -> str:
+    """Search for tools by keyword. Returns matching tool names and activates them."""
+    query_lower = query.lower().strip()
+    found = set()
+
+    # Direct keyword match
+    for kw, tool_names in _TOOL_SEARCH_INDEX.items():
+        if kw in query_lower or query_lower in kw:
+            found.update(tool_names)
+
+    # Also search tool descriptions from all available tools
+    if not found:
+        all_t = _get_all_tools_full()
+        for t in all_t:
+            fn = t["function"]
+            if query_lower in fn["name"] or query_lower in fn.get("description", "").lower():
+                found.add(fn["name"])
+
+    if not found:
+        return f"No tools found for '{query}'. Available keywords: browser, notes, schedule, secret, mcp, profile, rag, skill, soul, timer, model"
+
+    # Activate found tools for this turn
+    _active_extra_tools.update(found)
+
+    # Return descriptions of activated tools
+    all_t = _get_all_tools_full()
+    lines = [f"Activated {len(found)} tools:"]
+    for t in all_t:
+        fn = t["function"]
+        if fn["name"] in found:
+            params = list(fn.get("parameters", {}).get("properties", {}).keys())
+            lines.append(f"  - {fn['name']}({', '.join(params)}): {fn.get('description', '')}")
+    lines.append("\nYou can now call these tools directly.")
+    return "\n".join(lines)
+
+
+def _get_all_tools_full() -> list[dict]:
+    """Get ALL tools (core + extended + skills + MCP) without filtering."""
+    import skills
+    all_tools = list(TOOLS)
+    all_tools += skills.get_tools(compact=True)
+    try:
+        import mcp_client
+        all_tools += mcp_client.get_all_mcp_tools()
+    except Exception:
+        pass
+    return all_tools
 
 
 # ── Tool execution ──
@@ -407,7 +527,10 @@ def execute(name: str, args: dict) -> str:
             import mcp_client
             return mcp_client.execute_mcp_tool(name, args)
 
-        if name == "memory_search":
+        if name == "tool_search":
+            return _do_tool_search(args.get("query", ""))
+
+        elif name == "memory_search":
             results = memory.search(args["query"], tag=args.get("tag"))
             if not results:
                 return "No memories found."
@@ -670,12 +793,18 @@ def execute(name: str, args: dict) -> str:
 
 
 def get_all_tools(compact: bool = False) -> list[dict]:
-    """Get base tools + active skill tools + MCP tools."""
-    import skills
-    all_tools = TOOLS + skills.get_tools(compact=compact)
-    try:
-        import mcp_client
-        all_tools += mcp_client.get_all_mcp_tools()
-    except Exception:
-        pass
-    return all_tools
+    """Get core tools + activated extra tools (from tool_search).
+
+    Only core tools are always sent. Extended tools appear after tool_search activates them.
+    This saves ~2000 tokens per request for small models.
+    """
+    all_available = _get_all_tools_full()
+
+    # Filter: core tools + any activated by tool_search
+    result = []
+    for t in all_available:
+        name = t["function"]["name"]
+        if name in _CORE_TOOL_NAMES or name in _active_extra_tools:
+            result.append(t)
+
+    return result

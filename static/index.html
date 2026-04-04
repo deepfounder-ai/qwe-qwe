@@ -184,10 +184,12 @@ body {
 .tool-group summary:hover { color: var(--text); }
 .tool-group summary::marker { color: var(--accent-dim); }
 .tool-group summary i { color: var(--accent-dim); }
-.tool-group-body { padding: 4px 0 4px 20px; font-size: 12px; font-family: var(--mono); color: var(--text-dim); border-left: 2px solid var(--border); margin-left: 7px; }
-.tool-entry { padding: 3px 0; }
-.tool-entry-name { color: var(--accent); font-weight: 600; }
-.tool-entry-args { opacity: 0.6; margin-left: 4px; }
+.tool-group-body { padding: 6px 0 6px 16px; font-size: 12px; font-family: var(--mono); color: var(--text-dim); border-left: 2px solid var(--border); margin-left: 7px; }
+.tool-entry { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.tool-entry:last-child { border-bottom: none; }
+.tool-entry-name { color: var(--accent); font-weight: 600; font-size: 12px; }
+.tool-entry-desc { color: var(--text-dim); margin-top: 2px; word-break: break-all; }
+.tool-entry-result { color: var(--text-dim); opacity: 0.6; margin-top: 2px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
 .activity-log { padding: 0; background: transparent; }
 .live-thinking { background: rgba(245,166,35,0.04); border-left: 2px solid var(--accent-dim); animation: think-pulse 2s ease-in-out infinite; }
 .live-thinking-header { font-size: 11px; color: var(--accent-dim); margin-bottom: 4px; }
@@ -2682,8 +2684,8 @@ function _clearLiveContent() {
 // ── Tool call tracking ──
 let _pendingToolCalls = []; // accumulate during streaming
 
-function _appendToolCall(name, argsPreview) {
-  _pendingToolCalls.push({name, args: argsPreview});
+function _appendToolCall(name, argsPreview, resultPreview) {
+  _pendingToolCalls.push({name, args: argsPreview, result: resultPreview || ''});
   // Show live activity indicator
   _renderLiveToolCalls();
 }
@@ -2731,6 +2733,26 @@ function _getToolMeta(name) {
   return {icon: 'wrench', label: name};
 }
 
+function _humanToolDesc(name, args) {
+  // Extract human-readable description from tool name + args
+  try {
+    const a = typeof args === 'string' && args.startsWith('{') ? JSON.parse(args) : {};
+    if (name === 'shell') return a.command || args;
+    if (name === 'read_file') return a.path || args;
+    if (name === 'write_file') return a.path || args;
+    if (name === 'browser_open') return a.url || args;
+    if (name === 'browser_snapshot') return a.selector || 'body';
+    if (name === 'memory_save') return (a.text || '').slice(0, 60);
+    if (name === 'memory_search') return a.query || args;
+    if (name === 'http_request') return `${a.method || 'GET'} ${a.url || ''}`;
+    if (name === 'browser_fill') return `${a.selector} = "${(a.value||'').slice(0,30)}"`;
+    if (name === 'browser_click') return a.selector || args;
+    if (name === 'browser_eval') return (a.expression || '').slice(0, 60);
+    if (name.startsWith('mcp__')) return args; // show raw for MCP
+  } catch(e) {}
+  return args;
+}
+
 function _buildToolGroupsHtml(calls, isLive) {
   if (!calls.length) return '';
   // Group by tool type
@@ -2750,8 +2772,16 @@ function _buildToolGroupsHtml(calls, isLive) {
     html += `<summary><i class="ph ph-${meta.icon}"></i> ${escapeHtml(label)}</summary>`;
     html += `<div class="tool-group-body">`;
     for (const item of items) {
-      const shortArgs = item.args.length > 80 ? item.args.slice(0, 77) + '...' : item.args;
-      html += `<div class="tool-entry"><span class="tool-entry-name">${escapeHtml(item.name)}</span> <span class="tool-entry-args">${escapeHtml(shortArgs)}</span></div>`;
+      const desc = _humanToolDesc(item.name, item.args);
+      const shortDesc = desc.length > 100 ? desc.slice(0, 97) + '...' : desc;
+      html += `<div class="tool-entry">`;
+      html += `<div class="tool-entry-name">${escapeHtml(item.name)}</div>`;
+      html += `<div class="tool-entry-desc">${escapeHtml(shortDesc)}</div>`;
+      if (item.result) {
+        const shortResult = item.result.length > 120 ? item.result.slice(0, 117) + '...' : item.result;
+        html += `<div class="tool-entry-result">${escapeHtml(shortResult)}</div>`;
+      }
+      html += `</div>`;
     }
     html += `</div></details>`;
   }
@@ -2823,7 +2853,7 @@ function connect() {
       chat.scrollTop = chat.scrollHeight;
     } else if (data.type === 'tool_call') {
       // Show tool call in activity log (Claude Code style)
-      _appendToolCall(data.name, data.args);
+      _appendToolCall(data.name, data.args, data.result);
     } else if (data.type === 'status') {
       // Show status but preserve accumulated content
       if (data.text.includes('thinking')) {

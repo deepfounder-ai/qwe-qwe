@@ -140,16 +140,16 @@ THINKING_ENABLED = False   # send enable_thinking to model (toggle via /thinking
 
 # Editable settings registry: key → (kv_key, type, default, description, min, max)
 EDITABLE_SETTINGS = {
-    "max_history_messages": ("setting:max_history_messages", int, 10, "Messages kept in context", 2, 50),
-    "max_memory_results":   ("setting:max_memory_results",   int, 3,  "Memory results per turn", 0, 10),
+    "max_history_messages": ("setting:max_history_messages", int, 10, "Messages kept in context", 1, None),
+    "max_memory_results":   ("setting:max_memory_results",   int, 3,  "Memory results per turn", 0, None),
     "max_tool_rounds":      ("setting:max_tool_rounds",      int, 10, "Max tool call rounds", 1, None),
-    "compaction_threshold": ("setting:compaction_threshold",  int, 20, "Auto-compact after N messages", 5, 100),
+    "compaction_threshold": ("setting:compaction_threshold",  int, 20, "Auto-compact after N messages", 3, None),
     "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 1000, None),
-    "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, 5),
+    "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, None),
     "self_check_enabled":   ("setting:self_check_enabled",    int, 1,     "Self-check before shell/write_file (0=off, 1=on)", 0, 1),
-    "heartbeat_interval_min": ("setting:heartbeat_interval_min", int, 30, "Heartbeat interval in minutes", 5, 1440),
+    "heartbeat_interval_min": ("setting:heartbeat_interval_min", int, 30, "Heartbeat interval in minutes", 1, None),
     "experience_learning":  ("setting:experience_learning",   int, 1,     "Learn from past task executions (0=off, 1=on)", 0, 1),
-    "presence_penalty":     ("setting:presence_penalty",      float, 1.5,  "Presence penalty (Qwen3.5 recommends 1.5)", 0.0, 2.0),
+    "presence_penalty":     ("setting:presence_penalty",      float, 1.5,  "Presence penalty (Qwen3.5 recommends 1.5)", 0.0, None),
     "rag_chunk_size":       ("setting:rag_chunk_size",        int, 800,    "RAG chunk size in chars (re-index after change)", 200, 4000),
     "rag_chunk_overlap":    ("setting:rag_chunk_overlap",     int, 100,    "RAG chunk overlap in chars", 0, 500),
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
