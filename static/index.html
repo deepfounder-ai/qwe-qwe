@@ -179,11 +179,16 @@ body {
 }
 .msg-thinking summary { cursor: pointer; font-style: normal; font-size: 11px; color: var(--accent-dim); }
 .msg-thinking summary:hover { color: var(--accent); }
-.activity-log { background: transparent; padding: 8px 16px; border-left: 2px solid var(--border); }
-.activity-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
-.activity-item i { color: var(--accent-dim); font-size: 14px; flex-shrink: 0; }
-.activity-tool { color: var(--accent); font-weight: 600; }
-.activity-args { color: var(--text-dim); opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-group { margin: 4px 0; }
+.tool-group summary { cursor: pointer; font-size: 13px; color: var(--text-dim); padding: 4px 0; user-select: none; display: flex; align-items: center; gap: 6px; }
+.tool-group summary:hover { color: var(--text); }
+.tool-group summary::marker { color: var(--accent-dim); }
+.tool-group summary i { color: var(--accent-dim); }
+.tool-group-body { padding: 4px 0 4px 20px; font-size: 12px; font-family: var(--mono); color: var(--text-dim); border-left: 2px solid var(--border); margin-left: 7px; }
+.tool-entry { padding: 3px 0; }
+.tool-entry-name { color: var(--accent); font-weight: 600; }
+.tool-entry-args { opacity: 0.6; margin-left: 4px; }
+.activity-log { padding: 0; background: transparent; }
 .live-thinking { background: rgba(245,166,35,0.04); border-left: 2px solid var(--accent-dim); animation: think-pulse 2s ease-in-out infinite; }
 .live-thinking-header { font-size: 11px; color: var(--accent-dim); margin-bottom: 4px; }
 .live-thinking-text { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; margin: 0; font-family: var(--mono); max-height: 300px; overflow-y: auto; line-height: 1.5; }
@@ -2674,7 +2679,16 @@ function _clearLiveContent() {
   if (_liveRenderTimer) { clearTimeout(_liveRenderTimer); _liveRenderTimer = null; }
 }
 
-function _getOrCreateActivityLog() {
+// ── Tool call tracking ──
+let _pendingToolCalls = []; // accumulate during streaming
+
+function _appendToolCall(name, argsPreview) {
+  _pendingToolCalls.push({name, args: argsPreview});
+  // Show live activity indicator
+  _renderLiveToolCalls();
+}
+
+function _renderLiveToolCalls() {
   let el = document.getElementById('activityLog');
   if (!el) {
     el = document.createElement('div');
@@ -2682,20 +2696,66 @@ function _getOrCreateActivityLog() {
     el.className = 'msg assistant activity-log';
     chat.appendChild(el);
   }
-  return el;
+  el.innerHTML = _buildToolGroupsHtml(_pendingToolCalls, true);
+  chat.scrollTop = chat.scrollHeight;
 }
 
-function _appendToolCall(name, argsPreview) {
-  const log = _getOrCreateActivityLog();
-  const item = document.createElement('div');
-  item.className = 'activity-item';
-  // Friendly tool name mapping
-  const icons = {shell:'terminal',read_file:'file-text',write_file:'pencil-simple',memory_save:'brain',memory_search:'magnifying-glass',http_request:'globe',schedule_task:'clock'};
-  const icon = icons[name] || 'wrench';
-  const shortArgs = argsPreview.length > 60 ? argsPreview.slice(0, 57) + '...' : argsPreview;
-  item.innerHTML = `<i class="ph ph-${icon}"></i> <span class="activity-tool">${name}</span> <span class="activity-args">${escapeHtml(shortArgs)}</span>`;
-  log.appendChild(item);
-  chat.scrollTop = chat.scrollHeight;
+const _toolLabels = {
+  shell: {icon: 'terminal', label: 'command'},
+  read_file: {icon: 'file-text', label: 'file read'},
+  write_file: {icon: 'pencil-simple', label: 'file edit'},
+  memory_save: {icon: 'brain', label: 'memory save'},
+  memory_search: {icon: 'magnifying-glass', label: 'memory search'},
+  memory_delete: {icon: 'trash', label: 'memory delete'},
+  http_request: {icon: 'globe', label: 'HTTP request'},
+  schedule_task: {icon: 'clock', label: 'scheduled task'},
+  browser_open: {icon: 'globe', label: 'page opened'},
+  browser_snapshot: {icon: 'text-aa', label: 'page read'},
+  browser_screenshot: {icon: 'camera', label: 'screenshot'},
+  browser_click: {icon: 'cursor-click', label: 'click'},
+  browser_fill: {icon: 'textbox', label: 'form fill'},
+  browser_eval: {icon: 'code', label: 'JS eval'},
+  browser_close: {icon: 'x-circle', label: 'browser closed'},
+  spawn_task: {icon: 'rocket-launch', label: 'background task'},
+  create_skill: {icon: 'puzzle-piece', label: 'skill created'},
+};
+
+function _getToolMeta(name) {
+  // Check exact match first
+  if (_toolLabels[name]) return _toolLabels[name];
+  // MCP tools
+  if (name.startsWith('mcp__')) {
+    const parts = name.split('__');
+    return {icon: 'plug', label: `${parts[2] || name}`};
+  }
+  return {icon: 'wrench', label: name};
+}
+
+function _buildToolGroupsHtml(calls, isLive) {
+  if (!calls.length) return '';
+  // Group by tool type
+  const groups = {};
+  for (const c of calls) {
+    const key = c.name;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(c);
+  }
+  let html = '';
+  for (const [toolName, items] of Object.entries(groups)) {
+    const meta = _getToolMeta(toolName);
+    const count = items.length;
+    const label = count === 1 ? meta.label : `${count} ${meta.label}s`;
+    const open = isLive ? ' open' : '';
+    html += `<details class="tool-group"${open}>`;
+    html += `<summary><i class="ph ph-${meta.icon}"></i> ${escapeHtml(label)}</summary>`;
+    html += `<div class="tool-group-body">`;
+    for (const item of items) {
+      const shortArgs = item.args.length > 80 ? item.args.slice(0, 77) + '...' : item.args;
+      html += `<div class="tool-entry"><span class="tool-entry-name">${escapeHtml(item.name)}</span> <span class="tool-entry-args">${escapeHtml(shortArgs)}</span></div>`;
+    }
+    html += `</div></details>`;
+  }
+  return html;
 }
 
 function connect() {
@@ -2718,7 +2778,10 @@ function connect() {
       // Remove live streaming elements — final content is in data.text
       document.getElementById('liveThinking')?.remove();
       _clearLiveContent();
-      // Keep activity log (tool calls) — don't remove it
+      document.getElementById('activityLog')?.remove();
+      // Pass accumulated tool calls to message renderer
+      data._toolCalls = _pendingToolCalls.slice();
+      _pendingToolCalls = [];
       addMessage('assistant', data.text, data);
       setGenerating(false); loadStatus();
       // Refresh thread list without reloading history (preserves inline images)
@@ -3297,6 +3360,21 @@ function addMessage(role, text, meta, imageSrc) {
     img.alt = 'uploaded image';
     div.appendChild(img);
   }
+  // Tool calls block (collapsible, Claude Code style)
+  if (role === 'assistant' && meta && meta._toolCalls && meta._toolCalls.length) {
+    const toolsDiv = document.createElement('div');
+    toolsDiv.className = 'msg-tools';
+    toolsDiv.innerHTML = _buildToolGroupsHtml(meta._toolCalls, false);
+    div.appendChild(toolsDiv);
+  }
+  // Also render from saved meta.tools (history reload)
+  if (role === 'assistant' && meta && meta.tools && meta.tools.length && !(meta._toolCalls && meta._toolCalls.length)) {
+    const toolsDiv = document.createElement('div');
+    toolsDiv.className = 'msg-tools';
+    const calls = meta.tools.map(t => ({name: t, args: ''}));
+    toolsDiv.innerHTML = _buildToolGroupsHtml(calls, false);
+    div.appendChild(toolsDiv);
+  }
   const content = document.createElement('div');
   content.innerHTML = renderMarkdown(text);
   div.appendChild(content);
@@ -3322,8 +3400,7 @@ function addMessage(role, text, meta, imageSrc) {
     }
     const m = document.createElement('div'); m.className = 'msg-meta';
     let p = [];
-    if (meta.duration_ms) p.push(`${meta.duration_ms}ms`);
-    if (meta.tools?.length) p.push(meta.tools.map(t=>`<span class="tool-tag"><i class="ph ph-wrench"></i> ${escapeHtml(t)}</span>`).join(''));
+    if (meta.duration_ms) p.push(`${(meta.duration_ms/1000).toFixed(1)}s`);
     if (meta.context_hits) p.push(`<i class="ph ph-paperclip"></i> ${meta.context_hits} memories`);
     if (meta.fallback_model) {
       p.push(`<span style="color:var(--accent)">&#9889; via ${escapeHtml(meta.fallback_model)}</span>`);
@@ -3530,7 +3607,8 @@ function send() {
   ws.send(JSON.stringify(payload));
   input.value = ''; input.style.height = 'auto';
   clearImage();
-  document.getElementById('activityLog')?.remove(); // clear previous tool log
+  document.getElementById('activityLog')?.remove();
+  _pendingToolCalls = [];
   setGenerating(true);
 }
 function setGenerating(on) {

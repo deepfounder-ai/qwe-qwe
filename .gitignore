@@ -36,4 +36,5 @@ skills/
 !skills/soul_editor.py
 !skills/skill_creator.py
 !skills/mcp_manager.py
+!skills/browser.py
 .claude/

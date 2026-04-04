@@ -86,17 +86,19 @@ def list_all() -> list[dict]:
     return skills
 
 
-_DEFAULT_SKILLS = {"mcp_manager", "soul_editor", "skill_creator"}  # always-on built-in skills
+_DEFAULT_SKILLS = {"mcp_manager", "soul_editor", "skill_creator", "browser"}  # always-on built-in skills
 
 
 def get_active() -> set[str]:
-    """Get set of active skill names from SQLite. Cleans stale entries."""
+    """Get set of active skill names from SQLite. Default skills always included."""
     raw = db.kv_get("active_skills")
     if not raw:
         return set(_DEFAULT_SKILLS)
     names = set(raw.split(","))
     all_paths = _all_skill_paths()
     valid = {n for n in names if n in all_paths}
+    # Always include default skills
+    valid |= {n for n in _DEFAULT_SKILLS if n in all_paths}
     if valid != names:
         set_active(valid)
     return valid
@@ -258,6 +260,20 @@ def validate_skill(skill_path: str) -> tuple[bool, list[str]]:
     return (len(errors) == 0, errors)
 
 
+# Common hallucinated tool names → redirect to real skill
+_TOOL_ALIASES = {
+    "google_search": "browser",
+    "open_url": "browser",
+    "navigate": "browser",
+    "browse": "browser",
+    "extract_content": "browser",
+    "get_page_content": "browser",
+    "read_page": "browser",
+    "take_screenshot": "browser",
+    "capture_screenshot": "browser",
+}
+
+
 def execute(tool_name: str, args: dict) -> str:
     """Execute a tool from active skills. Returns result or None if not found."""
     active = get_active()
@@ -272,4 +288,16 @@ def execute(tool_name: str, args: dict) -> str:
                 return mod.execute(tool_name, args)
         except Exception as e:
             return f"Skill error: {e}"
+
+    # Fallback: check if hallucinated tool name has an alias to a real skill
+    alias_skill = _TOOL_ALIASES.get(tool_name)
+    if alias_skill and alias_skill in active:
+        path = _find_skill(alias_skill)
+        if path:
+            try:
+                mod = _load_module(path)
+                return mod.execute(tool_name, args)
+            except Exception as e:
+                return f"Skill error: {e}"
+
     return None

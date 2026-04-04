@@ -469,8 +469,47 @@ def _self_check_tool_call(client, model: str, tool_name: str,
 
 
 def _strip_thinking(text: str) -> str:
-    """Remove <think>...</think> blocks from model output."""
-    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+    """Remove thinking blocks from model output (Qwen <think>, Gemma <|channel>thought, etc.)."""
+    # Qwen / DeepSeek style
+    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
+
+    # Gemma style: <|channel>thought ... entire content may be inside
+    # If the WHOLE text is a thinking block, extract any user-facing reply from it
+    if text.strip().startswith("<|channel>thought"):
+        # Try to find actual reply after thinking reasoning
+        # Look for patterns that indicate the model switched to answering
+        lines = text.split("\n")
+        reply_lines = []
+        in_reply = False
+        for line in lines:
+            stripped = line.strip()
+            # Skip the opening tag
+            if stripped.startswith("<|channel>"):
+                continue
+            # Heuristic: reply starts after thinking when model addresses user directly
+            # (Russian/English text without "Step", "Thinking", numbered analysis)
+            if not in_reply:
+                # Detect transition to reply
+                if (stripped and not stripped.startswith(("Step ", "Thinking", "Analysis", "1.", "2.", "3.", "4.", "5."))
+                        and not stripped.startswith(("-", "*"))
+                        and len(stripped) > 30
+                        and any(c in stripped for c in "абвгдежзийклмнопрстуфхцчшщьыъэюяАБВ")):
+                    in_reply = True
+                    reply_lines.append(line)
+            else:
+                reply_lines.append(line)
+        if reply_lines:
+            text = "\n".join(reply_lines)
+        else:
+            # Fallback: just strip the tag and return everything
+            text = re.sub(r"<\|channel\>thought\b\s*", "", text, flags=re.DOTALL)
+    else:
+        # Non-whole-block: strip thinking segment
+        text = re.sub(r"<\|channel\>thought\b.*?(?=<\|channel\>|$)", "", text, flags=re.DOTALL)
+
+    # Generic: strip any remaining <|...|> special tokens
+    text = re.sub(r"<\|[^>]+\>", "", text)
+    return text.strip()
 
 
 def _clean_response(text: str) -> str:
@@ -1237,8 +1276,17 @@ def _run_inner(user_input: str, thread_id: str | None,
                         _console.print(f"  [dim]{text}[/]", end="")
                         _emit_thinking(text)
                 else:
-                    # Normal reply content — stream to clients
-                    _emit_content(text)
+                    # Gemma thinking: <|channel>thought ... detect and redirect
+                    if "<|channel>thought" in full_content and not in_think:
+                        in_think = True
+                        think_shown = True
+                        _console.print("  [dim]💭 thinking...[/]")
+                        _emit_status("💭 thinking...")
+                    elif in_think:
+                        pass  # already handled above
+                    else:
+                        # Normal reply content — stream to clients
+                        _emit_content(text)
 
             # Stream tool calls
             if delta.tool_calls:
@@ -1253,6 +1301,9 @@ def _run_inner(user_input: str, thread_id: str | None,
                             tool_calls_data[idx]["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
                             tool_calls_data[idx]["arguments"] += tc_delta.function.arguments
+
+        # Log finish state for debugging
+        _log.info(f"LLM response: finish={finish_reason}, content_len={len(full_content)}, tool_calls={len(tool_calls_data)}, content_preview={full_content[:200]!r}")
 
         # Process tool calls
         if tool_calls_data:
@@ -1482,13 +1533,11 @@ def _run_inner(user_input: str, thread_id: str | None,
         result.thinking = reasoning_content.strip() or _extract_thinking(full_content) or ""
         raw_reply = _strip_thinking(full_content)
 
-        # Retry: if model hedges instead of acting
-        action_phrases = ["i would", "i can", "i'll", "let me", "shall i", "want me to"]
-        if (rounds == 0 and
-            any(p in raw_reply.lower()[:100] for p in action_phrases) and
-            len(raw_reply) < 300):
+        # Retry: if model hedges instead of acting (no tool calls on round 0)
+        if (rounds == 0 and not tool_calls_data and len(raw_reply) < 600
+                and len(raw_reply) > 20):
             messages.append({"role": "assistant", "content": raw_reply})
-            messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools."})
+            messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools. Не спрашивай — делай. Используй инструменты."})
             _console.print(f"  [dim]🔄 nudging to use tools...[/]")
             rounds += 1
             continue

@@ -379,6 +379,21 @@ def get_all_mcp_tools() -> list[dict]:
     return all_tools
 
 
+def _fix_paths_in_args(args: dict) -> dict:
+    """Convert Git Bash paths (/c/Users/...) to Windows (C:/Users/...) in tool args."""
+    import sys
+    if sys.platform != "win32":
+        return args
+    fixed = {}
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) >= 3 and v[0] == "/" and v[2] == "/":
+            drive = v[1].upper()
+            if drive.isalpha():
+                v = f"{drive}:{v[2:]}"
+        fixed[k] = v
+    return fixed
+
+
 def execute_mcp_tool(full_name: str, args: dict) -> str:
     """Execute an MCP tool. full_name format: mcp__servername__toolname"""
     parts = full_name.split("__", 2)
@@ -393,6 +408,9 @@ def execute_mcp_tool(full_name: str, args: dict) -> str:
         return f"MCP server '{server_name}' not connected"
     if not conn.connected:
         return f"MCP server '{server_name}' disconnected"
+
+    # Fix Git Bash paths for Windows MCP servers
+    args = _fix_paths_in_args(args)
 
     return conn.call_tool(tool_name, args)
 

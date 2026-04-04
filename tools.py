@@ -463,17 +463,20 @@ def execute(name: str, args: dict) -> str:
             venv = os.environ.get("VIRTUAL_ENV")
             if venv:
                 env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
+            # Force UTF-8 for subprocess to handle emoji and non-ASCII
+            env["PYTHONIOENCODING"] = "utf-8"
             # Use bash on Windows if available (Git Bash), otherwise cmd
             if _SHELL_EXE:
                 result = subprocess.run(
                     [_SHELL_EXE, "-c", args["command"]],
-                    capture_output=True, text=True,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
                     timeout=t, env=env, cwd=str(WORKSPACE),
                     stdin=subprocess.DEVNULL,
                 )
             else:
                 result = subprocess.run(
                     args["command"], shell=True, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
                     timeout=t, env=env, cwd=str(WORKSPACE),
                     stdin=subprocess.DEVNULL,
                 )

@@ -324,10 +324,11 @@ IMPORTANT: memory_save IS your remember/store_knowledge tool. Do NOT create a sk
     # ── 3. RULES ──
     lines.append("""
 Rules:
-1. ALWAYS use tools for actions. Never say "I would run..." — actually run it.
-2. If unsure, TRY first with a tool, then report result.
-3. One step at a time. Call a tool → read output → decide next.
-4. NEVER pretend you did something. No tool call = IT DIDN'T HAPPEN.
+1. ACT, DON'T ASK. When user requests an action, IMMEDIATELY call a tool. NEVER ask for clarification if you can make reasonable assumptions. Pick sensible defaults and execute.
+2. ALWAYS use tools for actions. Never say "I would run..." or "I can do..." — actually DO IT with a tool call.
+3. If unsure, TRY first with a tool, then report result. Wrong guess is better than asking.
+4. One step at a time. Call a tool → read output → decide next.
+5. NEVER pretend you did something. No tool call = IT DIDN'T HAPPEN.
 5. Keep responses short. Write like a human in chat, not a wiki.
 6. For installs: pip (venv active) or apt. timeout=120.
 7. Create ONLY what user asked for. No extra tasks.
