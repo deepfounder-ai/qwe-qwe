@@ -390,21 +390,48 @@ When asked "who are you" or "what can you do" — mention your name, capabilitie
     # ── 6. SELF-KNOWLEDGE & RUNTIME ──
     data_dir = str(config.DATA_DIR)
     project_dir = str(config._PROJECT_ROOT)
-    lines.append(f"""
-YOUR FILE SYSTEM (you know where your own files are):
-- Project root (your source code): {project_dir}/
-- Data directory: {data_dir}/
-- Logs: {data_dir}/logs/qwe-qwe.log (all events), {data_dir}/logs/errors.log (errors only)
-- Database: {config.DB_PATH}
-- Memory (Qdrant): {config.QDRANT_PATH}/
-- Workspace: {data_dir}/workspace/ (user files, relative paths resolve here)
-- Skills: {data_dir}/skills/ (user-created skills)
-- Uploads: {data_dir}/uploads/
-- Backups: {data_dir}/backups/
-- Config override: environment variables with QWE_ prefix
 
-When asked about logs, errors, data location — use these paths directly. No guessing.
-To read logs: read_file("{data_dir}/logs/qwe-qwe.log") or shell("tail -50 {data_dir}/logs/errors.log")
+    # Generate shell-compatible paths for the system prompt
+    import sys as _sys
+    def _shell_path(p: str) -> str:
+        """Convert Windows path to Git Bash format: C:\\Users\\x → /c/Users/x"""
+        p = p.replace("\\", "/")
+        if _sys.platform == "win32" and len(p) >= 2 and p[1] == ":":
+            drive = p[0].lower()
+            p = f"/{drive}{p[2:]}"
+        return p
+
+    sp = _shell_path(project_dir)  # shell project path
+    sd = _shell_path(data_dir)     # shell data path
+    sw = _shell_path(str(config.WORKSPACE_DIR))  # shell workspace path
+
+    # Determine shell type
+    if _sys.platform == "win32":
+        import shutil as _shutil
+        shell_type = "Git Bash" if _shutil.which("bash") else "cmd.exe"
+    elif _sys.platform == "darwin":
+        shell_type = "zsh"
+    else:
+        shell_type = "bash"
+
+    lines.append(f"""
+YOUR FILE SYSTEM:
+- Project root (your source code): {sp}/
+- Data directory: {sd}/
+- Logs: {sd}/logs/qwe-qwe.log (all), {sd}/logs/errors.log (errors)
+- Database: {_shell_path(str(config.DB_PATH))}
+- Memory (Qdrant): {_shell_path(str(config.QDRANT_PATH))}/
+- Workspace: {sw}/ (shell CWD, relative paths resolve here)
+- Skills: {sd}/skills/
+- Uploads: {sd}/uploads/
+
+SHELL: {shell_type}. Use UNIX commands (ls, find, grep, cat, wc). Do NOT use dir, findstr, type.
+IMPORTANT: All paths above are in shell format — use them directly in shell commands.
+For read_file/write_file tools, use the same paths.
+
+When asked about your code: read files from {sp}/ (e.g. {sp}/agent.py)
+When asked about logs: shell("tail -50 {sd}/logs/qwe-qwe.log")
+Config override: environment variables with QWE_ prefix
 
 Environment: {_get_sysinfo()}
 Language: ALWAYS reply in {lang}. This is mandatory.""")

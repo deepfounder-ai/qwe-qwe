@@ -179,6 +179,11 @@ body {
 }
 .msg-thinking summary { cursor: pointer; font-style: normal; font-size: 11px; color: var(--accent-dim); }
 .msg-thinking summary:hover { color: var(--accent); }
+.activity-log { background: transparent; padding: 8px 16px; border-left: 2px solid var(--border); }
+.activity-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+.activity-item i { color: var(--accent-dim); font-size: 14px; flex-shrink: 0; }
+.activity-tool { color: var(--accent); font-weight: 600; }
+.activity-args { color: var(--text-dim); opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-thinking { background: rgba(245,166,35,0.04); border-left: 2px solid var(--accent-dim); animation: think-pulse 2s ease-in-out infinite; }
 .live-thinking-header { font-size: 11px; color: var(--accent-dim); margin-bottom: 4px; }
 .live-thinking-text { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; margin: 0; font-family: var(--mono); max-height: 300px; overflow-y: auto; line-height: 1.5; }
@@ -200,7 +205,7 @@ body {
 .msg h1,.msg h2,.msg h3 { color: var(--accent); margin: 8px 0 4px; }
 .msg blockquote { border-left: 3px solid var(--accent-dim); padding-left: 12px; margin: 6px 0; color: var(--text-dim); }
 .input-area { padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
-.input-row { display: flex; gap: 10px; align-items: flex-end; }
+.input-row { display: flex; gap: 10px; align-items: end; }
 .img-preview { position: relative; display: inline-block; margin-bottom: 8px; }
 .img-preview img { max-height: 80px; border-radius: 8px; border: 1px solid var(--border); }
 .img-preview .img-remove {
@@ -238,20 +243,14 @@ body {
 }
 #input:focus { border-color: var(--accent); }
 #input::placeholder { color: var(--text-dim); }
-#send { background: var(--accent); color: #000; border: none; border-radius: 10px; padding: 12px 20px; font-weight: 600; cursor: pointer; font-size: 14px; }
+#send { background: var(--accent); color: #000; border: none; border-radius: 10px; padding: 0 20px; height: 44px; font-weight: 600; cursor: pointer; font-size: 14px; flex-shrink: 0; }
 #send:hover { opacity: 0.85; } #send:disabled { opacity: 0.4; cursor: not-allowed; }
 .stop-btn {
   background: var(--error); color: #fff; border: none; border-radius: 10px;
-  padding: 12px 16px; font-size: 16px; cursor: pointer; font-weight: bold;
+  padding: 0 16px; height: 44px; font-size: 16px; cursor: pointer; font-weight: bold; flex-shrink: 0;
   transition: opacity 0.15s;
 }
 .stop-btn:hover { opacity: 0.8; }
-.thread-stats {
-  display: flex; gap: 16px; padding: 6px 4px 0; font-size: 11px;
-  color: var(--text-dim); font-family: var(--mono);
-}
-.thread-stats .ts-item { display: flex; align-items: center; gap: 4px; }
-.thread-stats .ts-val { color: var(--text); }
 .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-dim); gap: 8px; }
 .empty-logo { opacity: 0.3; }
 .empty-logo img { height: 80px; width: auto; }
@@ -408,7 +407,6 @@ body {
 }
 .nav-btn:hover { color: var(--text); background: var(--surface2); }
 .nav-btn.active { color: var(--accent); background: var(--accent-bg); }
-.input-footer { display: flex; justify-content: space-between; align-items: center; padding: 4px 4px 0; }
 .thinking-text {
   font-size: 12px; font-family: var(--mono); color: var(--text-dim);
   cursor: pointer; opacity: 0.6; transition: all 0.15s; user-select: none;
@@ -632,7 +630,6 @@ body {
   </div>
   <div class="header-right">
     <a class="version-badge" id="versionBadge" href="https://github.com/deepfounder-ai/qwe-qwe/releases" target="_blank" style="display:none"></a>
-    <span class="stat" id="statTokens"></span>
     <span class="stat" id="statMemory"></span>
   </div>
 </div>
@@ -667,9 +664,6 @@ body {
       <span class="recording-dot"></span>
       <span id="recTimer">0:00</span>
       <span>Recording...</span>
-    </div>
-    <div class="input-footer">
-      <div class="thread-stats" id="threadStats"></div>
     </div>
   </div>
 </div>
@@ -2680,13 +2674,37 @@ function _clearLiveContent() {
   if (_liveRenderTimer) { clearTimeout(_liveRenderTimer); _liveRenderTimer = null; }
 }
 
+function _getOrCreateActivityLog() {
+  let el = document.getElementById('activityLog');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'activityLog';
+    el.className = 'msg assistant activity-log';
+    chat.appendChild(el);
+  }
+  return el;
+}
+
+function _appendToolCall(name, argsPreview) {
+  const log = _getOrCreateActivityLog();
+  const item = document.createElement('div');
+  item.className = 'activity-item';
+  // Friendly tool name mapping
+  const icons = {shell:'terminal',read_file:'file-text',write_file:'pencil-simple',memory_save:'brain',memory_search:'magnifying-glass',http_request:'globe',schedule_task:'clock'};
+  const icon = icons[name] || 'wrench';
+  const shortArgs = argsPreview.length > 60 ? argsPreview.slice(0, 57) + '...' : argsPreview;
+  item.innerHTML = `<i class="ph ph-${icon}"></i> <span class="activity-tool">${name}</span> <span class="activity-args">${escapeHtml(shortArgs)}</span>`;
+  log.appendChild(item);
+  chat.scrollTop = chat.scrollHeight;
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onopen = () => {
     document.getElementById('statusDot').classList.add('connected');
     clearTimeout(reconnectTimer);
-    loadThreads(); loadStatus(); loadThreadStats(); checkVersion();
+    loadThreads(); loadStatus(); checkVersion();
   };
   ws.onclose = () => {
     document.getElementById('statusDot').classList.remove('connected');
@@ -2700,8 +2718,9 @@ function connect() {
       // Remove live streaming elements — final content is in data.text
       document.getElementById('liveThinking')?.remove();
       _clearLiveContent();
+      // Keep activity log (tool calls) — don't remove it
       addMessage('assistant', data.text, data);
-      setGenerating(false); loadThreadStats(); loadStatus();
+      setGenerating(false); loadStatus();
       // Refresh thread list without reloading history (preserves inline images)
       fetch('/api/threads').then(r=>r.json()).then(t=>{threadsList=t;renderTabs();}).catch(()=>{});
     } else if (data.type === 'thinking_delta') {
@@ -2739,9 +2758,19 @@ function connect() {
     } else if (data.type === 'cron') {
       addMessage('assistant', `⏰ **${data.name}**\n${data.text}`, {});
       chat.scrollTop = chat.scrollHeight;
+    } else if (data.type === 'tool_call') {
+      // Show tool call in activity log (Claude Code style)
+      _appendToolCall(data.name, data.args);
     } else if (data.type === 'status') {
-      // Only clear live content on tool-related status (not "writing reply" transition)
-      if (!data.text.includes('writing reply')) _clearLiveContent();
+      // Show status but preserve accumulated content
+      if (data.text.includes('thinking')) {
+        // thinking status — don't clear anything
+      } else if (data.text.includes('writing reply')) {
+        // about to stream final reply — don't clear
+      } else {
+        // tool status — clear live content (will be replaced by tool_call entries)
+        _clearLiveContent();
+      }
       showStatus(data.text);
     } else if (data.type === 'update_progress') {
       _onUpdateProgress(data.step, data.status, data.detail);
@@ -3501,6 +3530,7 @@ function send() {
   ws.send(JSON.stringify(payload));
   input.value = ''; input.style.height = 'auto';
   clearImage();
+  document.getElementById('activityLog')?.remove(); // clear previous tool log
   setGenerating(true);
 }
 function setGenerating(on) {
@@ -3518,33 +3548,6 @@ async function stopGeneration() {
 input.addEventListener('keydown', (e) => { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); send(); } });
 input.addEventListener('input', () => { input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,120)+'px'; });
 
-// ── Thread stats ──
-async function loadThreadStats(tid) {
-  try {
-    const res = await fetch(`/api/threads/${tid || activeThreadId || 'default'}/stats`);
-    const s = await res.json();
-    const el = document.getElementById('threadStats');
-    const age = s.first_message ? timeAgo(s.first_message) : '—';
-    const lastAct = s.last_message ? timeAgo(s.last_message) : '—';
-    el.innerHTML = `
-      <span class="ts-item">💬 <span class="ts-val">${s.user_messages}</span> you</span>
-      <span class="ts-item"><i class="ph ph-robot"></i> <span class="ts-val">${s.assistant_messages}</span> agent</span>
-      <span class="ts-item">🔧 <span class="ts-val">${s.tool_calls}</span> tools</span>
-      <span class="ts-item">🪙 <span class="ts-val">${s.est_tokens > 1000 ? (s.est_tokens/1000).toFixed(1)+'k' : s.est_tokens}</span> tokens</span>
-      <span class="ts-item">⏱ ${lastAct}</span>
-    `;
-    // Update header stats with current thread data
-    const totalTurns = s.user_messages + s.assistant_messages;
-    document.getElementById('statTokens').innerHTML = `<b>${totalTurns}</b> turns`;
-  } catch(e) { console.error(e); }
-}
-function timeAgo(ts) {
-  const diff = Date.now()/1000 - ts;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
-  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
-  return Math.floor(diff/86400) + 'd ago';
-}
 
 // ── History ──
 async function loadHistory(tid) {
@@ -3562,14 +3565,12 @@ async function loadHistory(tid) {
     showStatus('⚠️ response was interrupted — send a new message or retry');
   }
   chat.scrollTop = chat.scrollHeight;
-  loadThreadStats(t);
 }
 
 // ── Status ──
 async function loadStatus() {
   const res = await fetch('/api/status');
   const s = await res.json();
-  // Header stats updated by loadThreadStats(); loadStatus only sets memories
   document.getElementById('statMemory').innerHTML = `<b>${s.memories}</b> memories`;
 }
 

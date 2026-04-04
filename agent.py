@@ -7,7 +7,25 @@ import config, db, tools, memory, soul, providers, threads
 import logger
 
 _log = logger.get("agent")
-_console = Console()
+_raw_console = Console(highlight=False, force_terminal=False)
+
+class _SafeConsole:
+    """Console wrapper that never crashes on encoding errors (cp1251 on Windows)."""
+    def print(self, *args, **kwargs):
+        try:
+            _raw_console.print(*args, **kwargs)
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            # Fallback: strip emoji and retry
+            try:
+                text = " ".join(str(a) for a in args)
+                text = text.encode("ascii", "replace").decode("ascii")
+                _raw_console.print(text, **kwargs)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+_console = _SafeConsole()
 _compaction_lock = threading.Lock()  # protects message read/delete during compaction
 
 # Status callback: set by server.py to push live updates to WebSocket
@@ -43,6 +61,18 @@ def _emit_content(text: str):
     if _content_callback:
         try:
             _content_callback(text)
+        except Exception:
+            pass
+
+
+_tool_call_callback = None  # set by server.py for tool call events
+
+
+def _emit_tool_call(name: str, args_preview: str):
+    """Emit a tool call event to connected clients (Claude Code style)."""
+    if _tool_call_callback:
+        try:
+            _tool_call_callback(name, args_preview)
         except Exception:
             pass
 
@@ -294,7 +324,9 @@ _CRITICAL_TOOL_PATTERNS = {
     "shell": re.compile(
         r'\b(rm\s|mv\s|chmod\s|kill\s|pip\s+uninstall|git\s+reset|git\s+push'
         r'|DROP\s|DELETE\s+FROM|TRUNCATE)\b', re.IGNORECASE),
-    "write_file": None,   # always critical
+    "write_file": re.compile(
+        r'(system32|/etc/|/usr/|\.env|\.ssh|\.git/|credentials|passwd)',
+        re.IGNORECASE),  # only verify writes to sensitive paths
     "secret_delete": None, # always critical
 }
 
@@ -306,9 +338,12 @@ def _needs_self_check(tool_name: str, args: dict) -> bool:
     pattern = _CRITICAL_TOOL_PATTERNS[tool_name]
     if pattern is None:
         return True  # always check
-    # For shell: check command text
-    cmd = args.get("command", "")
-    return bool(pattern.search(cmd))
+    # Pick the relevant text to check against pattern
+    if tool_name == "write_file":
+        text = args.get("path", "")
+    else:
+        text = args.get("command", "")
+    return bool(pattern.search(text))
 
 
 def _self_verify(client, model: str, tool_name: str, args: dict,
@@ -404,8 +439,13 @@ def _self_check_tool_call(client, model: str, tool_name: str,
                 if parsed.get("status") == "ok":
                     return True, None
                 if parsed.get("status") == "fix" and parsed.get("args"):
-                    _log.info(f"self-check corrected {tool_name}: {args} → {parsed['args']}")
-                    return False, parsed["args"]
+                    fixed = parsed["args"]
+                    # Validate: corrected args must have required fields
+                    if required and not all(k in fixed for k in required):
+                        _log.warning(f"self-check correction missing required fields, ignoring")
+                        return True, None
+                    _log.info(f"self-check corrected {tool_name}: {args} → {fixed}")
+                    return False, fixed
             except json.JSONDecodeError:
                 pass  # fall through to text parsing
 
@@ -415,6 +455,10 @@ def _self_check_tool_call(client, model: str, tool_name: str,
         m = re.search(r'\{.*\}', text, re.DOTALL)
         if m:
             corrected = json.loads(m.group())
+            # Validate: corrected args must have required fields
+            if required and not all(k in corrected for k in required):
+                _log.warning(f"self-check correction missing required fields, ignoring")
+                return True, None
             _log.info(f"self-check corrected {tool_name}: {args} → {corrected}")
             return False, corrected
 
@@ -1106,6 +1150,12 @@ def _run_inner(user_input: str, thread_id: str | None,
         extra = {}
         if providers.get_active_name() == "ollama":
             extra["extra_body"] = {"options": {"num_ctx": config.get("ollama_num_ctx")}}
+
+        # Log prompt size for debugging
+        _prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        _tools_count = len(all_tools)
+        _log.info(f"API call: {len(messages)} msgs, ~{_prompt_chars} chars, {_tools_count} tools, model={_model}")
+
         stream = client.chat.completions.create(
             model=_model,
             messages=messages,
@@ -1306,6 +1356,8 @@ def _run_inner(user_input: str, thread_id: str | None,
 
                 _console.print(f"  [cyan]🔧 {tc['name']}[/]([dim]{args_short}[/])")
                 _emit_status(f"🔧 {tc['name']}")
+                # Emit tool call event for UI (like Claude Code style)
+                _emit_tool_call(tc['name'], args_short)
 
                 # Lazy skill instruction injection (append to system msg, not insert new one)
                 import skills
@@ -1352,6 +1404,10 @@ def _run_inner(user_input: str, thread_id: str | None,
                     else:
                         last_failed_tool = tc["name"]
                         fail_count = 1
+
+                    # Broader stuck detection: too many total errors = model is lost
+                    if total_tool_errors >= 5:
+                        tool_result += f"\n\nWARNING: You have made {total_tool_errors} tool errors this turn. Stop retrying and answer with what you have, or try a completely different approach."
 
                     if fail_count >= 2:
                         _log.error(f"tool {tc['name']} failed 2x, stopping retries")

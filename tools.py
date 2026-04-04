@@ -1,6 +1,6 @@
 """Tool definitions and execution — optimized for small models."""
 
-import json, subprocess, os, re
+import json, subprocess, os, re, shutil, sys
 from pathlib import Path
 import config
 import memory
@@ -10,6 +10,16 @@ _log = logger.get("tools")
 
 # Agent workspace — all relative paths resolve here
 WORKSPACE = config.WORKSPACE_DIR
+
+# Detect shell: prefer bash on Windows (Git Bash), fallback to cmd
+_SHELL_EXE: str | None = None
+if sys.platform == "win32":
+    _SHELL_EXE = shutil.which("bash") or shutil.which("bash.exe")
+    # If bash found, shell commands run via bash — tell subprocess
+    if _SHELL_EXE:
+        _log.info(f"shell: using bash at {_SHELL_EXE}")
+    else:
+        _log.info("shell: bash not found, using cmd.exe")
 
 # Directories the agent is allowed to write to (whitelist — safer than blacklist)
 _WRITE_WHITELIST: list[str] | None = None
@@ -30,10 +40,16 @@ def _get_write_whitelist() -> list[str]:
 def _resolve_path(raw: str, for_write: bool = False) -> Path:
     """Resolve a file path for agent operations.
 
+    - Git Bash paths (/c/Users/...) -> C:/Users/... on Windows
     - Relative paths -> workspace (~/.qwe-qwe/workspace/)
     - ~ expands to home
     - For writes: only allow workspace, data dir, and cwd (whitelist)
     """
+    # Convert Git Bash / MSYS2 paths to Windows: /c/Users/... → C:/Users/...
+    if sys.platform == "win32" and len(raw) >= 3 and raw[0] == "/" and raw[2] == "/":
+        drive = raw[1].upper()
+        if drive.isalpha():
+            raw = f"{drive}:{raw[2:]}"
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = WORKSPACE / p
@@ -139,7 +155,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "shell",
-            "description": "Run a shell command in workspace directory. Returns stdout+stderr.",
+            "description": "Run a bash shell command in workspace directory. Use UNIX commands (ls, find, grep, cat), NOT Windows (dir, findstr). Returns stdout+stderr.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -447,11 +463,20 @@ def execute(name: str, args: dict) -> str:
             venv = os.environ.get("VIRTUAL_ENV")
             if venv:
                 env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
-            result = subprocess.run(
-                args["command"], shell=True, capture_output=True, text=True,
-                timeout=t, env=env, cwd=str(WORKSPACE),
-                stdin=subprocess.DEVNULL  # prevent interactive prompts
-            )
+            # Use bash on Windows if available (Git Bash), otherwise cmd
+            if _SHELL_EXE:
+                result = subprocess.run(
+                    [_SHELL_EXE, "-c", args["command"]],
+                    capture_output=True, text=True,
+                    timeout=t, env=env, cwd=str(WORKSPACE),
+                    stdin=subprocess.DEVNULL,
+                )
+            else:
+                result = subprocess.run(
+                    args["command"], shell=True, capture_output=True, text=True,
+                    timeout=t, env=env, cwd=str(WORKSPACE),
+                    stdin=subprocess.DEVNULL,
+                )
             output = result.stdout or ""
             if result.stderr:
                 output += f"\nSTDERR: {result.stderr}"
@@ -627,8 +652,13 @@ def execute(name: str, args: dict) -> str:
             return f"Unknown tool: {name}"
 
     except subprocess.TimeoutExpired:
-        _log.error(f"shell timeout: {args.get('command', '?')[:100]}")
-        return f"Error: command timed out after {args.get('timeout', 120)}s"
+        cmd = args.get('command', '?')
+        _log.error(f"shell timeout: {cmd[:100]}")
+        # Help the model understand what happened
+        hint = ""
+        if any(srv in cmd for srv in ['uvicorn', 'flask', 'gunicorn', 'npm start', 'node ', 'python -m http']):
+            hint = " This looks like a server/daemon — it blocks forever. Use spawn_task instead of shell for long-running processes."
+        return f"Error: command timed out after {args.get('timeout', 120)}s.{hint} Do NOT retry the same command."
     except Exception as e:
         _log.error(f"tool {name} exception: {e}", exc_info=True)
         # Sanitize error message — don't leak full paths or internals
