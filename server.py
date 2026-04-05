@@ -151,6 +151,9 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
         "context_hits": result.auto_context_hits,
         "thread_id": thread_id or threads.get_active_id(),
         "model_used": result.model,
+        "tokens": getattr(result, "completion_tokens", 0),
+        "prompt_tokens": getattr(result, "prompt_tokens", 0),
+        "tok_per_sec": getattr(result, "tok_per_sec", 0),
     }
 
 
@@ -167,9 +170,19 @@ async def lifespan(app: FastAPI):
         mcp_client.start_all()
     except Exception as e:
         _log.warning(f"MCP startup: {e}")
+    # Auto-start Telegram bot if enabled and has token
+    try:
+        if telegram_bot.is_enabled() and telegram_bot.get_token():
+            telegram_bot.start(on_message=_telegram_handler)
+    except Exception as e:
+        _log.warning(f"Telegram startup: {e}")
     _log.info("web server started")
     yield
     # Shutdown
+    try:
+        telegram_bot.stop()
+    except Exception:
+        pass
     try:
         import mcp_client
         mcp_client.stop_all()
@@ -1614,6 +1627,9 @@ async def websocket_chat(ws: WebSocket):
                     "duration_ms": result["duration_ms"],
                     "context_hits": result["context_hits"],
                     "thread_id": result["thread_id"],
+                    "tokens": result.get("tokens", 0),
+                    "prompt_tokens": result.get("prompt_tokens", 0),
+                    "tok_per_sec": result.get("tok_per_sec", 0),
                 }
                 if audio_url:
                     reply_payload["audio_url"] = audio_url

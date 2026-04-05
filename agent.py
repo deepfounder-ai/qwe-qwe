@@ -863,7 +863,8 @@ class TurnResult:
     """Result of one agent turn with debug info."""
     __slots__ = ("reply", "thinking", "prompt_tokens", "completion_tokens", "total_tokens",
                  "tool_calls_made", "model", "auto_context_hits", "json_repairs",
-                 "retry_successes", "self_check_fixes", "self_check_rejections")
+                 "retry_successes", "self_check_fixes", "self_check_rejections",
+                 "tok_per_sec")
 
     def __init__(self):
         self.reply = ""
@@ -871,6 +872,7 @@ class TurnResult:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.tok_per_sec = 0.0
         self.tool_calls_made: list[str] = []
         self.model = providers.get_model()
         self.auto_context_hits = 0
@@ -1173,11 +1175,27 @@ def _run_inner(user_input: str, thread_id: str | None,
     _injected_instructions: set[str] = set()  # track which skill instructions were injected
 
     max_tool_rounds = config.get("max_tool_rounds")
+    _log.info(f"entering tool loop: rounds={rounds}, max={max_tool_rounds}, msgs={len(messages)}")
+    _nudge_cleanup = False
     while rounds < max_tool_rounds:
+        # Clean up nudge messages from previous round (don't let them persist in history)
+        if _nudge_cleanup:
+            # Remove last 2 messages (assistant hedge + user nudge)
+            if len(messages) >= 2 and messages[-1].get("content", "").startswith("[system]"):
+                messages.pop()  # remove nudge
+                messages.pop()  # remove hedge
+            _nudge_cleanup = False
+
         # Check abort
         if hasattr(sys.modules[__name__], '_abort_event') and _abort_event.is_set():
             result.reply = "⏹ Stopped."
             break
+
+        # Warn model when approaching round limit
+        if rounds == max_tool_rounds - 2:
+            messages.append({"role": "user", "content": "[system] You have 2 tool rounds left. Wrap up and give your final answer NOW."})
+        elif rounds == max_tool_rounds - 1:
+            messages.append({"role": "user", "content": "[system] LAST round. Answer with what you have."})
 
         all_tools = tools.get_all_tools(compact=True)
 
@@ -1198,17 +1216,32 @@ def _run_inner(user_input: str, thread_id: str | None,
         _tools_count = len(all_tools)
         _log.info(f"API call: {len(messages)} msgs, ~{_prompt_chars} chars, {_tools_count} tools, model={_model}")
 
-        stream = client.chat.completions.create(
-            model=_model,
-            messages=messages,
-            tools=all_tools,
-            tool_choice="auto",
-            temperature=soul.get_temperature(),
-            presence_penalty=presence_penalty,
-            max_tokens=2048,
-            stream=True,
-            **extra,
-        )
+        try:
+            stream = client.chat.completions.create(
+                model=_model,
+                messages=messages,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=soul.get_temperature(),
+                presence_penalty=presence_penalty,
+                max_tokens=2048,
+                stream=True,
+                stream_options={"include_usage": True},
+                **extra,
+            )
+        except Exception:
+            # Fallback without stream_options (not all providers support it)
+            stream = client.chat.completions.create(
+                model=_model,
+                messages=messages,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=soul.get_temperature(),
+                presence_penalty=presence_penalty,
+                max_tokens=2048,
+                stream=True,
+                **extra,
+            )
 
         # Collect streamed response
         full_content = ""
@@ -1217,8 +1250,13 @@ def _run_inner(user_input: str, thread_id: str | None,
         in_think = False
         think_shown = False
         finish_reason = None
+        _stream_usage = None  # usage from last stream chunk
+        _stream_start = time.time()
 
         for chunk in stream:
+            # Capture usage from final chunk (empty choices)
+            if hasattr(chunk, 'usage') and chunk.usage:
+                _stream_usage = chunk.usage
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta:
                 continue
@@ -1542,13 +1580,19 @@ def _run_inner(user_input: str, thread_id: str | None,
         raw_reply = _strip_thinking(full_content)
 
         # Retry: if model hedges instead of acting (no tool calls on round 0)
-        if (rounds == 0 and not tool_calls_data and len(raw_reply) < 3000
-                and len(raw_reply) > 20):
+        # Only nudge for substantial requests (long user input = likely needs tools)
+        # Nudge messages are TEMPORARY — removed after retry so they don't poison history
+        if (rounds == 0 and not tool_calls_data
+                and len(user_input.strip()) > 40
+                and len(raw_reply) < 3000 and len(raw_reply) > 20):
+            # Add temporary nudge (will be removed after this round)
             messages.append({"role": "assistant", "content": raw_reply})
-            messages.append({"role": "user", "content": "Don't ask, just do it. Use the tools NOW. Не спрашивай — ДЕЛАЙ. Используй инструменты СЕЙЧАС."})
+            messages.append({"role": "user", "content": "[system] Use the tools to complete the task."})
             _console.print(f"  [dim]🔄 nudging to use tools...[/]")
             _emit_status("🔄 nudging to act...")
             rounds += 1
+            # After retry, remove the nudge messages so they don't stay in history
+            _nudge_cleanup = True
             continue
 
         result.reply = _clean_response(raw_reply)
@@ -1560,9 +1604,21 @@ def _run_inner(user_input: str, thread_id: str | None,
             _, fb_model = fb_config
             result.reply += f"\n\n---\n_Ответ короткий. Отправить на {fb_model}?_"
 
-        # Track session tokens (estimate from content length since streaming doesn't give usage)
-        est_tokens = len(full_content) // 4
+        # Track tokens — use real usage if available, else estimate
+        if _stream_usage:
+            est_tokens = _stream_usage.completion_tokens
+            prompt_tokens = _stream_usage.prompt_tokens
+        else:
+            est_tokens = len(full_content) // 4
+            prompt_tokens = 0
         turn_ms = int((time.time() - turn_start) * 1000)
+        stream_ms = int((time.time() - _stream_start) * 1000)
+        tok_per_sec = round(est_tokens / (stream_ms / 1000), 1) if stream_ms > 0 else 0
+
+        # Store token stats in result for server to forward
+        result.completion_tokens = est_tokens
+        result.prompt_tokens = prompt_tokens
+        result.tok_per_sec = tok_per_sec
 
         # Save with metadata for history restore
         msg_meta = {
@@ -1570,6 +1626,9 @@ def _run_inner(user_input: str, thread_id: str | None,
             "duration_ms": turn_ms,
             "context_hits": result.auto_context_hits,
             "thinking": result.thinking or "",
+            "tokens": est_tokens,
+            "prompt_tokens": prompt_tokens,
+            "tok_per_sec": tok_per_sec,
         }
         db.save_message("assistant", result.reply, thread_id=tid, meta=msg_meta)
         prev = int(db.kv_get("session_completion_tokens") or "0")

@@ -3431,6 +3431,8 @@ function addMessage(role, text, meta, imageSrc) {
     const m = document.createElement('div'); m.className = 'msg-meta';
     let p = [];
     if (meta.duration_ms) p.push(`${(meta.duration_ms/1000).toFixed(1)}s`);
+    if (meta.tok_per_sec) p.push(`${meta.tok_per_sec} tok/s`);
+    if (meta.tokens) p.push(`${meta.tokens} tokens`);
     if (meta.context_hits) p.push(`<i class="ph ph-paperclip"></i> ${meta.context_hits} memories`);
     if (meta.fallback_model) {
       p.push(`<span style="color:var(--accent)">&#9889; via ${escapeHtml(meta.fallback_model)}</span>`);

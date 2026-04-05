@@ -1559,14 +1559,8 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
                 thinking_text = "".join(_thinking_buf).strip()
                 tool_names = getattr(agent, '_last_tools', []) or []
 
-                # Build enriched response
+                # Build enriched response (no thinking — too noisy for Telegram)
                 parts = []
-                if thinking_text:
-                    # Telegram spoiler for thinking (collapsed by default)
-                    short_thinking = thinking_text[:500]
-                    if len(thinking_text) > 500:
-                        short_thinking += "..."
-                    parts.append(f"💭 ||{short_thinking}||")
                 parts.append(response)
                 if tool_names:
                     tools_str = ", ".join(f"`{t}`" for t in tool_names)

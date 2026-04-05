@@ -110,6 +110,7 @@ def _check_shell_safety(cmd: str) -> str | None:
 _CORE_TOOL_NAMES = {
     "memory_search", "memory_save",
     "read_file", "write_file", "shell",
+    "self_config",  # manage own settings
     "http_request", "spawn_task",
     "tool_search",  # meta-tool to discover more tools
 }
@@ -412,6 +413,23 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    # Self-config: read/write own settings
+    {
+        "type": "function",
+        "function": {
+            "name": "self_config",
+            "description": "Read or change qwe-qwe's own settings. action='list' shows all, action='get' reads one, action='set' changes one. Keys: telegram:bot_token, telegram:chat_id, telegram:group_id, streaming:telegram, or any setting name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "get", "set"], "description": "list=show all settings, get=read one, set=change one"},
+                    "key": {"type": "string", "description": "Setting key (e.g. 'telegram:bot_token', 'max_tool_rounds', 'context_budget')"},
+                    "value": {"type": "string", "description": "New value (for action=set)"},
+                },
+                "required": ["action"],
+            },
+        },
+    },
     # Meta-tool: discover additional tools
     {
         "type": "function",
@@ -466,6 +484,66 @@ _TOOL_SEARCH_INDEX = {
     "navigate": ["browser_open"],
     "click": ["browser_click", "browser_fill"],
 }
+
+
+def _do_self_config(args: dict) -> str:
+    """Read or change qwe-qwe's own settings."""
+    import db
+    action = args.get("action", "list")
+    key = args.get("key", "")
+    value = args.get("value", "")
+
+    if action == "list":
+        lines = ["=== Editable Settings ==="]
+        for k, (kv_key, type_, default, desc, *_) in config.EDITABLE_SETTINGS.items():
+            current = db.kv_get(kv_key)
+            if current is None:
+                current = str(default)
+            lines.append(f"  {k} = {current}  ({desc})")
+        # Also show key system KV values
+        lines.append("\n=== System Keys ===")
+        for sys_key in ["telegram:bot_token", "telegram:chat_id", "telegram:group_id",
+                        "telegram:streaming", "user_name", "active_skills",
+                        "soul:name", "soul:language"]:
+            val = db.kv_get(sys_key)
+            if val and "token" in sys_key:
+                val = val[:15] + "..." if len(val) > 15 else val  # mask tokens
+            lines.append(f"  {sys_key} = {val or '(not set)'}")
+        return "\n".join(lines)
+
+    elif action == "get":
+        if not key:
+            return "Error: 'key' is required for action='get'"
+        # Try editable settings first
+        if key in config.EDITABLE_SETTINGS:
+            return f"{key} = {config.get(key)}"
+        # Try raw KV
+        val = db.kv_get(key)
+        return f"{key} = {val}" if val is not None else f"{key} is not set"
+
+    elif action == "set":
+        if not key:
+            return "Error: 'key' is required for action='set'"
+        if not value and value != "0":
+            return "Error: 'value' is required for action='set'"
+        # Try editable settings first (has validation)
+        if key in config.EDITABLE_SETTINGS:
+            return config.set(key, value)
+        # Raw KV set for system keys (telegram, soul, etc.)
+        db.kv_set(key, value)
+        # Auto-restart telegram bot when token changes
+        if key == "telegram:bot_token" and value:
+            try:
+                import telegram_bot
+                telegram_bot.stop()
+                telegram_bot.set_token(value)
+                telegram_bot.start()
+                return f"✓ {key} set + telegram bot restarted"
+            except Exception as e:
+                return f"✓ {key} set (bot restart failed: {e})"
+        return f"✓ {key} = {value}"
+
+    return f"Unknown action: {action}. Use 'list', 'get', or 'set'."
 
 
 def _do_tool_search(query: str) -> str:
@@ -529,6 +607,9 @@ def execute(name: str, args: dict) -> str:
 
         if name == "tool_search":
             return _do_tool_search(args.get("query", ""))
+
+        elif name == "self_config":
+            return _do_self_config(args)
 
         elif name == "memory_search":
             results = memory.search(args["query"], tag=args.get("tag"))
