@@ -145,12 +145,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "memory_save",
-            "description": "Save important info to long-term memory.",
+            "description": "Save info to long-term memory. Long texts auto-chunked for knowledge graph.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "What to remember"},
-                    "tag": {"type": "string", "description": "Category: user/project/fact/task"},
+                    "text": {"type": "string", "description": "What to remember (long texts auto-chunked)"},
+                    "tag": {"type": "string", "description": "Category: user/project/fact/task/knowledge"},
+                    "source": {"type": "string", "description": "Source name (article title, URL, filename)"},
                 },
                 "required": ["text"],
             },
@@ -629,7 +630,16 @@ def execute(name: str, args: dict) -> str:
             return f"✓ Deleted memory: {text_preview}..."
 
         elif name == "memory_save":
-            pid = memory.save(args["text"], tag=args.get("tag", "general"))
+            text = args["text"]
+            tag = args.get("tag", "general")
+            meta = {}
+            if args.get("source"):
+                meta["source"] = args["source"]
+            pid = memory.save(text, tag=tag, meta=meta if meta else None)
+            chunked = len(text) > 1000
+            if chunked:
+                chunks = memory._chunk_text(text)
+                return f"Saved ({len(chunks)} chunks, group id: {pid[:8]}, queued for synthesis)"
             return f"Saved (id: {pid[:8]})"
 
         elif name == "read_file":

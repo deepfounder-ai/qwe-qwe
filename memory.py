@@ -153,6 +153,8 @@ def _ensure_payload_indexes(qc: QdrantClient, collection: str):
             "tag": PayloadSchemaType.KEYWORD,
             "thread_id": PayloadSchemaType.KEYWORD,
             "ts": PayloadSchemaType.FLOAT,
+            "synthesis_status": PayloadSchemaType.KEYWORD,
+            "synthesis_group": PayloadSchemaType.KEYWORD,
         }
         for field, schema_type in indexes.items():
             if field not in existing:
@@ -576,19 +578,104 @@ def search_grouped(query: str, limit: int = config.MAX_MEMORY_RESULTS,
         return search(query, limit=limit, tag=tag)
 
 
+# ── Chunking ──
+
+_CHUNK_SIZE = 800
+_CHUNK_OVERLAP = 100
+_CHUNK_THRESHOLD = 1000  # auto-chunk texts longer than this
+
+
+def _chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
+    """Split text into chunks on sentence boundaries.
+
+    Tries to split on '. ', '\\n', '! ', '? ' to preserve meaning.
+    Falls back to hard split at `size` if no boundary found.
+    """
+    if len(text) <= size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        if end >= len(text):
+            chunks.append(text[start:])
+            break
+        # Find best split point (sentence boundary near end)
+        best = -1
+        for sep in [". ", ".\n", "\n\n", "\n", "! ", "? ", "; "]:
+            idx = text.rfind(sep, start + size // 2, end)
+            if idx > best:
+                best = idx + len(sep)
+        if best <= start:
+            best = end  # hard split
+        chunks.append(text[start:best])
+        start = best - overlap  # overlap for context continuity
+        if start < 0:
+            start = 0
+    return chunks
+
+
 # ── Save ──
 
 def save(text: str, tag: str = "general", dedup: bool = True,
          thread_id: str | None = None, meta: dict | None = None) -> str:
     """Save a memory with both dense and sparse vectors.
 
+    Long texts (>1000 chars) are auto-chunked into ~800 char pieces.
+    Each chunk gets synthesis_status="pending" for future knowledge graph synthesis.
+    Short facts get synthesis_status="skip".
+
     Args:
         text: memory content
-        tag: category (general, user, compaction, project, etc.)
+        tag: category (general, user, knowledge, project, etc.)
         dedup: if True, update existing memory if >0.9 similarity
         thread_id: associate with a specific thread/topic
-        meta: extra metadata dict (source, topic_name, etc.)
+        meta: extra metadata dict (source, source_type, etc.)
+
+    Returns:
+        point ID (or first chunk ID for chunked saves)
     """
+    # Auto-chunk long texts
+    if len(text) > _CHUNK_THRESHOLD and tag not in ("experience", "compaction"):
+        return _save_chunked(text, tag, thread_id, meta)
+
+    # Short text — save as single point
+    return _save_single(text, tag, dedup, thread_id, meta,
+                        synthesis_status="skip")
+
+
+def _save_chunked(text: str, tag: str,
+                  thread_id: str | None, meta: dict | None) -> str:
+    """Save long text as multiple chunks with synthesis metadata."""
+    chunks = _chunk_text(text)
+    source = (meta or {}).get("source", f"mem_{int(time.time())}")
+    group = f"{source}_{int(time.time())}"
+    first_id = None
+
+    _log.info(f"chunking text ({len(text)} chars) into {len(chunks)} chunks, group={group}")
+
+    for i, chunk in enumerate(chunks):
+        chunk_meta = dict(meta or {})
+        chunk_meta.update({
+            "synthesis_status": "pending",
+            "synthesis_group": group,
+            "chunk_index": i,
+            "chunk_total": len(chunks),
+            "source": source,
+        })
+        pid = _save_single(chunk, tag, dedup=False, thread_id=thread_id,
+                           meta=chunk_meta, synthesis_status="pending")
+        if i == 0:
+            first_id = pid
+
+    return first_id or ""
+
+
+def _save_single(text: str, tag: str, dedup: bool = True,
+                 thread_id: str | None = None, meta: dict | None = None,
+                 synthesis_status: str = "skip") -> str:
+    """Save a single memory point to Qdrant + FTS5."""
     qc = _get_qdrant()
     try:
         dense_vector = _embed(text)
@@ -601,6 +688,7 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         "text": text,
         "tag": tag,
         "ts": time.time(),
+        "synthesis_status": synthesis_status,
     }
     if thread_id:
         payload["thread_id"] = thread_id
@@ -628,7 +716,6 @@ def save(text: str, tag: str = "general", dedup: bool = True,
                         id=existing.id, vector=vectors, payload=payload,
                     )],
                 )
-                # Update FTS5 index
                 import db
                 db.fts_upsert("fts_memory", "point_id", str(existing.id),
                               {"tag": tag, "text": text})
@@ -641,10 +728,54 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         config.QDRANT_COLLECTION,
         points=[PointStruct(id=point_id, vector=vectors, payload=payload)],
     )
-    # Mirror to FTS5 for BM25 keyword search
     import db
     db.fts_upsert("fts_memory", "point_id", point_id, {"tag": tag, "text": text})
     return point_id
+
+
+# ── Synthesis Queue ──
+
+def get_pending_synthesis(limit: int = 50) -> dict[str, list[dict]]:
+    """Get pending synthesis items grouped by synthesis_group.
+
+    Returns: {group_name: [{"id": ..., "text": ..., "tag": ..., ...}, ...]}
+    """
+    qc = _get_qdrant()
+    try:
+        results = qc.scroll(
+            config.QDRANT_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="synthesis_status",
+                               match=MatchValue(value="pending"))
+            ]),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = results[0] if results else []
+        groups: dict[str, list[dict]] = {}
+        for p in points:
+            group = p.payload.get("synthesis_group", "ungrouped")
+            entry = {"id": p.id, **p.payload}
+            groups.setdefault(group, []).append(entry)
+        return groups
+    except Exception as e:
+        _log.warning(f"get_pending_synthesis failed: {e}")
+        return {}
+
+
+def mark_synthesized(point_ids: list[str]):
+    """Mark points as synthesized (status=done)."""
+    qc = _get_qdrant()
+    for pid in point_ids:
+        try:
+            qc.set_payload(
+                config.QDRANT_COLLECTION,
+                payload={"synthesis_status": "done"},
+                points=[pid],
+            )
+        except Exception as e:
+            _log.warning(f"mark_synthesized failed for {pid}: {e}")
 
 
 # ── Delete / Cleanup ──
