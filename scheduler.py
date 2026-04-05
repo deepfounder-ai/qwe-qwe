@@ -14,6 +14,7 @@ def _tz():
 _thread_started = False
 _callbacks = []  # [(fn, args)] — called when task completes
 HEARTBEAT_TASK_NAME = "__heartbeat__"
+SYNTHESIS_TASK_NAME = "__synthesis__"
 
 
 def _ensure_table():
@@ -254,6 +255,33 @@ def _execute_heartbeat() -> str:
         return f"Error: {e}"
 
 
+def _register_synthesis():
+    """Auto-register night synthesis cron if enabled."""
+    if not config.get("synthesis_enabled"):
+        return
+    _ensure_table()
+    row = db.fetchone(
+        "SELECT id FROM scheduled_tasks WHERE name=?", (SYNTHESIS_TASK_NAME,)
+    )
+    if row:
+        return  # already registered
+    synthesis_time = config.get("synthesis_time")  # e.g. "03:00"
+    schedule = f"daily {synthesis_time}"
+    # Parse HH:MM to next run timestamp
+    import datetime
+    h, m = map(int, synthesis_time.split(":"))
+    now = datetime.datetime.now()
+    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    next_run = target.timestamp()
+    db.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,1,1)",
+        (SYNTHESIS_TASK_NAME, SYNTHESIS_TASK_NAME, schedule, next_run)
+    )
+    _log.info(f"synthesis registered: {schedule}")
+
+
 def start():
     """Start the scheduler background thread."""
     global _thread_started
@@ -261,6 +289,7 @@ def start():
         return
     _thread_started = True
     _register_heartbeat()
+    _register_synthesis()
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
 
@@ -329,6 +358,11 @@ def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
     # Heartbeat tasks — special handling
     if task_desc == HEARTBEAT_TASK_NAME:
         return _execute_heartbeat()
+
+    # Synthesis tasks — direct Python, no LLM
+    if task_desc == SYNTHESIS_TASK_NAME:
+        import synthesis
+        return synthesis.run_synthesis()
 
     # Simple reminders don't need LLM — just return a clean notification
     reminder_markers = ["remind", "напомни", "напоминание", "напомнить", "выпить", "drink", "stretch", "break"]
