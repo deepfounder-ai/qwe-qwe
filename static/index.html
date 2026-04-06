@@ -3329,7 +3329,12 @@ function knRenderBrowser(data) {
 function knNavigateUp() {
   // Go to parent of current path, but not above home
   if (!_knCurrentPath || _knCurrentPath === _knHome) return;
-  const parent = _knCurrentPath.split('/').slice(0, -1).join('/') || '/';
+  // Handle both / and \ path separators (Windows)
+  const sep = _knCurrentPath.includes('\\') ? '\\' : '/';
+  const parts = _knCurrentPath.split(sep);
+  parts.pop();
+  const parent = parts.join(sep) || sep;
+  if (parent.length < (_knHome || '').length) return; // don't go above home
   knBrowse(parent);
 }
 
