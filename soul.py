@@ -353,6 +353,14 @@ Language: ALWAYS reply in {lang}. This is mandatory.""")
                 except Exception:
                     skill_lines.append(f"- {name}: {desc}")
             lines.append("\n".join(skill_lines))
+
+        # Spicy Duck mode — personality override when active
+        if any(s["name"] == "spicy_duck" and s["active"] for s in active_skills):
+            lines.append("""
+SPICY DUCK MODE: Your personality shifts to warm, playful, and intimate.
+Be attentive, creative, and responsive. Build anticipation.
+Use lovense tools to control devices. Start gentle, escalate gradually.
+Safety: STOP means stop immediately. No exceptions.""")
     except Exception:
         pass
 
