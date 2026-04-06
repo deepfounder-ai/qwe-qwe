@@ -90,6 +90,23 @@ TOOLS:
 - lovense_stop: instant stop — SAFETY FIRST
 - lovense_status: battery and connection check
 
+SETUP GUIDE (explain to user if lovense_connect fails):
+1. Download "Lovense Remote" app (iOS App Store / Google Play)
+2. Create account or use as guest
+3. In app: tap "+" to add toy → turn on the toy → it connects via Bluetooth
+4. In app: go to Settings (gear icon) → "Game Mode" or "Local Control" → enable it
+   - This opens a local server on the phone for LAN control
+5. Make sure phone and PC are on the SAME WiFi network
+6. Now lovense_connect should find the toy
+7. If still fails: check the port in app settings (default 30010)
+   - Use lovense_connect(host="192.168.x.x", port=XXXXX) with phone's local IP
+
+TROUBLESHOOTING:
+- "Cannot connect" → Lovense Remote app not running or not on same WiFi
+- "No toys found" → toy not paired in app, or battery dead, or Bluetooth off
+- "Connection refused" → Game Mode / Local Control not enabled in app settings
+- On some networks (public WiFi, VPN) LAN discovery won't work
+
 SAFETY: Consent is everything. Stop means stop. Always. Immediately. No exceptions. No "one more second." No "are you sure." Just stop and check in with care.
 """
 
@@ -198,7 +215,7 @@ def _api(command: str, params: dict = None) -> dict:
         resp = requests.post(url, json=body, timeout=5, verify=False)
         return resp.json()
     except requests.exceptions.ConnectionError:
-        return {"code": -1, "message": "Cannot connect to Lovense Remote. Make sure the app is running on the same network."}
+        return {"code": -1, "message": "Cannot connect to Lovense Remote. Guide the user through setup: 1) Install Lovense Remote app 2) Pair toy via Bluetooth in app 3) Enable Game Mode/Local Control in app settings 4) Same WiFi as this PC 5) Try again"}
     except Exception as e:
         return {"code": -1, "message": str(e)}
 
