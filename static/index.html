@@ -912,7 +912,7 @@ body {
           <div id="skillList"><span class="s-row-label">Loading...</span></div>
         </div>
         <div style="text-align:center;margin-top:16px;position:relative" id="spicyZone">
-          <button id="spicyBtn" onclick="_spicyTap()" style="background:none;border:none;cursor:pointer;font-size:16px;opacity:0.15;transition:opacity 0.3s;padding:8px" title="...">&#10084;</button>
+          <button id="spicyBtn" onclick="_spicyTap()" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.2;transition:opacity 0.3s;padding:8px;color:#e74c3c" title="...">♥</button>
         </div>
       </div>
 
@@ -1781,7 +1781,7 @@ function _spicyTap() {
   const zone = document.getElementById('spicyZone');
   // Spawn floating heart
   const heart = document.createElement('span');
-  heart.textContent = ['&#10084;','&#10083;','&#9825;','&#128149;','&#128151;','&#128153;'][Math.floor(Math.random()*6)];
+  heart.textContent = ['\u2764','\u2665','\u2661','\uD83D\uDC95','\uD83D\uDC97','\uD83D\uDC99'][Math.floor(Math.random()*6)];
   heart.style.cssText = `position:absolute;bottom:30px;left:${40+Math.random()*20}%;font-size:${14+Math.random()*12}px;opacity:1;transition:all 1.5s ease-out;pointer-events:none;color:${['#e74c3c','#ff6b81','#ff4757','#c44569','#e84393'][Math.floor(Math.random()*5)]}`;
   zone.appendChild(heart);
   requestAnimationFrame(() => {
@@ -1803,7 +1803,7 @@ function _spicyTap() {
     for (let i = 0; i < 15; i++) {
       setTimeout(() => {
         const h = document.createElement('span');
-        h.innerHTML = ['&#10084;','&#128149;','&#128151;','&#128156;','&#129505;'][Math.floor(Math.random()*5)];
+        h.textContent = ['\u2764','\uD83D\uDC95','\uD83D\uDC97','\uD83D\uDC9C','\uD83E\uDDE1'][Math.floor(Math.random()*5)];
         h.style.cssText = `position:absolute;bottom:30px;left:${20+Math.random()*60}%;font-size:${16+Math.random()*16}px;opacity:1;transition:all 2s ease-out;pointer-events:none`;
         zone.appendChild(h);
         requestAnimationFrame(() => {
