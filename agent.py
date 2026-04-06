@@ -701,7 +701,31 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                     lines.append(f"- [{r['tag']}] {r['text']}")
                     seen_texts.add(r["text"])
 
-        # Global search (fill remaining slots)
+        # Wiki/entity search first (synthesized knowledge = higher quality)
+        wiki_results = memory.search_by_vector(
+            vector, limit=2, tag="wiki",
+            query_text=user_input,
+            score_threshold=MEMORY_SCORE_MIN,
+        )
+        for r in wiki_results:
+            if r["text"] not in seen_texts:
+                lines.append(f"- [wiki] {r['text']}")
+                seen_texts.add(r["text"])
+
+        # Relation expansion: if entity found, follow links to related wiki
+        entity_results = memory.search_by_vector(
+            vector, limit=1, tag="entity",
+            query_text=user_input,
+            score_threshold=0.5,
+        )
+        for e in entity_results:
+            relations = e.get("relations", [])
+            if relations and e["text"] not in seen_texts:
+                rel_names = ", ".join(f"{r['rel']}→{r['to']}" for r in relations[:5])
+                lines.append(f"- [entity] {e['text']} ({rel_names})")
+                seen_texts.add(e["text"])
+
+        # Global search (fill remaining slots — all tags)
         max_memory = config.get("max_memory_results")
         remaining = max_memory - (len(lines) - 1)
         if remaining > 0:
