@@ -17,8 +17,15 @@ USER_SKILLS_DIR = config.USER_SKILLS_DIR
 SKILLS_DIR = BUILTIN_SKILLS_DIR
 
 
+# Hidden skills — require secret activation via self_config
+_HIDDEN_SKILLS = {
+    "spicy_duck": "quack",  # self_config(action="set", key="spicy_duck", value="quack")
+}
+
+
 def _all_skill_paths() -> dict[str, Path]:
-    """Return {name: path} for all skills. User skills override built-in."""
+    """Return {name: path} for all skills. User skills override built-in.
+    Hidden skills only appear when their activation key is set."""
     skills = {}
     for d in (BUILTIN_SKILLS_DIR, USER_SKILLS_DIR):
         if not d.exists():
@@ -26,7 +33,13 @@ def _all_skill_paths() -> dict[str, Path]:
         for f in sorted(d.glob("*.py")):
             if f.name.startswith("_"):
                 continue
-            skills[f.stem] = f
+            name = f.stem
+            # Check if skill is hidden and requires activation
+            if name in _HIDDEN_SKILLS:
+                secret = _HIDDEN_SKILLS[name]
+                if db.kv_get(name) != secret:
+                    continue  # not activated, skip
+            skills[name] = f
     return skills
 
 
@@ -97,8 +110,11 @@ def get_active() -> set[str]:
     names = set(raw.split(","))
     all_paths = _all_skill_paths()
     valid = {n for n in names if n in all_paths}
-    # Always include default skills
+    # Always include default skills + activated hidden skills
     valid |= {n for n in _DEFAULT_SKILLS if n in all_paths}
+    for hidden, secret in _HIDDEN_SKILLS.items():
+        if hidden in all_paths and db.kv_get(hidden) == secret:
+            valid.add(hidden)
     if valid != names:
         set_active(valid)
     return valid

@@ -484,6 +484,11 @@ _TOOL_SEARCH_INDEX = {
     "screenshot": ["browser_screenshot"],
     "navigate": ["browser_open"],
     "click": ["browser_click", "browser_fill"],
+    "lovense": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
+    "spicy": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
+    "duck": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
+    "vibrate": ["lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop"],
+    "toy": ["lovense_connect", "lovense_vibrate", "lovense_stop", "lovense_status"],
 }
 
 

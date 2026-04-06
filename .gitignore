@@ -37,4 +37,5 @@ skills/
 !skills/skill_creator.py
 !skills/mcp_manager.py
 !skills/browser.py
+!skills/spicy_duck.py
 .claude/

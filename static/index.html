@@ -911,6 +911,9 @@ body {
         <div class="s-card">
           <div id="skillList"><span class="s-row-label">Loading...</span></div>
         </div>
+        <div style="text-align:center;margin-top:16px;position:relative" id="spicyZone">
+          <button id="spicyBtn" onclick="_spicyTap()" style="background:none;border:none;cursor:pointer;font-size:16px;opacity:0.15;transition:opacity 0.3s;padding:8px" title="...">&#10084;</button>
+        </div>
       </div>
 
       <!-- Threads -->
@@ -1767,6 +1770,55 @@ async function loadSettingsSkills() {
 async function toggleSkill(name, enable) {
   await fetch(`/api/skills/${name}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active: enable}) });
   loadSettingsSkills();
+}
+
+// Spicy Duck secret activation
+let _spicyCount = 0;
+let _spicyTimer = null;
+function _spicyTap() {
+  _spicyCount++;
+  const btn = document.getElementById('spicyBtn');
+  const zone = document.getElementById('spicyZone');
+  // Spawn floating heart
+  const heart = document.createElement('span');
+  heart.textContent = ['&#10084;','&#10083;','&#9825;','&#128149;','&#128151;','&#128153;'][Math.floor(Math.random()*6)];
+  heart.style.cssText = `position:absolute;bottom:30px;left:${40+Math.random()*20}%;font-size:${14+Math.random()*12}px;opacity:1;transition:all 1.5s ease-out;pointer-events:none;color:${['#e74c3c','#ff6b81','#ff4757','#c44569','#e84393'][Math.floor(Math.random()*5)]}`;
+  zone.appendChild(heart);
+  requestAnimationFrame(() => {
+    heart.style.transform = `translateY(-${60+Math.random()*80}px) translateX(${(Math.random()-0.5)*40}px)`;
+    heart.style.opacity = '0';
+  });
+  setTimeout(() => heart.remove(), 1600);
+  // Increase button opacity with taps
+  btn.style.opacity = Math.min(1, 0.15 + _spicyCount * 0.09);
+  // Reset counter if no tap for 3s
+  clearTimeout(_spicyTimer);
+  _spicyTimer = setTimeout(() => { _spicyCount = 0; btn.style.opacity = '0.15'; }, 3000);
+  // Activate at 10 taps
+  if (_spicyCount >= 10) {
+    _spicyCount = 0;
+    btn.style.opacity = '1';
+    btn.style.fontSize = '24px';
+    // Burst of hearts
+    for (let i = 0; i < 15; i++) {
+      setTimeout(() => {
+        const h = document.createElement('span');
+        h.innerHTML = ['&#10084;','&#128149;','&#128151;','&#128156;','&#129505;'][Math.floor(Math.random()*5)];
+        h.style.cssText = `position:absolute;bottom:30px;left:${20+Math.random()*60}%;font-size:${16+Math.random()*16}px;opacity:1;transition:all 2s ease-out;pointer-events:none`;
+        zone.appendChild(h);
+        requestAnimationFrame(() => {
+          h.style.transform = `translateY(-${80+Math.random()*120}px) translateX(${(Math.random()-0.5)*80}px)`;
+          h.style.opacity = '0';
+        });
+        setTimeout(() => h.remove(), 2100);
+      }, i * 100);
+    }
+    // Activate spicy duck via raw KV endpoint
+    fetch('/api/kv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'spicy_duck',value:'quack'})})
+      .then(() => {
+        setTimeout(() => { loadSettingsSkills(); btn.style.fontSize = '16px'; }, 2000);
+      });
+  }
 }
 
 // Threads

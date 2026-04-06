@@ -939,6 +939,18 @@ async def update_settings(request: Request):
     return {"results": results}
 
 
+@app.post("/api/kv")
+async def kv_set(request: Request):
+    """Set a raw key-value pair in DB."""
+    data = await request.json()
+    key = data.get("key", "")
+    value = data.get("value", "")
+    if not key:
+        return JSONResponse({"error": "key required"}, status_code=400)
+    db.kv_set(key, value)
+    return {"ok": True, "key": key}
+
+
 @app.get("/api/config/export")
 async def export_config_endpoint():
     """Export all settings as downloadable JSON."""
