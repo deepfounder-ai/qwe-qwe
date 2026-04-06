@@ -250,7 +250,7 @@ body {
 .stop-btn:hover { opacity: 0.8; }
 .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-dim); gap: 8px; }
 .empty-logo { opacity: 0.3; }
-.empty-logo img { height: 80px; width: auto; }
+.empty-logo img { height: 160px; width: auto; }
 
 /* ── Settings page ── */
 .settings {
@@ -1803,11 +1803,20 @@ function _spicyTap() {
         setTimeout(() => h.remove(), 2100);
       }, i * 100);
     }
-    // Activate spicy duck via raw KV endpoint
-    fetch('/api/kv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'spicy_duck',value:'quack'})})
-      .then(() => {
-        setTimeout(() => { loadSettingsSkills(); btn.style.fontSize = '16px'; _applySpicyMode(true); }, 2000);
-      });
+    // Toggle spicy duck
+    fetch('/api/kv/spicy_duck').then(r=>r.json()).then(d => {
+      const isActive = d.value === 'quack';
+      const newValue = isActive ? '' : 'quack';
+      fetch('/api/kv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'spicy_duck',value:newValue})})
+        .then(() => {
+          setTimeout(() => {
+            loadSettingsSkills();
+            btn.style.fontSize = '16px';
+            _applySpicyMode(!isActive);
+            btn.style.opacity = !isActive ? '1' : '0.2';
+          }, 2000);
+        });
+    });
   }
 }
 
