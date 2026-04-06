@@ -3663,6 +3663,7 @@ async function createThread() {
   await fetch(`/api/threads/${t.id}/switch`, {method:'POST'});
   activeThreadId = t.id;
   await loadThreads();
+  loadHistory(t.id);  // clear old chat and show empty state
   showPage('chat'); input.focus();
 }
 async function closeThread(tid, name) {
