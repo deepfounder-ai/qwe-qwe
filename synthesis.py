@@ -10,6 +10,7 @@ Called by scheduler cron (default 03:00). Processes pending synthesis queue:
 """
 
 import json
+import re
 import time
 import os
 from pathlib import Path
@@ -146,7 +147,6 @@ def _extract_entities(client, model: str, text: str) -> dict | None:
         _log.info(f"synthesis LLM response: {len(content)} chars, finish={resp.choices[0].finish_reason}")
 
         # Strip thinking tags if present
-        import re
         content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
         content = re.sub(r"<\|channel\>thought\b.*?(?=<\|channel\>|$)", "", content, flags=re.DOTALL)
         content = re.sub(r"<\|[^>]+\>", "", content)
@@ -163,7 +163,6 @@ def _extract_entities(client, model: str, text: str) -> dict | None:
     except json.JSONDecodeError as e:
         _log.warning(f"synthesis: JSON parse failed: {e}, content: {content[:200]}")
         # Try to find JSON in response
-        import re
         m = re.search(r'\{.*\}', content, re.DOTALL)
         if m:
             try:
@@ -193,10 +192,10 @@ def _upsert_entity(entity: dict, all_relations: list[dict]):
         elif rel.get("to") == name:
             entity_relations.append({"to": rel["from"], "rel": f"inv_{rel['rel']}"})
 
-    # Search for existing entity
+    # Search for existing entity (RRF scores are ~0.01-0.06, not cosine 0-1)
     existing = memory.search(name, limit=1, tag="entity")
 
-    if existing and existing[0]["score"] > 0.85:
+    if existing and existing[0]["score"] > 0.02 and existing[0]["text"].lower() == name.lower():
         # Update existing entity
         point = existing[0]
         old_relations = point.get("relations", [])

@@ -267,13 +267,12 @@ def _register_synthesis():
         return  # already registered
     synthesis_time = config.get("synthesis_time")  # e.g. "03:00"
     schedule = f"daily {synthesis_time}"
-    # Parse HH:MM to next run timestamp
-    import datetime
+    # Parse HH:MM to next run timestamp (timezone-aware)
     h, m = map(int, synthesis_time.split(":"))
-    now = datetime.datetime.now()
+    now = datetime.now(_tz())
     target = now.replace(hour=h, minute=m, second=0, microsecond=0)
     if target <= now:
-        target += datetime.timedelta(days=1)
+        target += timedelta(days=1)
     next_run = target.timestamp()
     db.execute(
         "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,1,1)",
