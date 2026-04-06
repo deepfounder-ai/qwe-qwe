@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.9.0 — 2026-04-05
+
+### Knowledge Graph
+- **Three-layer memory**: raw chunks + entity nodes + wiki summaries in single Qdrant collection
+- **Auto-chunking**: texts >1000 chars split into ~800 char pieces on sentence boundaries
+- **Synthesis queue**: chunks tagged `synthesis_status=pending` for batch processing
+- **Night synthesis worker** (`synthesis.py`): LLM extracts entities + relations, builds wiki
+- **Entity nodes**: typed entities (technology, person, project, concept) with weighted relations
+- **Wiki chunks**: synthesized knowledge stored as searchable vectors + markdown on disk
+- **Enriched search**: auto-context prioritizes wiki -> entities -> thread -> global -> experience
+- **Graph visualization**: interactive force-directed SVG graph in Knowledge > Graph tab
+- **Configurable**: synthesis_enabled, synthesis_time (default 03:00), synthesis_max_per_run
+
+### Agent Improvements
+- **`self_config` tool**: agent can read/set any setting or system key (telegram token, etc.)
+- **Anti-hedge fix**: only nudge for long inputs (>40 chars), nudge cleaned from history
+- **Round limit warning**: model gets "LAST round" before exhaustion
+- **tok/s display**: real token count and speed from LLM stream usage
+
+### Infrastructure
+- **Telegram auto-start** in uvicorn lifespan (not just run_server)
+- **Thinking stripped** from Telegram responses
+- **Code review fixes**: VERSION constant, timezone-aware synthesis cron, entity dedup threshold
+
+---
+
 ## v0.8.0 — 2026-04-04
 
 ### Browser Skill

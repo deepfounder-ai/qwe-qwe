@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.9.0-blue" alt="version">
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
   <img src="https://img.shields.io/badge/runs-100%25_offline-purple" alt="offline">
@@ -270,15 +270,50 @@ Primary target is **local models via LM Studio or Ollama**. Cloud providers supp
 
 Switch on the fly via `/model` (CLI/Telegram) or Settings (Web UI). Auto-discovers available models.
 
-## Memory
+## Memory & Knowledge Graph
 
-Thread-scoped semantic memory powered by Qdrant:
+Three-layer knowledge system in a single Qdrant collection:
+
+```
+Layer 1: RAW           Layer 2: ENTITIES        Layer 3: WIKI
+(saved immediately)    (night synthesis)        (night synthesis)
+
+"FastAPI uses       -> [FastAPI] --uses-->      "FastAPI is a modern
+ Pydantic for          [Pydantic]               Python framework that
+ validation..."        [Python]                  uses Pydantic for
+                       [Starlette]               automatic validation..."
+```
+
+### How it works
+
+**During the day** (fast, no LLM cost):
+- Agent saves facts and knowledge via `memory_save`
+- Long texts (>1000 chars) auto-chunked into ~800 char pieces
+- Each chunk tagged `synthesis_status=pending`
+
+**At night** (configurable cron, default 03:00):
+- Synthesis worker processes pending queue
+- LLM extracts entities + relations from chunks
+- Creates entity nodes with typed relations (uses, built_on, part_of, etc.)
+- Generates wiki summaries stored as searchable chunks
+- Writes markdown to `~/.qwe-qwe/wiki/` as human-readable backup
+
+**During search** (enriched context):
+- Wiki chunks found first (synthesized = higher quality embeddings)
+- Entity relations expanded (follow links to related knowledge)
+- Raw chunks provide specifics
+- Result: synthesized + structured + raw knowledge in one query
+
+### Features
 
 - **Hybrid search**: FastEmbed dense (384d, 50+ languages) + SPLADE++ sparse, fused via RRF
-- **Auto-save**: agent saves important facts, preferences, decisions
+- **Auto-chunking**: long texts split on sentence boundaries with overlap
+- **Knowledge graph**: entities with typed relations, built automatically
+- **Wiki pages**: synthesized markdown, searchable and human-readable
+- **Graph visualization**: interactive force-directed graph in Web UI (Knowledge > Graph tab)
 - **Thread isolation**: each conversation has its own memory context
 - **Smart compaction**: old messages summarized and saved to memory when context fills
-- **Auto-context**: top-3 relevant memories injected into each turn
+- **Auto-context**: wiki + entities + memories injected into each turn
 - **Experience learning**: past task outcomes inform future strategies
 - **Modes**: in-memory (testing), disk (default), or remote Qdrant server
 
