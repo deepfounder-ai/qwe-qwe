@@ -1277,6 +1277,37 @@ async def knowledge_status():
     return {"status": "idle"}
 
 
+@app.get("/api/knowledge/graph")
+async def knowledge_graph():
+    """Get entity graph data for visualization."""
+    entities = mem.get_all_entities(limit=200)
+    # Build nodes + links for D3 force graph
+    nodes = []
+    links = []
+    node_names = set()
+    for e in entities:
+        nodes.append({
+            "id": e["name"],
+            "type": e["type"],
+            "description": e["description"],
+            "weight": e["observation_count"],
+        })
+        node_names.add(e["name"])
+
+    # Build links from relations (only between existing nodes)
+    for e in entities:
+        for rel in e.get("relations", []):
+            target = rel.get("to", "")
+            if target in node_names:
+                links.append({
+                    "source": e["name"],
+                    "target": target,
+                    "rel": rel.get("rel", "related"),
+                })
+
+    return {"nodes": nodes, "links": links}
+
+
 @app.get("/api/knowledge/list")
 async def knowledge_list():
     """List all indexed files."""

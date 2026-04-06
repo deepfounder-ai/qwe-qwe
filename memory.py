@@ -778,6 +778,39 @@ def mark_synthesized(point_ids: list[str]):
             _log.warning(f"mark_synthesized failed for {pid}: {e}")
 
 
+def get_all_entities(limit: int = 200) -> list[dict]:
+    """Get all entity nodes for graph visualization.
+
+    Returns list of {id, name, type, description, relations, observation_count}.
+    """
+    qc = _get_qdrant()
+    try:
+        results = qc.scroll(
+            config.QDRANT_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="tag", match=MatchValue(value="entity"))
+            ]),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = results[0] if results else []
+        entities = []
+        for p in points:
+            entities.append({
+                "id": str(p.id),
+                "name": p.payload.get("text", ""),
+                "type": p.payload.get("entity_type", "concept"),
+                "description": p.payload.get("description", ""),
+                "relations": p.payload.get("relations", []),
+                "observation_count": p.payload.get("observation_count", 1),
+            })
+        return entities
+    except Exception as e:
+        _log.warning(f"get_all_entities failed: {e}")
+        return []
+
+
 # ── Delete / Cleanup ──
 
 def delete(point_id: str) -> bool:

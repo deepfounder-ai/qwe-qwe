@@ -683,6 +683,7 @@ body {
       <div class="knowledge-tabs">
         <button class="s-btn tab-active" id="knTabUpload" onclick="showKnowledgeTab('upload')">Upload</button>
         <button class="s-btn" id="knTabIndexed" onclick="showKnowledgeTab('indexed')">Indexed</button>
+        <button class="s-btn" id="knTabGraph" onclick="showKnowledgeTab('graph')">Graph</button>
       </div>
     </div>
 
@@ -764,6 +765,15 @@ body {
         <thead><tr><th>File</th><th>Path</th><th></th></tr></thead>
         <tbody id="knIndexedList"></tbody>
       </table>
+    </div>
+
+    <!-- Graph tab -->
+    <div id="knGraphTab" style="display:none">
+      <div id="knGraphEmpty" class="cron-empty" style="display:none">No entities yet. Save knowledge and run synthesis to build the graph.</div>
+      <div id="knGraphContainer" style="width:100%;height:500px;border:1px solid var(--border);border-radius:8px;background:var(--surface);overflow:hidden;position:relative">
+        <svg id="knGraphSvg" width="100%" height="100%"></svg>
+      </div>
+      <div id="knGraphInfo" style="margin-top:12px;font-size:12px;color:var(--text-dim);font-family:var(--mono)"></div>
     </div>
   </div>
 </div>
@@ -2907,10 +2917,242 @@ function _jsEsc(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(
 function showKnowledgeTab(tab) {
   document.getElementById('knUploadTab').style.display = tab === 'upload' ? '' : 'none';
   document.getElementById('knIndexedTab').style.display = tab === 'indexed' ? '' : 'none';
+  document.getElementById('knGraphTab').style.display = tab === 'graph' ? '' : 'none';
   document.getElementById('knTabUpload').classList.toggle('tab-active', tab === 'upload');
   document.getElementById('knTabIndexed').classList.toggle('tab-active', tab === 'indexed');
+  document.getElementById('knTabGraph').classList.toggle('tab-active', tab === 'graph');
   if (tab === 'indexed') knLoadIndexed();
   if (tab === 'upload' && !_knCurrentPath) knBrowse();
+  if (tab === 'graph') knLoadGraph();
+}
+
+// ── Knowledge Graph (D3.js force-directed) ──
+let _graphSim = null;
+
+async function knLoadGraph() {
+  const container = document.getElementById('knGraphContainer');
+  const empty = document.getElementById('knGraphEmpty');
+  const info = document.getElementById('knGraphInfo');
+  try {
+    const res = await fetch('/api/knowledge/graph');
+    const data = await res.json();
+    if (!data.nodes || data.nodes.length === 0) {
+      empty.style.display = '';
+      container.style.display = 'none';
+      info.textContent = '';
+      return;
+    }
+    empty.style.display = 'none';
+    container.style.display = '';
+    info.textContent = `${data.nodes.length} entities, ${data.links.length} relations`;
+    _renderGraph(data, container);
+  } catch(e) {
+    info.textContent = 'Error loading graph: ' + e.message;
+  }
+}
+
+function _renderGraph(data, container) {
+  const svg = document.getElementById('knGraphSvg');
+  const width = container.clientWidth;
+  const height = container.clientHeight || 500;
+  svg.innerHTML = '';
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+  // Colors by entity type
+  const typeColors = {
+    technology: '#f5a623', person: '#3498db', project: '#27ae60',
+    concept: '#9b59b6', place: '#e74c3c', event: '#e67e22',
+  };
+
+  // Build node map for link references
+  const nodeMap = {};
+  data.nodes.forEach(n => { nodeMap[n.id] = n; });
+
+  // SVG groups
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  svg.appendChild(g);
+
+  // Links
+  const linkEls = [];
+  data.links.forEach(l => {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('stroke', '#333');
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('stroke-opacity', '0.6');
+    g.appendChild(line);
+
+    // Relation label
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.textContent = l.rel;
+    label.setAttribute('fill', '#555');
+    label.setAttribute('font-size', '9');
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('font-family', 'var(--mono)');
+    g.appendChild(label);
+
+    linkEls.push({el: line, label, data: l});
+  });
+
+  // Nodes
+  const nodeEls = [];
+  data.nodes.forEach(n => {
+    const r = Math.max(8, Math.min(24, 6 + (n.weight || 1) * 3));
+    const color = typeColors[n.type] || '#666';
+
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('r', r);
+    circle.setAttribute('fill', color);
+    circle.setAttribute('stroke', '#222');
+    circle.setAttribute('stroke-width', '2');
+    circle.setAttribute('cursor', 'pointer');
+    g.appendChild(circle);
+
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.textContent = n.id;
+    text.setAttribute('fill', '#e0e0e0');
+    text.setAttribute('font-size', '11');
+    text.setAttribute('font-weight', '600');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('dy', r + 14);
+    text.setAttribute('pointer-events', 'none');
+    g.appendChild(text);
+
+    // Hover tooltip
+    circle.onmouseenter = () => {
+      document.getElementById('knGraphInfo').textContent =
+        `${n.id} (${n.type}) — ${n.description || 'no description'} — ${n.weight || 1} observations`;
+      circle.setAttribute('stroke', '#f5a623');
+      circle.setAttribute('stroke-width', '3');
+    };
+    circle.onmouseleave = () => {
+      document.getElementById('knGraphInfo').textContent =
+        `${data.nodes.length} entities, ${data.links.length} relations`;
+      circle.setAttribute('stroke', '#222');
+      circle.setAttribute('stroke-width', '2');
+    };
+
+    nodeEls.push({el: circle, textEl: text, data: n, r});
+    n._x = width/2 + (Math.random() - 0.5) * 200;
+    n._y = height/2 + (Math.random() - 0.5) * 200;
+    n._vx = 0; n._vy = 0;
+  });
+
+  // Simple force simulation (no D3 dependency!)
+  function simulate() {
+    const nodes = data.nodes;
+    const links = data.links;
+    const centerX = width / 2, centerY = height / 2;
+
+    // Forces
+    for (const n of nodes) {
+      // Center gravity
+      n._vx += (centerX - n._x) * 0.001;
+      n._vy += (centerY - n._y) * 0.001;
+
+      // Repulsion between nodes
+      for (const m of nodes) {
+        if (n === m) continue;
+        const dx = n._x - m._x, dy = n._y - m._y;
+        const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        if (dist < 150) {
+          const force = 800 / (dist * dist);
+          n._vx += dx / dist * force;
+          n._vy += dy / dist * force;
+        }
+      }
+    }
+
+    // Link attraction
+    for (const l of links) {
+      const src = nodeMap[l.source] || nodeMap[l.source?.id];
+      const tgt = nodeMap[l.target] || nodeMap[l.target?.id];
+      if (!src || !tgt) continue;
+      const dx = tgt._x - src._x, dy = tgt._y - src._y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      const force = (dist - 100) * 0.005;
+      src._vx += dx / dist * force;
+      src._vy += dy / dist * force;
+      tgt._vx -= dx / dist * force;
+      tgt._vy -= dy / dist * force;
+    }
+
+    // Apply velocity with damping
+    for (const n of nodes) {
+      n._vx *= 0.85; n._vy *= 0.85;
+      n._x += n._vx; n._y += n._vy;
+      // Bounds
+      n._x = Math.max(30, Math.min(width - 30, n._x));
+      n._y = Math.max(30, Math.min(height - 30, n._y));
+    }
+
+    // Update SVG positions
+    nodeEls.forEach(ne => {
+      ne.el.setAttribute('cx', ne.data._x);
+      ne.el.setAttribute('cy', ne.data._y);
+      ne.textEl.setAttribute('x', ne.data._x);
+      ne.textEl.setAttribute('y', ne.data._y);
+    });
+
+    linkEls.forEach(le => {
+      const src = nodeMap[le.data.source] || nodeMap[le.data.source?.id];
+      const tgt = nodeMap[le.data.target] || nodeMap[le.data.target?.id];
+      if (!src || !tgt) return;
+      le.el.setAttribute('x1', src._x); le.el.setAttribute('y1', src._y);
+      le.el.setAttribute('x2', tgt._x); le.el.setAttribute('y2', tgt._y);
+      le.label.setAttribute('x', (src._x + tgt._x) / 2);
+      le.label.setAttribute('y', (src._y + tgt._y) / 2);
+    });
+  }
+
+  // Run 100 iterations to settle, then animate
+  for (let i = 0; i < 80; i++) simulate();
+
+  // Slow animation
+  let frame = 0;
+  function tick() {
+    simulate();
+    frame++;
+    if (frame < 200) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  // Drag support
+  let dragNode = null, dragOffset = {x:0, y:0};
+  svg.onmousedown = (e) => {
+    const rect = svg.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * width / rect.width;
+    const my = (e.clientY - rect.top) * height / rect.height;
+    for (const ne of nodeEls) {
+      const dx = ne.data._x - mx, dy = ne.data._y - my;
+      if (dx*dx + dy*dy < ne.r * ne.r + 100) {
+        dragNode = ne.data;
+        dragOffset = {x: dx, y: dy};
+        e.preventDefault();
+        break;
+      }
+    }
+  };
+  svg.onmousemove = (e) => {
+    if (!dragNode) return;
+    const rect = svg.getBoundingClientRect();
+    dragNode._x = (e.clientX - rect.left) * width / rect.width + dragOffset.x;
+    dragNode._y = (e.clientY - rect.top) * height / rect.height + dragOffset.y;
+    dragNode._vx = 0; dragNode._vy = 0;
+    // Re-render
+    nodeEls.forEach(ne => {
+      ne.el.setAttribute('cx', ne.data._x); ne.el.setAttribute('cy', ne.data._y);
+      ne.textEl.setAttribute('x', ne.data._x); ne.textEl.setAttribute('y', ne.data._y);
+    });
+    linkEls.forEach(le => {
+      const src = nodeMap[le.data.source]; const tgt = nodeMap[le.data.target];
+      if (!src || !tgt) return;
+      le.el.setAttribute('x1', src._x); le.el.setAttribute('y1', src._y);
+      le.el.setAttribute('x2', tgt._x); le.el.setAttribute('y2', tgt._y);
+      le.label.setAttribute('x', (src._x + tgt._x)/2); le.label.setAttribute('y', (src._y + tgt._y)/2);
+    });
+  };
+  svg.onmouseup = () => { dragNode = null; };
+  svg.onmouseleave = () => { dragNode = null; };
 }
 
 function _formatSize(bytes) {
