@@ -896,11 +896,18 @@ def get_all_tools(compact: bool = False) -> list[dict]:
     """
     all_available = _get_all_tools_full()
 
-    # Filter: core tools + any activated by tool_search
+    # Check if hidden skills are active — their tools bypass tool_search
+    import db as _db
+    _always_on = set()
+    if _db.kv_get("spicy_duck") == "quack":
+        _always_on.update({"lovense_connect", "lovense_vibrate", "lovense_pattern",
+                           "lovense_preset", "lovense_stop", "lovense_status"})
+
+    # Filter: core tools + always-on (hidden skills) + any activated by tool_search
     result = []
     for t in all_available:
         name = t["function"]["name"]
-        if name in _CORE_TOOL_NAMES or name in _active_extra_tools:
+        if name in _CORE_TOOL_NAMES or name in _always_on or name in _active_extra_tools:
             result.append(t)
 
     return result
