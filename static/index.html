@@ -1759,6 +1759,13 @@ async function loadSettingsSkills() {
 }
 async function toggleSkill(name, enable) {
   await fetch(`/api/skills/${name}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active: enable}) });
+  // If disabling a hidden skill, also clear its activation key
+  if (!enable && name === 'spicy_duck') {
+    await fetch('/api/kv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'spicy_duck',value:''})});
+    _applySpicyMode(false);
+    const btn = document.getElementById('spicyBtn');
+    if (btn) btn.style.opacity = '0.2';
+  }
   loadSettingsSkills();
 }
 
