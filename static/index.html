@@ -133,16 +133,6 @@ body {
 }
 .chat-spacer { margin-top: auto; }
 .msg { flex-shrink: 0; }
-.chat::before {
-  content: "";
-  background: var(--chat-bg-logo, url('/static/logo.png')) no-repeat center center;
-  background-size: 200px;
-  opacity: 0.06;
-  position: fixed; top: 50%; left: 50%;
-  width: 200px; height: 200px;
-  transform: translate(-50%, -50%);
-  pointer-events: none; z-index: 0;
-}
 .chat::-webkit-scrollbar { width: 6px; }
 .chat::-webkit-scrollbar-track { background: transparent; }
 .chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -1821,16 +1811,16 @@ function _spicyTap() {
   }
 }
 
+let _currentLogo = '/static/logo.png';
+
 function _applySpicyMode(on) {
-  const logo = on ? '/static/logo-spicy.png' : '/static/logo.png';
+  _currentLogo = on ? '/static/logo-spicy.png' : '/static/logo.png';
   // Header logo
   const headerImg = document.querySelector('.logo img');
-  if (headerImg) headerImg.src = logo;
+  if (headerImg) headerImg.src = _currentLogo;
   // Empty chat logo
   const emptyImg = document.querySelector('.empty-logo img');
-  if (emptyImg) emptyImg.src = logo;
-  // Chat background (CSS variable for ::before pseudo-element)
-  document.documentElement.style.setProperty('--chat-bg-logo', `url('${logo}')`);
+  if (emptyImg) emptyImg.src = _currentLogo;
 }
 
 // Check spicy mode on page load
@@ -3976,7 +3966,7 @@ async function loadHistory(tid) {
   const res = await fetch(`/api/history?limit=30&thread_id=${t}`);
   const msgs = await res.json();
   chat.innerHTML = '<div class="chat-spacer"></div>';
-  if (!msgs.length) { chat.innerHTML='<div class="empty"><div class="empty-logo"><img src="/static/logo.png" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-chat-circle-dots"></i> start chatting</div></div>'; return; }
+  if (!msgs.length) { chat.innerHTML=`<div class="empty"><div class="empty-logo"><img src="${_currentLogo}" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-chat-circle-dots"></i> start chatting</div></div>`; return; }
   msgs.forEach(m => {
     const imageSrc = m.meta?.image_path || null;
     addMessage(m.role, m.content, m.meta || null, imageSrc);
