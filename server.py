@@ -939,6 +939,13 @@ async def update_settings(request: Request):
     return {"results": results}
 
 
+@app.get("/api/kv/{key}")
+async def kv_get(key: str):
+    """Get a raw key-value pair from DB."""
+    value = db.kv_get(key)
+    return {"key": key, "value": value}
+
+
 @app.post("/api/kv")
 async def kv_set(request: Request):
     """Set a raw key-value pair in DB."""

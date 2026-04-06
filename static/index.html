@@ -135,7 +135,7 @@ body {
 .msg { flex-shrink: 0; }
 .chat::before {
   content: "";
-  background: url('/static/logo.png') no-repeat center center;
+  background: var(--chat-bg-logo, url('/static/logo.png')) no-repeat center center;
   background-size: 200px;
   opacity: 0.06;
   position: fixed; top: 50%; left: 50%;
@@ -1816,10 +1816,27 @@ function _spicyTap() {
     // Activate spicy duck via raw KV endpoint
     fetch('/api/kv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'spicy_duck',value:'quack'})})
       .then(() => {
-        setTimeout(() => { loadSettingsSkills(); btn.style.fontSize = '16px'; }, 2000);
+        setTimeout(() => { loadSettingsSkills(); btn.style.fontSize = '16px'; _applySpicyMode(true); }, 2000);
       });
   }
 }
+
+function _applySpicyMode(on) {
+  const logo = on ? '/static/logo-spicy.png' : '/static/logo.png';
+  // Header logo
+  const headerImg = document.querySelector('.logo img');
+  if (headerImg) headerImg.src = logo;
+  // Empty chat logo
+  const emptyImg = document.querySelector('.empty-logo img');
+  if (emptyImg) emptyImg.src = logo;
+  // Chat background (CSS variable for ::before pseudo-element)
+  document.documentElement.style.setProperty('--chat-bg-logo', `url('${logo}')`);
+}
+
+// Check spicy mode on page load
+fetch('/api/kv/spicy_duck').catch(() => null).then(r => r && r.ok ? r.json() : null).then(d => {
+  if (d && d.value === 'quack') _applySpicyMode(true);
+});
 
 // Threads
 async function loadSettingsThreads(includeArchived) {
