@@ -1240,32 +1240,38 @@ def _run_inner(user_input: str, thread_id: str | None,
         _tools_count = len(all_tools)
         _log.info(f"API call: {len(messages)} msgs, ~{_prompt_chars} chars, {_tools_count} tools, model={_model}")
 
+        def _create_stream(msgs, **kw):
+            try:
+                return client.chat.completions.create(
+                    model=_model, messages=msgs, tools=all_tools,
+                    tool_choice="auto", temperature=soul.get_temperature(),
+                    presence_penalty=presence_penalty, max_tokens=2048,
+                    stream=True, stream_options={"include_usage": True},
+                    **extra, **kw,
+                )
+            except Exception:
+                return client.chat.completions.create(
+                    model=_model, messages=msgs, tools=all_tools,
+                    tool_choice="auto", temperature=soul.get_temperature(),
+                    presence_penalty=presence_penalty, max_tokens=2048,
+                    stream=True, **extra, **kw,
+                )
+
         try:
-            stream = client.chat.completions.create(
-                model=_model,
-                messages=messages,
-                tools=all_tools,
-                tool_choice="auto",
-                temperature=soul.get_temperature(),
-                presence_penalty=presence_penalty,
-                max_tokens=2048,
-                stream=True,
-                stream_options={"include_usage": True},
-                **extra,
-            )
-        except Exception:
-            # Fallback without stream_options (not all providers support it)
-            stream = client.chat.completions.create(
-                model=_model,
-                messages=messages,
-                tools=all_tools,
-                tool_choice="auto",
-                temperature=soul.get_temperature(),
-                presence_penalty=presence_penalty,
-                max_tokens=2048,
-                stream=True,
-                **extra,
-            )
+            stream = _create_stream(messages)
+        except Exception as e:
+            # If image not supported, strip images and retry
+            if "image" in str(e).lower() or "mmproj" in str(e).lower():
+                _log.warning(f"vision not supported, retrying without image: {e}")
+                _emit_status("Model doesn't support images, retrying as text...")
+                for m in messages:
+                    if isinstance(m.get("content"), list):
+                        # Convert multimodal content to text-only
+                        text_parts = [p["text"] for p in m["content"] if p.get("type") == "text"]
+                        m["content"] = " ".join(text_parts) + "\n(An image was attached but this model doesn't support vision.)"
+                stream = _create_stream(messages)
+            else:
+                raise
 
         # Collect streamed response
         full_content = ""
