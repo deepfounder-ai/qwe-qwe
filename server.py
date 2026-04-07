@@ -126,7 +126,9 @@ def _emit_agent_content(text: str):
 
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
-                    image_path: str | None = None) -> dict:
+                    image_path: str | None = None,
+                    file_text: str | None = None,
+                    file_name: str | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
     _abort_event.clear()
@@ -141,7 +143,11 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
     if not agent._content_callback:
         agent._content_callback = _emit_agent_content
     t0 = time.time()
-    result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
+    # Prepend file content to user input if document attached
+    effective_input = user_input
+    if file_text and file_name:
+        effective_input = (user_input + "\n\n" if user_input else "") + f"[Attached file: {file_name}]\n```\n{file_text}\n```"
+    result = agent.run(effective_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
@@ -283,6 +289,37 @@ if STATIC_DIR.exists():
 # Uploads directory (in user data dir, safe from git)
 UPLOADS_DIR = config.UPLOADS_DIR
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+
+# ── File text extraction ──
+
+_TEXT_EXTENSIONS = {
+    ".txt", ".py", ".js", ".ts", ".md", ".json", ".csv", ".log",
+    ".html", ".css", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".sh", ".bat", ".sql", ".xml", ".env", ".gitignore",
+}
+
+def _extract_file_text(filepath: Path, max_chars: int = 8000) -> str:
+    """Extract text content from a file. Supports text files and PDFs."""
+    ext = filepath.suffix.lower()
+    try:
+        if ext == ".pdf":
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(str(filepath))
+                text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            except ImportError:
+                return "[PDF reading requires pypdf: pip install pypdf]"
+        elif ext in _TEXT_EXTENSIONS or ext.startswith("."):
+            text = filepath.read_text(encoding="utf-8", errors="replace")
+        else:
+            return f"[Unsupported file type: {ext}]"
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n...(truncated from {len(text)} chars)"
+        return text
+    except Exception as e:
+        return f"[Error reading file: {e}]"
 
 
 # ── Routes ──
@@ -1547,12 +1584,14 @@ async def websocket_chat(ws: WebSocket):
                 user_input = msg.get("text", "").strip()
                 thread_id = msg.get("thread_id")  # optional — None uses active
                 image_b64 = msg.get("image_b64")  # optional base64 image
+                document = msg.get("document")    # optional {file_b64, filename}
             except json.JSONDecodeError:
                 user_input = data.strip()
                 thread_id = None
                 image_b64 = None
+                document = None
 
-            if not user_input and not image_b64:
+            if not user_input and not image_b64 and not document:
                 continue
 
             # Save image to uploads/ so it persists in history
@@ -1567,8 +1606,26 @@ async def websocket_chat(ws: WebSocket):
                 except Exception as e:
                     _log.warning(f"failed to save ws image: {e}")
 
+            # Extract text from uploaded document
+            file_text = None
+            file_name = None
+            if document:
+                try:
+                    import uuid as _uuid
+                    doc_id = str(_uuid.uuid4())[:8]
+                    fname = document.get("filename", "file.txt")
+                    ext = Path(fname).suffix or ".txt"
+                    doc_file = UPLOADS_DIR / f"{doc_id}{ext}"
+                    doc_file.write_bytes(base64.b64decode(document["file_b64"]))
+                    file_text = _extract_file_text(doc_file)
+                    file_name = fname
+                    _log.info(f"document uploaded: {fname} → {len(file_text)} chars")
+                except Exception as e:
+                    _log.warning(f"failed to process document: {e}")
+
             _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}" +
-                       (" [+image]" if image_b64 else ""))
+                       (" [+image]" if image_b64 else "") +
+                       (f" [+doc:{file_name}]" if file_name else ""))
 
             # Check if model needs loading
             loading_msg = None
@@ -1608,7 +1665,7 @@ async def websocket_chat(ws: WebSocket):
                             break  # agent finished
                         await _ws_send_safe(ws, msg)
 
-                def _run_with_queue(user_input, thread_id, image_b64, image_path):
+                def _run_with_queue(user_input, thread_id, image_b64, image_path, file_text=None, file_name=None):
                     """Wrap _run_agent_sync, routing content/thinking/status to queue."""
                     import agent as _agent
 
@@ -1637,7 +1694,9 @@ async def websocket_chat(ws: WebSocket):
                     try:
                         return _run_agent_sync(user_input, thread_id,
                                                image_b64=image_b64,
-                                               image_path=image_path)
+                                               image_path=image_path,
+                                               file_text=file_text,
+                                               file_name=file_name)
                     finally:
                         # Signal queue drain to stop
                         asyncio.run_coroutine_threadsafe(stream_queue.put(None), loop)
@@ -1645,7 +1704,8 @@ async def websocket_chat(ws: WebSocket):
                 # Run agent + queue drain concurrently
                 agent_task = loop.run_in_executor(
                     None, functools.partial(_run_with_queue, user_input,
-                                            thread_id, image_b64, image_path))
+                                            thread_id, image_b64, image_path,
+                                            file_text, file_name))
                 drain_task = asyncio.ensure_future(_drain_stream_queue())
                 result = await agent_task
                 await drain_task  # ensure all queued messages are sent

@@ -650,9 +650,9 @@ body {
   <div class="input-area">
     <div class="img-preview" id="imgPreview" style="display:none"></div>
     <div class="input-row">
-      <button class="btn-attach" onclick="document.getElementById('fileInput').click()" title="Attach image"><i class="ph ph-image"></i></button>
+      <button class="btn-attach" onclick="document.getElementById('fileInput').click()" title="Attach file"><i class="ph ph-paperclip"></i></button>
       <button class="btn-mic" id="micBtn" onclick="toggleRecording()" title="Voice message"><i class="ph ph-microphone"></i></button>
-      <input type="file" id="fileInput" accept="image/*" style="display:none" onchange="handleFileSelect(this)">
+      <input type="file" id="fileInput" accept="image/*,.txt,.py,.js,.ts,.md,.json,.csv,.log,.html,.css,.pdf,.yaml,.yml,.toml,.xml,.sql,.sh,.ini,.cfg,.env" style="display:none" onchange="handleFileSelect(this)">
       <textarea id="input" placeholder="message..." rows="1"></textarea>
       <button id="send" onclick="send()">Send</button>
       <button id="stop" class="stop-btn" onclick="stopGeneration()" style="display:none" title="Stop generation">■</button>
@@ -3776,14 +3776,18 @@ function removeStatus() { document.getElementById('statusMsg')?.remove(); }
 
 // ── Image handling ──
 let pendingImage = null;
+let pendingDocument = null; // {file_b64, filename}
+
 function handleFileSelect(inp) {
   const file = inp.files[0];
   if (!file) return;
-  readImageFile(file);
+  if (file.type.startsWith('image/')) readImageFile(file);
+  else readDocumentFile(file);
   inp.value = '';
 }
 function readImageFile(file) {
   if (!file.type.startsWith('image/')) return;
+  clearDocument(); // only one attachment at a time
   const reader = new FileReader();
   reader.onload = (e) => {
     pendingImage = e.target.result.split(',')[1];
@@ -3793,9 +3797,36 @@ function readImageFile(file) {
     img.src = e.target.result;
     const btn = document.createElement('button');
     btn.className = 'img-remove';
-    btn.textContent = '×';
+    btn.textContent = '\u00d7';
     btn.onclick = clearImage;
     preview.appendChild(img);
+    preview.appendChild(btn);
+    preview.style.display = 'inline-block';
+  };
+  reader.readAsDataURL(file);
+}
+function readDocumentFile(file) {
+  clearImage(); // only one attachment at a time
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    pendingDocument = {
+      file_b64: e.target.result.split(',')[1],
+      filename: file.name,
+    };
+    // Show doc preview chip
+    const preview = document.getElementById('imgPreview');
+    preview.textContent = '';
+    const chip = document.createElement('div');
+    chip.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text)';
+    chip.innerHTML = `<i class="ph ph-file-text" style="font-size:18px;color:var(--accent)"></i>`;
+    const info = document.createElement('span');
+    info.textContent = `${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+    chip.appendChild(info);
+    const btn = document.createElement('button');
+    btn.className = 'img-remove';
+    btn.textContent = '\u00d7';
+    btn.onclick = clearDocument;
+    preview.appendChild(chip);
     preview.appendChild(btn);
     preview.style.display = 'inline-block';
   };
@@ -3807,14 +3838,24 @@ function clearImage() {
   preview.textContent = '';
   preview.style.display = 'none';
 }
-// Drag and drop
+function clearDocument() {
+  pendingDocument = null;
+  const preview = document.getElementById('imgPreview');
+  if (preview && !pendingImage) {
+    preview.textContent = '';
+    preview.style.display = 'none';
+  }
+}
+// Drag and drop (images + documents)
 const chatPage = document.getElementById('pageChatWrap');
 chatPage.addEventListener('dragover', (e) => { e.preventDefault(); chatPage.classList.add('drag-over'); });
 chatPage.addEventListener('dragleave', () => chatPage.classList.remove('drag-over'));
 chatPage.addEventListener('drop', (e) => {
   e.preventDefault(); chatPage.classList.remove('drag-over');
   const file = e.dataTransfer.files[0];
-  if (file && file.type.startsWith('image/')) readImageFile(file);
+  if (!file) return;
+  if (file.type.startsWith('image/')) readImageFile(file);
+  else readDocumentFile(file);
 });
 // Paste image from clipboard
 input.addEventListener('paste', (e) => {
@@ -3953,15 +3994,18 @@ async function sendAudioToSTT() {
 // ── Send ──
 function send() {
   const text = input.value.trim();
-  if (!text && !pendingImage) return;
+  if (!text && !pendingImage && !pendingDocument) return;
   if (!ws || ws.readyState !== 1) return;
-  const msgText = text || (pendingImage ? 'What\'s in this image?' : '');
-  addMessage('user', msgText, null, pendingImage ? `data:image/png;base64,${pendingImage}` : null);
+  const msgText = text || (pendingImage ? 'What\'s in this image?' : (pendingDocument ? `Read file: ${pendingDocument.filename}` : ''));
+  const displayMsg = pendingDocument ? `${msgText}\n\n[${pendingDocument.filename}]` : msgText;
+  addMessage('user', displayMsg, null, pendingImage ? `data:image/png;base64,${pendingImage}` : null);
   const payload = { text: msgText, thread_id: activeThreadId };
   if (pendingImage) payload.image_b64 = pendingImage;
+  if (pendingDocument) payload.document = pendingDocument;
   ws.send(JSON.stringify(payload));
   input.value = ''; input.style.height = 'auto';
   clearImage();
+  clearDocument();
   document.getElementById('activityLog')?.remove();
   _pendingToolCalls = [];
   setGenerating(true);
