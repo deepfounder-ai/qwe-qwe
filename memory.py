@@ -155,6 +155,9 @@ def _ensure_payload_indexes(qc: QdrantClient, collection: str):
             "ts": PayloadSchemaType.FLOAT,
             "synthesis_status": PayloadSchemaType.KEYWORD,
             "synthesis_group": PayloadSchemaType.KEYWORD,
+            "file_path": PayloadSchemaType.KEYWORD,
+            "source_type": PayloadSchemaType.KEYWORD,
+            "document_tags": PayloadSchemaType.KEYWORD,
         }
         for field, schema_type in indexes.items():
             if field not in existing:

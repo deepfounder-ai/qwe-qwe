@@ -146,8 +146,8 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
     if not content or not content.strip():
         return {"path": str(path), "chunks": 0, "status": "empty file"}
 
-    # Delete old chunks for this file (by source)
-    delete_file(str(path))
+    # Delete old chunks for this file (keeps kv entries — updated below on success)
+    _delete_file_chunks(str(path))
 
     # Save via memory.save() — handles chunking, embeddings, FTS5, synthesis queue
     meta = {
@@ -161,9 +161,11 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
 
     memory.save(content, tag="knowledge", dedup=False, meta=meta)
 
-    # Count chunks (for UI feedback)
-    chunks = memory._chunk_text(content)
-    chunk_count = len(chunks) if len(content) > 1000 else 1
+    # Count chunks (for UI feedback) — matches memory.save() branching logic
+    if len(content) > memory._CHUNK_THRESHOLD:
+        chunk_count = len(memory._chunk_text(content))
+    else:
+        chunk_count = 1
 
     # Store mtime + tags
     db.kv_set(mtime_key, current_mtime)
@@ -187,7 +189,7 @@ def index_directory(dirpath: str, recursive: bool = True) -> list[dict]:
         if not f.is_file():
             continue
         ext = f.suffix.lower()
-        if ext in SUPPORTED_EXTENSIONS or ext == ".pdf":
+        if ext in ALL_INDEXABLE:
             result = index_file(str(f))
             results.append(result)
     return results
@@ -288,7 +290,8 @@ def _delete_file_chunks(file_path: str):
     except Exception:
         pass
     db.fts_delete_match("fts_rag", "file_path", file_path)
-    db.fts_delete_match("fts_memory", "file_path", file_path)
+    # fts_memory schema: (point_id, tag, text) — no file_path column.
+    # Stale rows for re-indexed files remain but new chunks dedup by content in memory.save().
 
 
 # ---------------------------------------------------------------------------
