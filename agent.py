@@ -1192,11 +1192,75 @@ def _run_inner(user_input: str, thread_id: str | None,
     if "[Relevant context from memory:]" in system_content:
         result.auto_context_hits = system_content.count("\n- [")
 
+    # ── Agent Loop v2 (feature flag) ──
+    if config.get("agent_loop_v2"):
+        from agent_loop import run_loop
+        from agent_events import EventEmitter
+        from agent_budget import BudgetLimits
+
+        emitter = EventEmitter()
+        # Wire emitter to existing callbacks
+        if _content_callback:
+            emitter.on("content_delta", lambda e: _content_callback(e.data["text"]))
+        if _thinking_callback:
+            emitter.on("thinking_delta", lambda e: _thinking_callback(e.data["text"]))
+        if _status_callback:
+            emitter.on("status", lambda e: _status_callback(e.data["text"]))
+        if _tool_call_callback:
+            emitter.on("tool_end", lambda e: _tool_call_callback(
+                e.data["name"], e.data.get("result", "")[:80], e.data.get("result", "")))
+
+        loop_result = run_loop(
+            client=client,
+            model=_model,
+            messages=messages,
+            tools=tools.get_all_tools(compact=True),
+            emitter=emitter,
+            budget=BudgetLimits.from_config(),
+            temperature=soul.get_temperature(),
+            presence_penalty=config.get("presence_penalty"),
+            max_tokens=2048,
+            tool_executor=tools.execute,
+            json_repair_fn=_repair_tool_json,
+            extra_kwargs={"extra_body": {"options": {"num_ctx": config.get("ollama_num_ctx")}}} if providers.get_active_name() == "ollama" else {},
+        )
+
+        result.reply = _clean_response(loop_result["reply"])
+        result.thinking = loop_result["thinking"]
+        result.tool_calls_made = loop_result["tool_calls"]
+        result.completion_tokens = loop_result["completion_tokens"]
+        result.prompt_tokens = loop_result["prompt_tokens"]
+        result.tok_per_sec = loop_result["tok_per_sec"]
+
+        turn_ms = int((time.time() - turn_start) * 1000)
+        msg_meta = {
+            "tools": result.tool_calls_made,
+            "duration_ms": turn_ms,
+            "context_hits": result.auto_context_hits,
+            "thinking": result.thinking or "",
+            "tokens": result.completion_tokens,
+            "prompt_tokens": result.prompt_tokens,
+            "tok_per_sec": result.tok_per_sec,
+        }
+        db.save_message("assistant", result.reply, thread_id=tid, meta=msg_meta)
+
+        stats = loop_result["stats"]
+        logger.event("turn_complete", duration_ms=turn_ms, rounds=stats.turns,
+                     tools_used=result.tool_calls_made, reply_len=len(result.reply),
+                     est_tokens=result.completion_tokens, context_hits=result.auto_context_hits,
+                     thread=tid or "active")
+
+        if result.tool_calls_made:
+            _save_experience(user_input, result, stats.turns, stats.total_errors)
+
+        return result
+
+    # ── Legacy agent loop (v1) ──
     rounds = 0
     last_failed_tool = None
     fail_count = 0
-    total_tool_errors = 0  # cumulative (never resets) — for experience scoring
-    _injected_instructions: set[str] = set()  # track which skill instructions were injected
+    total_tool_errors = 0
+    _injected_instructions: set[str] = set()
 
     max_tool_rounds = config.get("max_tool_rounds")
     _log.info(f"entering tool loop: rounds={rounds}, max={max_tool_rounds}, msgs={len(messages)}")
