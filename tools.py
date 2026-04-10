@@ -808,21 +808,10 @@ def execute(name: str, args: dict) -> str:
             import socket
             from urllib.parse import urlparse
             url = args["url"]
-            # SSRF protection: only allow http(s), block internal/private IPs
+            # Basic URL validation (no SSRF blocking — qwe-qwe is a local agent)
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https"):
                 return f"Error: only http/https URLs allowed, got '{parsed.scheme}'"
-            hostname = parsed.hostname or ""
-            try:
-                resolved = socket.getaddrinfo(hostname, parsed.port or 443)
-                for _, _, _, _, addr in resolved:
-                    ip = addr[0]
-                    import ipaddress
-                    ip_obj = ipaddress.ip_address(ip)
-                    if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
-                        return f"Error: blocked request to internal address ({ip})"
-            except socket.gaierror:
-                pass  # let urlopen handle DNS errors
             method = args.get("method", "GET").upper()
             body = args.get("body")
             hdrs = {"User-Agent": "qwe-qwe/0.5"}
