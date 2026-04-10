@@ -499,7 +499,6 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
     Returns:
         list of result dicts ``[{path, chunks, status, method}]``.
     """
-    from qdrant_client.models import PointStruct
     import memory
 
     # Normalize method names (frontend sends "text"/"pdf"/"vision",
@@ -528,7 +527,7 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
         result["method"] = f.get("method", "chunk_text")
         results.append(result)
 
-    # Phase 2: GPU — images and scanned PDFs
+    # Phase 2: GPU — images and scanned PDFs (vision-based extraction → memory.save)
     if gpu_files:
         est_sec = sum(2.0 if f.get("method") == "vision_describe" else 3.0 * f.get("pages", 1) for f in gpu_files)
         if phase_cb:
@@ -544,6 +543,7 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
             try:
                 path = Path(fpath).expanduser().resolve()
 
+                # Extract text via vision
                 if method == "vision_describe":
                     content = _describe_image(path)
                 elif method == "pdf_scan":
@@ -555,38 +555,23 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
                     results.append({"path": str(path), "chunks": 0, "status": "empty", "method": method})
                     continue
 
-                chunks = _chunk_text(content)
-                qc = _get_qdrant()
+                # Save to unified memory collection (same path as CPU files)
                 _delete_file_chunks(str(path))
 
-                points = []
-                for i, chunk in enumerate(chunks):
-                    dense = _embed(chunk)
-                    sparse = memory.sparse_embed(chunk)
-                    payload = {
-                            "text": chunk,
-                            "file_path": str(path),
-                            "chunk_index": i,
-                            "total_chunks": len(chunks),
-                            "indexed_at": time.time(),
-                        }
-                    if tags:
-                        payload["tags"] = tags
-                    points.append(PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector={"dense": dense, "sparse": sparse},
-                        payload=payload,
-                    ))
+                meta = {
+                    "source": str(path),
+                    "source_type": "file",
+                    "file_path": str(path),
+                    "filename": path.name,
+                    "extraction_method": method,  # track how we got the text
+                }
+                if tags:
+                    meta["document_tags"] = tags
 
-                if points:
-                    for batch_start in range(0, len(points), 100):
-                        batch = points[batch_start:batch_start + 100]
-                        qc.upsert(RAG_COLLECTION, points=batch)
+                memory.save(content, tag="knowledge", dedup=False, meta=meta)
 
-                    # Mirror to FTS5 for BM25 keyword search
-                    for pt in points:
-                        db.fts_upsert("fts_rag", "chunk_id", pt.id,
-                                      {"file_path": pt.payload["file_path"], "text": pt.payload["text"]})
+                # Count chunks for UI feedback
+                chunk_count = len(memory._chunk_text(content)) if len(content) > memory._CHUNK_THRESHOLD else 1
 
                 mtime_key = f"rag:mtime:{path}"
                 tags_key = f"rag:tags:{path}"
@@ -595,8 +580,9 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
                     db.kv_set(tags_key, ",".join(tags))
                 else:
                     db.execute("DELETE FROM kv WHERE key = ?", (tags_key,))
-                _log.info(f"indexed {path}: {len(chunks)} chunks (method={method})")
-                results.append({"path": str(path), "chunks": len(chunks), "status": "indexed", "method": method})
+
+                _log.info(f"indexed {path} → memory collection: {chunk_count} chunks (method={method})")
+                results.append({"path": str(path), "chunks": chunk_count, "status": "indexed", "method": method})
             except Exception as e:
                 _log.error(f"batch index failed for {fpath}: {e}")
                 results.append({"path": fpath, "chunks": 0, "status": f"error: {e}", "method": method})
