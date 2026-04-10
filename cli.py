@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """qwe-qwe CLI — lightweight AI agent for local models."""
 
-import sys, time, readline, threading
+import sys, time, threading
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -13,11 +13,15 @@ _log = logger.get("cli")
 
 console = Console()
 
-# Enable readline for input history + arrow keys
-readline.parse_and_bind('"\\e[A": previous-history')
-readline.parse_and_bind('"\\e[B": next-history')
-readline.parse_and_bind('"\\e[C": forward-char')
-readline.parse_and_bind('"\\e[D": backward-char')
+# Enable readline for input history + arrow keys (Linux/Mac only — Windows uses pyreadline3)
+try:
+    import readline
+    readline.parse_and_bind('"\\e[A": previous-history')
+    readline.parse_and_bind('"\\e[B": next-history')
+    readline.parse_and_bind('"\\e[C": forward-char')
+    readline.parse_and_bind('"\\e[D": backward-char')
+except ImportError:
+    pass  # readline not available on Windows by default
 
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
@@ -594,12 +598,36 @@ def main():
         if user_input == "/quit":
             console.print("  [dim]👋[/]")
             break
+        if user_input == "/help" or user_input == "/?":
+            show_help()
+            continue
         if user_input == "/clear":
             db.clear_history()
             console.print("  [yellow]✓ History cleared.[/]")
             continue
         if user_input == "/stats":
             show_stats()
+            continue
+        if user_input == "/doctor":
+            doctor()
+            continue
+        if user_input == "/mcp" or user_input.startswith("/mcp "):
+            handle_mcp(user_input[4:].strip())
+            continue
+        if user_input == "/synthesis" or user_input.startswith("/synthesis "):
+            handle_synthesis(user_input[10:].strip())
+            continue
+        if user_input == "/entities":
+            show_entities()
+            continue
+        if user_input == "/wiki" or user_input.startswith("/wiki "):
+            handle_wiki(user_input[5:].strip())
+            continue
+        if user_input == "/files":
+            show_indexed_files()
+            continue
+        if user_input.startswith("/file "):
+            handle_file_upload(user_input[6:].strip())
             continue
         if user_input.startswith("/soul"):
             handle_soul_command(user_input[5:].strip())
@@ -658,7 +686,20 @@ def main():
                 except Exception:
                     pass
 
+        def _on_tool_call(name: str, args_preview: str, result_preview: str = ""):
+            # Pause live display briefly to show tool call
+            live = _cli_live_ref[0]
+            if live:
+                try:
+                    live.stop()
+                except Exception:
+                    pass
+                _cli_live_ref[0] = None
+            short_args = args_preview[:60] + "..." if len(args_preview) > 60 else args_preview
+            console.print(f"  [cyan]🔧 {name}[/][dim]({short_args})[/]")
+
         agent._content_callback = _on_content_token
+        agent._tool_call_callback = _on_tool_call
 
         try:
             console.print()
@@ -676,8 +717,228 @@ def main():
             continue
         finally:
             agent._content_callback = None
+            agent._tool_call_callback = None
 
+        # Show stats after response
+        tok_s = getattr(result, "tok_per_sec", 0)
+        tokens = getattr(result, "completion_tokens", 0)
+        tools = len(getattr(result, "tool_calls_made", []))
+        stats_parts = []
+        if tokens:
+            stats_parts.append(f"{tokens} tok")
+        if tok_s:
+            stats_parts.append(f"{tok_s} tok/s")
+        if tools:
+            stats_parts.append(f"{tools} tools")
+        if stats_parts:
+            console.print(f"  [dim]· {' · '.join(stats_parts)}[/]")
         console.print()
+
+
+def show_help():
+    """Show all available slash commands."""
+    console.print("\n  [bold yellow]qwe-qwe commands[/]\n")
+    cmds = [
+        ("/help", "show this help"),
+        ("/clear", "clear history"),
+        ("/stats", "session stats"),
+        ("/doctor", "run full diagnostics"),
+        ("/quit /exit", "exit"),
+        ("", ""),
+        ("[bold]Agent[/]", ""),
+        ("/soul", "edit personality traits"),
+        ("/skills", "toggle skill plugins"),
+        ("/model [name]", "switch model"),
+        ("/provider [name]", "switch provider"),
+        ("/thinking", "toggle thinking mode"),
+        ("", ""),
+        ("[bold]Memory[/]", ""),
+        ("/memory", "search memory interactively"),
+        ("/entities", "show knowledge graph entities"),
+        ("/wiki [name]", "list or read wiki pages"),
+        ("/synthesis", "run night synthesis manually"),
+        ("", ""),
+        ("[bold]Files[/]", ""),
+        ("/files", "list indexed files"),
+        ("/file <path>", "upload and index a file"),
+        ("", ""),
+        ("[bold]Threads[/]", ""),
+        ("/thread", "manage threads"),
+        ("", ""),
+        ("[bold]Tasks & MCP[/]", ""),
+        ("/cron", "scheduled tasks"),
+        ("/tasks", "background tasks"),
+        ("/mcp", "manage MCP servers"),
+        ("", ""),
+        ("[bold]Integrations[/]", ""),
+        ("/telegram", "telegram bot config"),
+        ("/logs [level]", "view logs"),
+    ]
+    for cmd, desc in cmds:
+        if not cmd and not desc:
+            console.print()
+        elif not desc:
+            console.print(f"  {cmd}")
+        else:
+            console.print(f"  [cyan]{cmd:<18}[/] {desc}")
+    console.print()
+
+
+def handle_mcp(args: str):
+    """Handle /mcp commands: list, add, remove, restart, toggle."""
+    import mcp_client
+    parts = args.split(maxsplit=1)
+    cmd = parts[0] if parts else "list"
+
+    if cmd in ("", "list"):
+        servers = mcp_client.list_servers()
+        if not servers:
+            console.print("  [dim]No MCP servers configured.[/]")
+            console.print("  Add one: [cyan]/mcp add <name> <command>[/]")
+            return
+        console.print("\n  [bold yellow]MCP Servers[/]\n")
+        for s in servers:
+            status = "[green]✓ running[/]" if s.get("running") else "[dim]○ stopped[/]"
+            tools = f"{s.get('tool_count', 0)} tools" if s.get("running") else ""
+            console.print(f"  {status} [cyan]{s['name']}[/] — {s.get('transport', '?')} {tools}")
+        console.print()
+    elif cmd == "restart":
+        name = parts[1] if len(parts) > 1 else None
+        if not name:
+            console.print("  Usage: [cyan]/mcp restart <name>[/]")
+            return
+        try:
+            mcp_client.restart_server(name)
+            console.print(f"  [green]✓ Restarted {name}[/]")
+        except Exception as e:
+            console.print(f"  [red]✗ {e}[/]")
+    elif cmd == "remove":
+        name = parts[1] if len(parts) > 1 else None
+        if not name:
+            console.print("  Usage: [cyan]/mcp remove <name>[/]")
+            return
+        try:
+            mcp_client.remove_server(name)
+            console.print(f"  [green]✓ Removed {name}[/]")
+        except Exception as e:
+            console.print(f"  [red]✗ {e}[/]")
+    else:
+        console.print(f"  Unknown subcommand: {cmd}")
+        console.print("  Available: list, restart, remove")
+
+
+def handle_synthesis(args: str):
+    """Run knowledge graph synthesis manually."""
+    import synthesis, memory
+    pending = memory.get_pending_synthesis(limit=100)
+    pending_count = sum(len(v) for v in pending.values())
+    if pending_count == 0:
+        console.print("  [dim]No pending items for synthesis.[/]")
+        return
+    console.print(f"\n  [yellow]Running synthesis on {pending_count} chunks in {len(pending)} groups...[/]")
+    try:
+        result = synthesis.run_synthesis()
+        console.print(f"  [green]✓ {result}[/]\n")
+    except Exception as e:
+        console.print(f"  [red]✗ {e}[/]")
+
+
+def show_entities():
+    """Show knowledge graph entities."""
+    import memory
+    entities = memory.get_all_entities(limit=100)
+    if not entities:
+        console.print("  [dim]No entities yet. Save knowledge and run /synthesis.[/]")
+        return
+    console.print(f"\n  [bold yellow]Knowledge Graph — {len(entities)} entities[/]\n")
+    type_colors = {
+        "technology": "yellow", "person": "blue", "project": "green",
+        "concept": "magenta", "place": "red", "event": "cyan",
+    }
+    for e in sorted(entities, key=lambda x: -x.get("observation_count", 0))[:30]:
+        color = type_colors.get(e.get("type", "concept"), "white")
+        rels = e.get("relations", [])
+        rel_str = ", ".join(f"{r['rel']}→{r['to']}" for r in rels[:3])
+        if len(rels) > 3:
+            rel_str += f" (+{len(rels)-3})"
+        console.print(f"  [{color}]●[/] [bold]{e['name']}[/] "
+                     f"[dim]({e.get('type', '?')}, obs:{e.get('observation_count', 1)})[/]")
+        if e.get("description"):
+            console.print(f"      [dim]{e['description'][:80]}[/]")
+        if rel_str:
+            console.print(f"      [dim]→ {rel_str}[/]")
+    console.print()
+
+
+def handle_wiki(args: str):
+    """List or read wiki pages."""
+    wiki_dir = config.DATA_DIR / "wiki"
+    if not wiki_dir.exists():
+        console.print("  [dim]No wiki yet. Run /synthesis after saving some knowledge.[/]")
+        return
+
+    if not args:
+        # List pages
+        pages = sorted(wiki_dir.glob("*.md"))
+        if not pages:
+            console.print("  [dim]No wiki pages yet.[/]")
+            return
+        console.print(f"\n  [bold yellow]Wiki pages ({len(pages)})[/]\n")
+        for p in pages:
+            if p.name in ("index.md", "log.md"):
+                continue
+            size = p.stat().st_size
+            console.print(f"  [cyan]{p.stem}[/] [dim]({size} bytes)[/]")
+        console.print(f"\n  Read: [cyan]/wiki <name>[/]\n")
+    else:
+        # Read specific page
+        name = args.lower().replace(" ", "_")
+        page = wiki_dir / f"{name}.md"
+        if not page.exists():
+            console.print(f"  [red]Page '{args}' not found[/]")
+            return
+        content = page.read_text(encoding="utf-8")
+        console.print()
+        console.print(Markdown(content))
+        console.print()
+
+
+def show_indexed_files():
+    """List all indexed files."""
+    import rag
+    files = rag.list_indexed_files()
+    if not files:
+        console.print("  [dim]No indexed files. Upload via Web UI or use /file <path>.[/]")
+        return
+    console.print(f"\n  [bold yellow]Indexed files ({len(files)})[/]\n")
+    for f in files:
+        tags = f.get("tags", [])
+        tag_str = f" [dim]#{', '.join(tags)}[/]" if tags else ""
+        console.print(f"  [cyan]{f.get('filename', '?')}[/]{tag_str}")
+        console.print(f"    [dim]{f.get('path', '')}[/]")
+    console.print()
+
+
+def handle_file_upload(path: str):
+    """Index a file into knowledge base via /file <path>."""
+    import rag
+    from pathlib import Path
+    if not path:
+        console.print("  Usage: [cyan]/file <path>[/]")
+        return
+    fpath = Path(path).expanduser().resolve()
+    if not fpath.exists():
+        console.print(f"  [red]File not found: {fpath}[/]")
+        return
+    console.print(f"\n  [yellow]Indexing {fpath.name}...[/]")
+    try:
+        result = rag.index_file(str(fpath))
+        status = result.get("status", "?")
+        chunks = result.get("chunks", 0)
+        color = "green" if status == "indexed" else "yellow"
+        console.print(f"  [{color}]✓ {status}: {chunks} chunks[/]\n")
+    except Exception as e:
+        console.print(f"  [red]✗ {e}[/]")
 
 
 def handle_telegram(args: str):
