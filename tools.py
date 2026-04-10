@@ -11,22 +11,37 @@ _log = logger.get("tools")
 # Agent workspace — all relative paths resolve here
 WORKSPACE = config.WORKSPACE_DIR
 
-# Detect shell: prefer Git Bash on Windows (not WSL bash), fallback to cmd
+# ── Shell detection ──
+# Priority: Git Bash > MSYS2 > cmd.exe (never WSL — causes stack overflow)
 _SHELL_EXE: str | None = None
-if sys.platform == "win32":
-    # Prefer Git Bash over WSL bash (WSL bash causes stack overflow on simple commands)
-    _git_bash = Path("C:/Program Files/Git/usr/bin/bash.exe")
-    if _git_bash.exists():
-        _SHELL_EXE = str(_git_bash)
-    else:
-        _found = shutil.which("bash") or shutil.which("bash.exe")
-        # Skip WSL bash (system32\bash.exe) — it causes issues
-        if _found and "system32" not in _found.lower():
-            _SHELL_EXE = _found
-    if _SHELL_EXE:
-        _log.info(f"shell: using bash at {_SHELL_EXE}")
-    else:
-        _log.info("shell: bash not found, using cmd.exe")
+
+def _detect_shell() -> str | None:
+    """Find the best shell on this platform. Called once at import."""
+    if sys.platform != "win32":
+        return None  # Linux/Mac: shell=True uses /bin/sh, good enough
+
+    # Search order for Windows bash
+    candidates = [
+        Path("C:/Program Files/Git/usr/bin/bash.exe"),
+        Path("C:/Program Files (x86)/Git/usr/bin/bash.exe"),
+        Path("C:/msys64/usr/bin/bash.exe"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+
+    # PATH search — but skip WSL bash (system32\bash.exe)
+    found = shutil.which("bash") or shutil.which("bash.exe")
+    if found and "system32" not in found.lower():
+        return found
+
+    return None  # fallback to cmd.exe via shell=True
+
+_SHELL_EXE = _detect_shell()
+if _SHELL_EXE:
+    _log.info(f"shell: using bash at {_SHELL_EXE}")
+else:
+    _log.info(f"shell: {'native /bin/sh' if sys.platform != 'win32' else 'cmd.exe (no bash found)'}")
 
 # Directories the agent is allowed to write to (whitelist — safer than blacklist)
 _WRITE_WHITELIST: list[str] | None = None
@@ -103,10 +118,7 @@ def _check_shell_safety(cmd: str) -> str | None:
     # Regex pattern matches
     if _SHELL_BLOCKED_PATTERNS.search(cmd):
         return "Blocked: potentially dangerous command."
-    # Block command substitution — prevents hiding commands inside $() or backticks
-    if "$(" in cmd or "`" in cmd:
-        return "Blocked: command substitution ($() and backticks) not allowed for safety."
-    # Block curl/wget piped to shell
+    # Block curl/wget piped to shell (remote code execution)
     if re.search(r"(?:curl|wget)\s.*\|\s*(?:sh|bash|zsh|python)", cmd, re.IGNORECASE):
         return "Blocked: piping downloads to shell not allowed."
     return None
@@ -690,33 +702,37 @@ def execute(name: str, args: dict) -> str:
                 _log.warning(f"shell blocked: {cmd}")
                 return block_reason
             t = min(args.get("timeout", 120), 300)
+            cwd = str(WORKSPACE)
+
             env = os.environ.copy()
             venv = os.environ.get("VIRTUAL_ENV")
             if venv:
                 env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
-            # Force UTF-8 for subprocess to handle emoji and non-ASCII
             env["PYTHONIOENCODING"] = "utf-8"
-            # Use bash on Windows if available (Git Bash), otherwise cmd
-            if _SHELL_EXE:
-                result = subprocess.run(
-                    [_SHELL_EXE, "-c", args["command"]],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=t, env=env, cwd=str(WORKSPACE),
-                    stdin=subprocess.DEVNULL,
-                )
-            else:
-                result = subprocess.run(
-                    args["command"], shell=True, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace",
-                    timeout=t, env=env, cwd=str(WORKSPACE),
-                    stdin=subprocess.DEVNULL,
-                )
+
+            try:
+                if _SHELL_EXE:
+                    result = subprocess.run(
+                        [_SHELL_EXE, "-c", cmd],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=t, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
+                    )
+                else:
+                    result = subprocess.run(
+                        cmd, shell=True, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                        timeout=t, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
+                    )
+            except OSError as e:
+                _log.error(f"shell OSError: {e}")
+                return f"Error: shell failed ({e}). Try a simpler command."
+
             output = result.stdout or ""
             if result.stderr:
                 output += f"\nSTDERR: {result.stderr}"
             if result.returncode != 0:
                 output += f"\n(exit code: {result.returncode})"
-            # Truncate long outputs aggressively for small context models
+            # Truncate long outputs for small context models
             if len(output) > 2000:
                 output = output[:1000] + "\n...(truncated)...\n" + output[-500:]
             return output.strip() or "(no output)"
