@@ -1207,8 +1207,16 @@ def _run_inner(user_input: str, thread_id: str | None,
         if _status_callback:
             emitter.on("status", lambda e: _status_callback(e.data["text"]))
         if _tool_call_callback:
-            emitter.on("tool_end", lambda e: _tool_call_callback(
-                e.data["name"], e.data.get("result", "")[:80], e.data.get("result", "")))
+            # Track args from tool_start so tool_end can pair them
+            _pending_args: dict[str, str] = {}
+            def _on_start(e):
+                _pending_args[e.data["name"]] = e.data.get("args", "")
+            def _on_end(e):
+                name = e.data["name"]
+                args = _pending_args.pop(name, "")
+                _tool_call_callback(name, args, e.data.get("result", ""))
+            emitter.on("tool_start", _on_start)
+            emitter.on("tool_end", _on_end)
 
         loop_result = run_loop(
             client=client,

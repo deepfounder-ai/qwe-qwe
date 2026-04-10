@@ -614,8 +614,8 @@ def main():
         if user_input == "/mcp" or user_input.startswith("/mcp "):
             handle_mcp(user_input[4:].strip())
             continue
-        if user_input == "/synthesis" or user_input.startswith("/synthesis "):
-            handle_synthesis(user_input[10:].strip())
+        if user_input == "/synthesis":
+            handle_synthesis()
             continue
         if user_input == "/entities":
             show_entities()
@@ -626,8 +626,8 @@ def main():
         if user_input == "/files":
             show_indexed_files()
             continue
-        if user_input.startswith("/file "):
-            handle_file_upload(user_input[6:].strip())
+        if user_input == "/file" or user_input.startswith("/file "):
+            handle_file_upload(user_input[5:].strip())
             continue
         if user_input.startswith("/soul"):
             handle_soul_command(user_input[5:].strip())
@@ -686,17 +686,12 @@ def main():
                 except Exception:
                     pass
 
+        _cli_tool_log: list[str] = []
+
         def _on_tool_call(name: str, args_preview: str, result_preview: str = ""):
-            # Pause live display briefly to show tool call
-            live = _cli_live_ref[0]
-            if live:
-                try:
-                    live.stop()
-                except Exception:
-                    pass
-                _cli_live_ref[0] = None
+            # Accumulate tool calls — shown after Live completes to avoid breaking streaming
             short_args = args_preview[:60] + "..." if len(args_preview) > 60 else args_preview
-            console.print(f"  [cyan]🔧 {name}[/][dim]({short_args})[/]")
+            _cli_tool_log.append(f"  [cyan]🔧 {name}[/][dim]({short_args})[/]")
 
         agent._content_callback = _on_content_token
         agent._tool_call_callback = _on_tool_call
@@ -718,6 +713,11 @@ def main():
         finally:
             agent._content_callback = None
             agent._tool_call_callback = None
+
+        # Print tool calls after streaming completes
+        if _cli_tool_log:
+            for line in _cli_tool_log:
+                console.print(line)
 
         # Show stats after response
         tok_s = getattr(result, "tok_per_sec", 0)
@@ -827,7 +827,7 @@ def handle_mcp(args: str):
         console.print("  Available: list, restart, remove")
 
 
-def handle_synthesis(args: str):
+def handle_synthesis():
     """Run knowledge graph synthesis manually."""
     import synthesis, memory
     pending = memory.get_pending_synthesis(limit=100)
@@ -846,7 +846,11 @@ def handle_synthesis(args: str):
 def show_entities():
     """Show knowledge graph entities."""
     import memory
-    entities = memory.get_all_entities(limit=100)
+    try:
+        entities = memory.get_all_entities(limit=100)
+    except Exception as e:
+        console.print(f"  [red]✗ Failed to load entities: {e}[/]")
+        return
     if not entities:
         console.print("  [dim]No entities yet. Save knowledge and run /synthesis.[/]")
         return
@@ -856,12 +860,13 @@ def show_entities():
         "concept": "magenta", "place": "red", "event": "cyan",
     }
     for e in sorted(entities, key=lambda x: -x.get("observation_count", 0))[:30]:
+        name = e.get("name", "?")
         color = type_colors.get(e.get("type", "concept"), "white")
         rels = e.get("relations", [])
-        rel_str = ", ".join(f"{r['rel']}→{r['to']}" for r in rels[:3])
+        rel_str = ", ".join(f"{r.get('rel','?')}→{r.get('to','?')}" for r in rels[:3])
         if len(rels) > 3:
             rel_str += f" (+{len(rels)-3})"
-        console.print(f"  [{color}]●[/] [bold]{e['name']}[/] "
+        console.print(f"  [{color}]●[/] [bold]{name}[/] "
                      f"[dim]({e.get('type', '?')}, obs:{e.get('observation_count', 1)})[/]")
         if e.get("description"):
             console.print(f"      [dim]{e['description'][:80]}[/]")
@@ -891,13 +896,20 @@ def handle_wiki(args: str):
             console.print(f"  [cyan]{p.stem}[/] [dim]({size} bytes)[/]")
         console.print(f"\n  Read: [cyan]/wiki <name>[/]\n")
     else:
-        # Read specific page
+        # Read specific page — sanitize to prevent path traversal
         name = args.lower().replace(" ", "_")
+        if ".." in name or "/" in name or "\\" in name:
+            console.print("  [red]Invalid page name[/]")
+            return
         page = wiki_dir / f"{name}.md"
         if not page.exists():
             console.print(f"  [red]Page '{args}' not found[/]")
             return
-        content = page.read_text(encoding="utf-8")
+        try:
+            content = page.read_text(encoding="utf-8")
+        except Exception as e:
+            console.print(f"  [red]Cannot read page: {e}[/]")
+            return
         console.print()
         console.print(Markdown(content))
         console.print()

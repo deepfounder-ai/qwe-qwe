@@ -335,6 +335,12 @@ def stop_server(name: str) -> str:
     return f"MCP '{name}' not running"
 
 
+def restart_server(name: str) -> str:
+    """Stop then start an MCP server."""
+    stop_server(name)
+    return start_server(name)
+
+
 def start_all():
     """Start all enabled MCP servers. Called on app startup."""
     config = load_config()
