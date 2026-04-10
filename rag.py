@@ -119,8 +119,8 @@ def _read_file(path: Path) -> str | None:
 
 
 def index_file(filepath: str, tags: list[str] | None = None) -> dict:
-    """Index a single file with dense + sparse vectors. Returns {path, chunks, status}."""
-    from qdrant_client.models import PointStruct
+    """Index a file into the unified memory collection (tag=knowledge).
+    File content is auto-chunked by memory.save() and queued for synthesis."""
     import memory
 
     path = Path(filepath).expanduser().resolve()
@@ -128,7 +128,7 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
         return {"path": str(path), "chunks": 0, "status": "not found"}
 
     ext = path.suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS and ext != ".pdf":
+    if ext not in SUPPORTED_EXTENSIONS and ext != ".pdf" and ext not in IMAGE_EXTENSIONS:
         return {"path": str(path), "chunks": 0, "status": f"unsupported format: {ext}"}
 
     # Check if already indexed and unchanged
@@ -140,59 +140,39 @@ def index_file(filepath: str, tags: list[str] | None = None) -> dict:
     new_tags = ",".join(tags) if tags else ""
     if stored_mtime == current_mtime and stored_tags == new_tags:
         return {"path": str(path), "chunks": 0, "status": "already up to date"}
-    # If only tags changed (mtime same), fall through to full re-index
-    # to keep Qdrant payloads consistent (KV tags updated after re-index below)
 
-    # Read and chunk
+    # Read file content
     content = _read_file(path)
     if not content or not content.strip():
         return {"path": str(path), "chunks": 0, "status": "empty file"}
 
-    chunks = _chunk_text(content)
-    qc = _get_qdrant()
+    # Delete old chunks for this file (by source)
+    delete_file(str(path))
 
-    # Delete old chunks for this file
-    _delete_file_chunks(str(path))
+    # Save via memory.save() — handles chunking, embeddings, FTS5, synthesis queue
+    meta = {
+        "source": str(path),
+        "source_type": "file",
+        "file_path": str(path),
+        "filename": path.name,
+    }
+    if tags:
+        meta["document_tags"] = tags
 
-    # Index chunks with both dense and sparse vectors
-    points = []
-    for i, chunk in enumerate(chunks):
-        dense = _embed(chunk)
-        sparse = memory.sparse_embed(chunk)
-        payload = {
-                "text": chunk,
-                "file_path": str(path),
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-                "indexed_at": time.time(),
-            }
-        if tags:
-            payload["tags"] = tags
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector={"dense": dense, "sparse": sparse},
-            payload=payload,
-        ))
+    memory.save(content, tag="knowledge", dedup=False, meta=meta)
 
-    if points:
-        # Batch upsert (max 100 per batch)
-        for batch_start in range(0, len(points), 100):
-            batch = points[batch_start:batch_start + 100]
-            qc.upsert(RAG_COLLECTION, points=batch)
+    # Count chunks (for UI feedback)
+    chunks = memory._chunk_text(content)
+    chunk_count = len(chunks) if len(content) > 1000 else 1
 
-        # Mirror to FTS5 for BM25 keyword search
-        for pt in points:
-            db.fts_upsert("fts_rag", "chunk_id", pt.id,
-                          {"file_path": pt.payload["file_path"], "text": pt.payload["text"]})
-
-    # Store mtime + tags (always update to clear stale tags)
+    # Store mtime + tags
     db.kv_set(mtime_key, current_mtime)
     if tags:
         db.kv_set(tags_key, ",".join(tags))
     else:
         db.execute("DELETE FROM kv WHERE key = ?", (tags_key,))
-    _log.info(f"indexed {path}: {len(chunks)} chunks")
-    return {"path": str(path), "chunks": len(chunks), "status": "indexed"}
+    _log.info(f"indexed {path} → memory collection: {chunk_count} chunks")
+    return {"path": str(path), "chunks": chunk_count, "status": "indexed"}
 
 
 def index_directory(dirpath: str, recursive: bool = True) -> list[dict]:
@@ -214,122 +194,57 @@ def index_directory(dirpath: str, recursive: bool = True) -> list[dict]:
 
 
 def search(query: str, limit: int = 5, tags: list[str] | None = None) -> list[dict]:
-    """3-way hybrid search: BM25 (FTS5) + dense + sparse (SPLADE++) with RRF.
+    """Search indexed files via unified memory collection.
 
     Args:
         query: search text.
         limit: max results.
-        tags: optional list of tags to filter by (OR logic — match any).
+        tags: optional tags filter (matches document_tags in payload).
 
     Returns [{text, file_path, chunk_index, score, tags}].
     """
     import memory
-    from qdrant_client.models import Prefetch, FusionQuery, Fusion
 
-    qc = _get_qdrant()
-    dense = _embed(query)
-    sparse = memory.sparse_embed(query)
+    # Search with tag=knowledge (files) via memory.search
+    results = memory.search(query, limit=limit * 3, tag="knowledge")
 
-    # Build filter for tags if provided
-    query_filter = None
-    if tags:
-        from qdrant_client.models import Filter, FieldCondition, MatchAny
-        query_filter = Filter(must=[FieldCondition(key="tags", match=MatchAny(any=tags))])
-
-    # --- BM25 keyword search via FTS5 ---
-    bm25_ranked: list[tuple[str, float]] = []
-    try:
-        fts_hits = db.fts_search("fts_rag", query, limit=limit * 3)
-        # rank is negative (lower = better), convert to positive descending score
-        for hit in fts_hits:
-            chunk_id = hit.get("chunk_id", "")
-            bm25_score = -hit.get("rank", 0.0)  # flip sign: higher = better
-            if chunk_id:
-                bm25_ranked.append((chunk_id, bm25_score))
-    except Exception as e:
-        _log.debug(f"FTS5 BM25 search failed (graceful skip): {e}")
-
-    # --- Qdrant vector search (dense + SPLADE++ RRF) ---
-    qdrant_ranked: list[tuple[str, float]] = []
-    qdrant_payloads: dict[str, dict] = {}
-    try:
-        results = qc.query_points(
-            RAG_COLLECTION,
-            prefetch=[
-                Prefetch(query=sparse, using="sparse", limit=limit * 4),
-                Prefetch(query=dense, using="dense", limit=limit * 4),
-            ],
-            query=FusionQuery(fusion=Fusion.RRF),
-            query_filter=query_filter,
-            limit=limit * 3,
-        )
-        for r in results.points:
-            pid = str(r.id)
-            qdrant_ranked.append((pid, r.score))
-            qdrant_payloads[pid] = r.payload
-    except Exception as e:
-        _log.debug(f"hybrid RAG search failed, falling back to dense: {e}")
-        try:
-            results = qc.query_points(RAG_COLLECTION, query=dense,
-                                      using="dense", limit=limit,
-                                      query_filter=query_filter)
-            for r in results.points:
-                pid = str(r.id)
-                qdrant_ranked.append((pid, r.score))
-                qdrant_payloads[pid] = r.payload
-        except Exception:
-            pass
-
-    # --- RRF merge ---
-    if bm25_ranked and qdrant_ranked:
-        merged = db.rrf_merge([bm25_ranked, qdrant_ranked], limit=limit)
-    elif qdrant_ranked:
-        merged = [(pid, score) for pid, score in qdrant_ranked[:limit]]
-    elif bm25_ranked:
-        merged = [(pid, score) for pid, score in bm25_ranked[:limit]]
-    else:
-        return []
-
-    # Build output — prefer Qdrant payload (has full metadata), fallback to FTS text
     output = []
-    for chunk_id, score in merged:
-        if chunk_id in qdrant_payloads:
-            p = qdrant_payloads[chunk_id]
-            output.append({
-                "text": p.get("text", ""),
-                "file_path": p.get("file_path", ""),
-                "chunk_index": p.get("chunk_index", 0),
-                "score": round(score, 4),
-                "tags": p.get("tags", []),
-            })
-        else:
-            # BM25-only hit — payload not in Qdrant results, fetch from FTS
-            fts_text = ""
-            fts_path = ""
-            for hit in fts_hits:
-                if hit.get("chunk_id") == chunk_id:
-                    fts_text = hit.get("text", "")
-                    fts_path = hit.get("file_path", "")
-                    break
-            if fts_text:
-                output.append({
-                    "text": fts_text,
-                    "file_path": fts_path,
-                    "chunk_index": 0,
-                    "score": round(score, 4),
-                    "tags": [],
-                })
+    for r in results:
+        # Filter by document_tags if requested
+        if tags:
+            doc_tags = r.get("document_tags", [])
+            if not any(t in doc_tags for t in tags):
+                continue
+        output.append({
+            "text": r.get("text", ""),
+            "file_path": r.get("file_path", r.get("source", "")),
+            "chunk_index": r.get("chunk_index", 0),
+            "score": round(r.get("score", 0.0), 4),
+            "tags": r.get("document_tags", []),
+        })
+        if len(output) >= limit:
+            break
     return output
 
 
 def get_status() -> dict:
-    """Get RAG index status."""
+    """Get knowledge index status (unified memory collection)."""
+    import memory
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    count = 0
     try:
-        qc = _get_qdrant()
-        info = qc.get_collection(RAG_COLLECTION)
-        count = info.points_count or 0
+        qc = memory._get_qdrant()
+        # Count knowledge-tagged points with source_type=file
+        result = qc.count(
+            config.QDRANT_COLLECTION,
+            count_filter=Filter(must=[
+                FieldCondition(key="source_type", match=MatchValue(value="file")),
+            ]),
+        )
+        count = result.count
     except Exception:
-        count = 0
+        pass
 
     # Count indexed files from kv
     files = db.fetchone("SELECT COUNT(*) FROM kv WHERE key LIKE 'rag:mtime:%'")[0]
@@ -337,9 +252,29 @@ def get_status() -> dict:
     return {"files": files, "chunks": count}
 
 
+def stats() -> dict:
+    """Alias for get_status() — for cli/telegram_bot compatibility."""
+    s = get_status()
+    return {"total_files": s["files"], "total_chunks": s["chunks"]}
+
+
 def _delete_file_chunks(file_path: str):
-    """Remove all chunks for a given file path (Qdrant + FTS5)."""
+    """Remove all chunks for a given file path from unified memory collection."""
+    import memory
     from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+    try:
+        qc = memory._get_qdrant()
+        qc.delete(
+            config.QDRANT_COLLECTION,
+            points_selector=FilterSelector(
+                filter=Filter(must=[
+                    FieldCondition(key="file_path", match=MatchValue(value=file_path)),
+                ])
+            ),
+        )
+    except Exception as e:
+        _log.debug(f"delete chunks from memory collection failed: {e}")
+    # Legacy RAG collection cleanup
     try:
         qc = _get_qdrant()
         qc.delete(
@@ -352,8 +287,8 @@ def _delete_file_chunks(file_path: str):
         )
     except Exception:
         pass
-    # Also clean FTS5 index
     db.fts_delete_match("fts_rag", "file_path", file_path)
+    db.fts_delete_match("fts_memory", "file_path", file_path)
 
 
 # ---------------------------------------------------------------------------
