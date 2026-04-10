@@ -126,9 +126,7 @@ def _emit_agent_content(text: str):
 
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
-                    image_path: str | None = None,
-                    file_text: str | None = None,
-                    file_name: str | None = None) -> dict:
+                    image_path: str | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
     _abort_event.clear()
@@ -143,11 +141,7 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
     if not agent._content_callback:
         agent._content_callback = _emit_agent_content
     t0 = time.time()
-    # Prepend file content to user input if document attached
-    effective_input = user_input
-    if file_text and file_name:
-        effective_input = (user_input + "\n\n" if user_input else "") + f"[Attached file: {file_name}]\n```\n{file_text}\n```"
-    result = agent.run(effective_input, thread_id=thread_id, source="web", image_b64=image_b64)
+    result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
@@ -310,7 +304,7 @@ def _extract_file_text(filepath: Path, max_chars: int = 8000) -> str:
                 text = "\n".join(page.extract_text() or "" for page in reader.pages)
             except ImportError:
                 return "[PDF reading requires pypdf: pip install pypdf]"
-        elif ext in _TEXT_EXTENSIONS or ext.startswith("."):
+        elif ext in _TEXT_EXTENSIONS:
             text = filepath.read_text(encoding="utf-8", errors="replace")
         else:
             return f"[Unsupported file type: {ext}]"
@@ -1623,6 +1617,10 @@ async def websocket_chat(ws: WebSocket):
                 except Exception as e:
                     _log.warning(f"failed to process document: {e}")
 
+            # Prepend file content to user input
+            if file_text and file_name:
+                user_input = (user_input + "\n\n" if user_input else "") + f"[Attached file: {file_name}]\n```\n{file_text}\n```"
+
             _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}" +
                        (" [+image]" if image_b64 else "") +
                        (f" [+doc:{file_name}]" if file_name else ""))
@@ -1665,7 +1663,7 @@ async def websocket_chat(ws: WebSocket):
                             break  # agent finished
                         await _ws_send_safe(ws, msg)
 
-                def _run_with_queue(user_input, thread_id, image_b64, image_path, file_text=None, file_name=None):
+                def _run_with_queue(user_input, thread_id, image_b64, image_path):
                     """Wrap _run_agent_sync, routing content/thinking/status to queue."""
                     import agent as _agent
 
@@ -1694,9 +1692,7 @@ async def websocket_chat(ws: WebSocket):
                     try:
                         return _run_agent_sync(user_input, thread_id,
                                                image_b64=image_b64,
-                                               image_path=image_path,
-                                               file_text=file_text,
-                                               file_name=file_name)
+                                               image_path=image_path)
                     finally:
                         # Signal queue drain to stop
                         asyncio.run_coroutine_threadsafe(stream_queue.put(None), loop)
@@ -1704,8 +1700,7 @@ async def websocket_chat(ws: WebSocket):
                 # Run agent + queue drain concurrently
                 agent_task = loop.run_in_executor(
                     None, functools.partial(_run_with_queue, user_input,
-                                            thread_id, image_b64, image_path,
-                                            file_text, file_name))
+                                            thread_id, image_b64, image_path))
                 drain_task = asyncio.ensure_future(_drain_stream_queue())
                 result = await agent_task
                 await drain_task  # ensure all queued messages are sent

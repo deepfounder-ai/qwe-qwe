@@ -1279,34 +1279,25 @@ def _handle_update(update: dict, token: str, bot_username: str):
     if doc:
         try:
             fname = doc.get("file_name", "file.txt")
-            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
-            supported = {"txt", "py", "js", "ts", "md", "json", "csv", "log", "html",
-                         "css", "yaml", "yml", "toml", "xml", "sql", "sh", "ini", "pdf"}
-            if ext in supported:
-                file_id = doc["file_id"]
-                file_info = _api("getFile", get_token(), file_id=file_id)
-                if file_info and file_info.get("ok"):
-                    file_path = file_info["result"]["file_path"]
-                    url = f"https://api.telegram.org/file/bot{get_token()}/{file_path}"
-                    file_data = requests.get(url, timeout=30).content
-                    # Save and extract text
-                    import tempfile
-                    from pathlib import Path
-                    tmp = Path(tempfile.gettempdir()) / fname
+            file_id = doc["file_id"]
+            file_info = _api("getFile", get_token(), file_id=file_id)
+            if file_info and file_info.get("ok"):
+                file_path_remote = file_info["result"]["file_path"]
+                url = f"https://api.telegram.org/file/bot{get_token()}/{file_path_remote}"
+                file_data = requests.get(url, timeout=30).content
+                # Save to temp file and extract text using shared helper
+                import tempfile
+                from pathlib import Path
+                from server import _extract_file_text
+                ext = Path(fname).suffix or ".txt"
+                tmp = Path(tempfile.mktemp(suffix=ext))
+                try:
                     tmp.write_bytes(file_data)
-                    if ext == "pdf":
-                        try:
-                            from pypdf import PdfReader
-                            reader = PdfReader(str(tmp))
-                            file_text = "\n".join(p.extract_text() or "" for p in reader.pages)
-                        except ImportError:
-                            file_text = "[PDF requires pypdf]"
-                    else:
-                        file_text = file_data.decode("utf-8", errors="replace")
-                    if len(file_text) > 8000:
-                        file_text = file_text[:8000] + f"\n...(truncated)"
-                    text = (text + "\n\n" if text else "") + f"[Attached file: {fname}]\n```\n{file_text}\n```"
-                    _log.info(f"document received from @{username}: {fname} ({len(file_data)}b → {len(file_text)} chars)")
+                    file_text = _extract_file_text(tmp)
+                    if not file_text.startswith("["):  # not an error message
+                        text = (text + "\n\n" if text else "") + f"[Attached file: {fname}]\n```\n{file_text}\n```"
+                        _log.info(f"document from @{username}: {fname} ({len(file_data)}b → {len(file_text)} chars)")
+                finally:
                     tmp.unlink(missing_ok=True)
         except Exception as e:
             _log.error(f"document download failed: {e}")

@@ -119,9 +119,14 @@ _CORE_TOOL_NAMES = {
 _active_extra_tools: set[str] = set()
 
 
+_spicy_duck_on: bool | None = None  # cached per turn
+
+
 def _reset_active_tools():
     """Reset extra tools between turns."""
+    global _spicy_duck_on
     _active_extra_tools.clear()
+    _spicy_duck_on = None  # re-check on next get_all_tools()
 
 
 # ── Tool definitions — SHORT descriptions, small models need clarity ──
@@ -897,9 +902,13 @@ def get_all_tools(compact: bool = False) -> list[dict]:
     all_available = _get_all_tools_full()
 
     # Check if hidden skills are active — their tools bypass tool_search
-    import db as _db
+    # Cached per-turn (reset in _reset_active_tools)
+    global _spicy_duck_on
+    if _spicy_duck_on is None:
+        import db as _db
+        _spicy_duck_on = _db.kv_get("spicy_duck") == "quack"
     _always_on = set()
-    if _db.kv_get("spicy_duck") == "quack":
+    if _spicy_duck_on:
         _always_on.update({"lovense_connect", "lovense_vibrate", "lovense_pattern",
                            "lovense_preset", "lovense_stop", "lovense_status"})
 
