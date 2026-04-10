@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.10.0 — 2026-04-10
+
+### Agent Loop v2
+- **Clean execution loop** inspired by claw-code-agent architecture
+- **Continuation handling**: automatic re-prompt when model truncates on max_tokens
+- **Budget system**: multi-dimensional limits (turns, tool calls, tokens)
+- **Event emitter**: typed events replace 5 global callback variables
+- **Feature flag**: `agent_loop_v2` setting (default: on, legacy loop as fallback)
+- **Vision fallback**: strips images when model doesn't support them
+- Files: agent_loop.py, agent_events.py, agent_budget.py
+
+### Unified Memory + RAG
+- **Single Qdrant collection** for agent memory AND indexed files
+- Files from Upload UI now go through memory.save() with `tag=knowledge`
+- File content auto-chunks and queues for night synthesis
+- Knowledge graph (entities, wiki) can reference uploaded files
+- GPU branch (images, scanned PDFs) unified with text path
+- Added payload indexes: file_path, source_type, document_tags
+
+### Spicy Duck
+- Secret hidden skill: Lovense smart device integration (6 tools)
+- LAN API control via Lovense Remote app
+- Heart button UI: tap 10x to activate/deactivate
+- Auto-logo switch when mode active
+- Personality override in system prompt
+
+### Caveman Mode
+- Token compression when `brevity=high`
+- Inspired by github.com/JuliusBrussee/caveman
+- Rules: no filler, no articles, no hedging, fragments OK
+- Code and tool calls stay intact
+
+### File Upload in Chat
+- Drag & drop .txt, .py, .md, .pdf, .json and 15+ file types
+- Document preview chip in Web UI
+- Telegram documents: downloaded, text extracted, prepended to message
+- Shared `_extract_file_text()` helper (dedup)
+
+### Infrastructure Fixes
+- Shell: prefer Git Bash, skip WSL (stack overflow)
+- Removed SSRF block for localhost (agent needs local HTTP access)
+- Removed blanket `$()` and backtick ban (legitimate bash patterns)
+- Fixed http_request for localhost access
+- Telegram auto-start in uvicorn lifespan
+- `self_config` tool: agent reads/sets own settings
+- tok/s display in message footer
+- Code review fixes: VERSION constant, timezone-aware cron, entity dedup
+
+---
+
 ## v0.9.0 — 2026-04-05
 
 ### Knowledge Graph
