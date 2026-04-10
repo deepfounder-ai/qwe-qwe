@@ -11,11 +11,18 @@ _log = logger.get("tools")
 # Agent workspace — all relative paths resolve here
 WORKSPACE = config.WORKSPACE_DIR
 
-# Detect shell: prefer bash on Windows (Git Bash), fallback to cmd
+# Detect shell: prefer Git Bash on Windows (not WSL bash), fallback to cmd
 _SHELL_EXE: str | None = None
 if sys.platform == "win32":
-    _SHELL_EXE = shutil.which("bash") or shutil.which("bash.exe")
-    # If bash found, shell commands run via bash — tell subprocess
+    # Prefer Git Bash over WSL bash (WSL bash causes stack overflow on simple commands)
+    _git_bash = Path("C:/Program Files/Git/usr/bin/bash.exe")
+    if _git_bash.exists():
+        _SHELL_EXE = str(_git_bash)
+    else:
+        _found = shutil.which("bash") or shutil.which("bash.exe")
+        # Skip WSL bash (system32\bash.exe) — it causes issues
+        if _found and "system32" not in _found.lower():
+            _SHELL_EXE = _found
     if _SHELL_EXE:
         _log.info(f"shell: using bash at {_SHELL_EXE}")
     else:
