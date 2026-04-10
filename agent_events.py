@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass, field
 from typing import Callable, Any
+import logger
+
+_log = logger.get("events")
 
 
 @dataclass
@@ -44,13 +47,13 @@ class EventEmitter:
         for h in self._global_handlers:
             try:
                 h(event)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug(f"event handler error ({event.type}): {e}")
         for h in self._handlers.get(event.type, []):
             try:
                 h(event)
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug(f"event handler error ({event.type}): {e}")
 
     def clear(self):
         """Remove all handlers."""

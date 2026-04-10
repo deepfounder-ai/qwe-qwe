@@ -64,6 +64,7 @@ def run_loop(
     final_content = ""
     thinking_content = ""
     extra = extra_kwargs or {}
+    _budget_warned = False
 
     while True:
         # ── Budget check ──
@@ -73,11 +74,13 @@ def run_loop(
             emitter.status(f"Budget: {decision.reason}")
             break
 
-        # Budget warning to model
-        warning = warning_check(budget, stats)
-        if warning:
-            messages.append({"role": "user", "content": f"[system] {warning}. Give final answer."})
-            emitter.emit(AgentEvent(EVT_BUDGET_WARNING, {"message": warning}))
+        # Budget warning to model (inject once)
+        if not _budget_warned:
+            warning = warning_check(budget, stats)
+            if warning:
+                messages.append({"role": "user", "content": f"[system] {warning}. Give final answer."})
+                emitter.emit(AgentEvent(EVT_BUDGET_WARNING, {"message": warning}))
+                _budget_warned = True
 
         stats.add_turn()
         emitter.emit(AgentEvent("turn_start", {"turn": stats.turns}))
@@ -138,6 +141,7 @@ def run_loop(
 
         # ── Process stream ──
         in_think = False
+        _think_detected = False
         for chunk in stream:
             # Usage from final chunk
             if hasattr(chunk, 'usage') and chunk.usage:
@@ -163,14 +167,15 @@ def run_loop(
                 full_content += delta.content
                 text = delta.content
 
-                # Detect <think> tags in content
-                if not in_think and "<think>" in full_content:
+                # Detect <think> tags in content (check only new text, not full_content)
+                if not _think_detected and "<think>" in text:
                     in_think = True
+                    _think_detected = True
                     emitter.status("thinking...")
-                elif in_think and "</think>" in full_content:
+                elif in_think and "</think>" in text:
                     in_think = False
                     emitter.status("writing reply...")
-                elif "<|channel>" in full_content and not in_think:
+                elif "<|channel>" in text and not _think_detected:
                     in_think = True
                     emitter.status("thinking...")
                 elif in_think:
@@ -232,9 +237,14 @@ def run_loop(
                         ok, fixed = self_check_fn(tc["name"], args)
                         if not ok and fixed:
                             args = fixed
+                        elif not ok:
+                            tool_result = "Error: self-check rejected this action."
+                            stats.add_error()
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                            continue
 
                     # Execute tool
-                    emitter.tool_start(tc["name"], json.dumps(args, ensure_ascii=False)[:80])
+                    emitter.tool_start(tc["name"], str(args)[:80])
                     stats.add_tool_call()
                     all_tool_calls.append(tc["name"])
 
