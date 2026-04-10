@@ -376,7 +376,7 @@ Plus custom traits, agent name, and language selection. Edit via `/soul` (CLI), 
 qwe-qwe --doctor
 ```
 
-Checks 14 system components: Python, dependencies, SQLite, Qdrant, provider, LLM API, model status, embeddings, inference latency, Telegram, threads, skills, tools, disk space.
+Checks 20+ system components: Python, dependencies, SQLite, Qdrant, provider, LLM API, model loaded, embeddings, inference latency, agent loop v2, MCP servers, browser skill, Telegram, threads, skills, tools, cron/heartbeat, STT/TTS, files indexed, knowledge graph (entities/wiki), synthesis cron, BM25 index, disk space, logs.
 
 ## Config
 

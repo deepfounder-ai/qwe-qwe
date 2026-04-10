@@ -977,7 +977,45 @@ def doctor():
             return "⚠ tts module not available"
     check("TTS", _check_tts)
 
-    # ── 13. RAG / Knowledge ──
+    # ── Agent Loop v2 ──
+    console.print("  [dim]── Agent Loop ──[/]")
+    def _check_loop_v2():
+        try:
+            from agent_loop import run_loop
+            from agent_events import EventEmitter
+            from agent_budget import BudgetLimits
+            enabled = config.get("agent_loop_v2")
+            max_turns = config.get("max_tool_rounds")
+            status = "ON" if enabled else "OFF (legacy)"
+            return f"✓ v2 {status}, max_turns={max_turns}"
+        except ImportError as e:
+            return f"⚠ v2 modules missing: {e}"
+    check("Agent Loop", _check_loop_v2)
+
+    # ── MCP ──
+    def _check_mcp():
+        try:
+            import mcp_client
+            servers = mcp_client.list_servers()
+            if not servers:
+                return "✓ no MCP servers configured"
+            running = sum(1 for s in servers if s.get("running"))
+            total_tools = sum(s.get("tool_count", 0) for s in servers if s.get("running"))
+            return f"✓ {running}/{len(servers)} running, {total_tools} tools"
+        except Exception as e:
+            return f"⚠ {e}"
+    check("MCP", _check_mcp)
+
+    # ── Browser skill (Playwright) ──
+    def _check_browser():
+        try:
+            from playwright.sync_api import sync_playwright
+            return "✓ playwright installed"
+        except ImportError:
+            return "⚠ playwright not installed (browser skill unavailable)"
+    check("Browser", _check_browser)
+
+    # ── 13. Knowledge Graph ──
     console.print("  [dim]── Knowledge ──[/]")
     def _check_rag():
         try:
@@ -985,12 +1023,51 @@ def doctor():
             stats = rag.stats()
             return f"✓ {stats.get('total_chunks', 0)} chunks, {stats.get('total_files', 0)} files"
         except Exception:
-            try:
-                count = db.fetchone("SELECT COUNT(*) FROM fts_rag")[0]
-                return f"✓ {count} FTS entries"
-            except Exception:
-                return "⚠ no indexed knowledge"
-    check("RAG", _check_rag)
+            return "⚠ no indexed knowledge"
+    check("Files", _check_rag)
+
+    def _check_kg():
+        try:
+            import memory
+            entities = memory.get_all_entities(limit=500)
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            qc = memory._get_qdrant()
+            wiki_count = qc.count(
+                config.QDRANT_COLLECTION,
+                count_filter=Filter(must=[FieldCondition(key="tag", match=MatchValue(value="wiki"))]),
+            ).count
+            pending = memory.get_pending_synthesis(limit=100)
+            pending_count = sum(len(v) for v in pending.values())
+            return f"✓ {len(entities)} entities, {wiki_count} wiki chunks, {pending_count} pending synthesis"
+        except Exception as e:
+            return f"⚠ {str(e)[:60]}"
+    check("Knowledge Graph", _check_kg)
+
+    def _check_synthesis_cron():
+        try:
+            import scheduler
+            enabled = config.get("synthesis_enabled")
+            if not enabled:
+                return "⚠ synthesis disabled"
+            sched_time = config.get("synthesis_time")
+            # Check if cron is registered
+            tasks = scheduler.list_tasks()
+            has_synth = any(t.get("name") == scheduler.SYNTHESIS_TASK_NAME for t in tasks)
+            return f"✓ registered for {sched_time} daily" if has_synth else "⚠ not registered in scheduler"
+        except Exception as e:
+            return f"⚠ {e}"
+    check("Synthesis", _check_synthesis_cron)
+
+    def _check_wiki_dir():
+        try:
+            wiki_dir = config.DATA_DIR / "wiki"
+            if not wiki_dir.exists():
+                return "⚠ wiki dir doesn't exist (no synthesis runs yet)"
+            md_files = list(wiki_dir.glob("*.md"))
+            return f"✓ {len(md_files)} wiki pages on disk"
+        except Exception as e:
+            return f"⚠ {e}"
+    check("Wiki", _check_wiki_dir)
 
     def _check_fts():
         try:
