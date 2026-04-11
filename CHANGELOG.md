@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.11.0 — 2026-04-11
+
+### Web UI Redesign
+- **Modern design system**: CSS tokens for colors, radii, shadows, easing curves
+- **Smoother animations**: cubic-bezier easing (`ease-out`, `ease-spring`) replacing linear transitions
+- **Depth & polish**: gradient surfaces, inset highlights, backdrop blur on header/sidebar/input area
+- **Message bubbles**: softer borders, spring animation on mount, hover-reveal action buttons
+- **Chat messages**: linear-gradient user bubbles, warm inline code (`#ffd27a`), fade-in tool groups
+- **Input area**: accent glow on focus, gradient Send button with press-down, floating empty logo
+- **Sidebar**: spring indicator on active thread, translateX hover shift, glass surface
+- **Settings**: gradient active nav, hover padding expand, refined trait toggles and skill switches
+- **Provider cards**: gradient+glow on active, inset highlights across all surface cards
+- **Knowledge Base**: pill tabs, shine animation on progress bar, rounded tables
+- **Typography**: unified 10/11/12/13/14.5/17/20/22/26 scale, 0.8px uppercase letter-spacing
+- **Accessibility**: `prefers-reduced-motion` support, focus-visible on all interactive elements
+- **Mobile**: column layout for KB split, always-visible message actions, responsive header nav
+
+### Chat File Upload — Context Fix
+- **Critical fix**: attached files no longer inline into the user message (broke 32k context on long chats)
+- Files are saved to `~/.qwe-qwe/uploads/<uuid>_<name>.ext` and referenced by absolute path
+- User message contains only `[File attached: name.ext (1.2 KB) — saved at <path>]` + tool hints
+- Agent calls `read_file(path)` or `tool_search('rag') → rag_index(path)` on demand
+- File body loads into context only when the agent actually needs it
+- `user_meta.file` persists name/path/size → UI renders a file chip on history reload
+- Telegram bot uses the same path-reference pattern (shared uploads dir)
+
+### Knowledge Base: Upload from Computer
+- **New endpoint** `POST /api/knowledge/upload` — accepts multipart file, saves to `uploads/kb/`
+- **Drop zone** above the file browser: drag-drop or click "browse computer"
+- **Auto-select**: uploaded files appear immediately in the selection panel, ready to index
+- Status feedback: green "✓ N files uploaded — ready to index" / red error state
+- **Global drop guard**: `window.drop → preventDefault` so files never open in a new browser tab
+- `knowledge_index` validator now accepts paths under `UPLOADS_DIR` (not just `$HOME`)
+- Indexing stays fully local — no LLM round-trip, embeddings done in-process
+
+### Design System Cleanup
+- New tokens: `--accent-shadow`/`-lg`, `--error-shadow`/`-lg`, `--inset-hl`/`-strong`, `--radius-pill`, `--warn`, `--on-accent`, `--code-bg`, `--code-inline`
+- Replaced hardcoded hex colors with semantic variables across 20+ declarations
+- Replaced duplicated `0 4px 16px` shadows with tokens
+- Dead code: removed unused `--shadow-glow`, `--purple`, `--radius-xl`, duplicate `.msg { flex-shrink }`
+- Hover-lift added to `.sidebar-thread`, `.settings-nav-item`, `.nav-btn`
+- Active press-down added to `.model-chip`, `.nav-btn`
+- Flat surfaces (`.provider-card`, `.thread-row`, `.cron-table`, `.kn-browser`, `.log-viewer`) now have inset highlights
+
+---
+
 ## v0.10.0 — 2026-04-10
 
 ### Agent Loop v2

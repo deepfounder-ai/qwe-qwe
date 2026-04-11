@@ -126,13 +126,15 @@ def _emit_agent_content(text: str):
 
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
-                    image_path: str | None = None) -> dict:
+                    image_path: str | None = None,
+                    file_meta: dict | None = None) -> dict:
     """Run agent.run() synchronously — called from thread pool."""
     import agent
     _abort_event.clear()
     agent._abort_event = _abort_event  # share abort flag with agent
-    # Pass image_path so agent can store it in user message meta
+    # Pass image_path / file_meta so agent can store them in user message meta
     agent._pending_image_path = image_path
+    agent._pending_file = file_meta
     # Set live callbacks (only if not already set by caller, e.g. _run_with_queue)
     if not agent._status_callback:
         agent._status_callback = _emit_agent_status
@@ -141,7 +143,12 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
     if not agent._content_callback:
         agent._content_callback = _emit_agent_content
     t0 = time.time()
-    result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
+    try:
+        result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
+    finally:
+        # Clear so next turn without a file doesn't inherit it
+        agent._pending_image_path = None
+        agent._pending_file = None
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
@@ -1255,6 +1262,52 @@ async def file_browse(request: Request):
     }
 
 
+@app.post("/api/knowledge/upload")
+async def knowledge_upload(request: Request):
+    """Upload a file from the user's computer to the uploads directory.
+
+    Returns its absolute path so the frontend can immediately stage it
+    for indexing (without roundtripping through the LLM / chat).
+    """
+    import uuid as _uuid
+    import re as _re
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart" not in content_type:
+        return JSONResponse({"error": "multipart/form-data required"}, status_code=400)
+
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        return JSONResponse({"error": "no file"}, status_code=400)
+
+    data = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(data) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"},
+            status_code=413,
+        )
+
+    fname_raw = getattr(file, "filename", None) or "file.txt"
+    fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:100] or "file.txt"
+    stem = Path(fname_safe).stem
+    ext = Path(fname_safe).suffix or ".txt"
+    doc_id = str(_uuid.uuid4())[:8]
+
+    kb_dir = UPLOADS_DIR / "kb"
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    save_path = kb_dir / f"{doc_id}_{stem}{ext}"
+    save_path.write_bytes(data)
+
+    _log.info(f"kb upload: {fname_raw} → {save_path} ({len(data)} bytes)")
+    return {
+        "path": str(save_path.resolve()),
+        "name": fname_raw,
+        "size": len(data),
+        "ext": ext,
+    }
+
+
 @app.post("/api/knowledge/scan")
 async def knowledge_scan(data: dict):
     """Scan a path and return file preview for indexing."""
@@ -1286,12 +1339,20 @@ async def knowledge_index(data: dict):
     if not files:
         return JSONResponse({"error": "No files to index"}, status_code=400)
 
-    home = str(Path.home().resolve())
+    # Accept paths under $HOME OR under UPLOADS_DIR (for files uploaded via the KB upload UI)
+    home = Path.home().resolve()
+    uploads = UPLOADS_DIR.resolve()
     for f in files:
         fp = Path(f.get("path", "")).resolve()
-        try:
-            fp.relative_to(home)
-        except ValueError:
+        ok = False
+        for allowed in (home, uploads):
+            try:
+                fp.relative_to(allowed)
+                ok = True
+                break
+            except ValueError:
+                continue
+        if not ok:
             return JSONResponse({"error": f"Access denied: {f.get('path')}"}, status_code=403)
 
     with _knowledge_lock:
@@ -1600,26 +1661,40 @@ async def websocket_chat(ws: WebSocket):
                 except Exception as e:
                     _log.warning(f"failed to save ws image: {e}")
 
-            # Extract text from uploaded document
-            file_text = None
+            # Save uploaded document to disk and pass PATH to the agent
+            # (we used to inline the full file contents → context bloat on 32k models)
             file_name = None
+            file_path = None
+            file_size = 0
             if document:
                 try:
-                    import uuid as _uuid
+                    import uuid as _uuid, re as _re
                     doc_id = str(_uuid.uuid4())[:8]
-                    fname = document.get("filename", "file.txt")
-                    ext = Path(fname).suffix or ".txt"
-                    doc_file = UPLOADS_DIR / f"{doc_id}{ext}"
+                    fname_raw = document.get("filename", "file.txt")
+                    # Sanitize filename — keep original name for readability, strip paths
+                    fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:80] or "file.txt"
+                    ext = Path(fname_safe).suffix or ".txt"
+                    stem = Path(fname_safe).stem
+                    doc_file = UPLOADS_DIR / f"{doc_id}_{stem}{ext}"
                     doc_file.write_bytes(base64.b64decode(document["file_b64"]))
-                    file_text = _extract_file_text(doc_file)
-                    file_name = fname
-                    _log.info(f"document uploaded: {fname} → {len(file_text)} chars")
+                    file_name = fname_raw
+                    file_path = str(doc_file.resolve())
+                    file_size = doc_file.stat().st_size
+                    _log.info(f"document uploaded: {fname_raw} → {file_path} ({file_size} bytes)")
                 except Exception as e:
-                    _log.warning(f"failed to process document: {e}")
+                    _log.warning(f"failed to save document: {e}")
 
-            # Prepend file content to user input
-            if file_text and file_name:
-                user_input = (user_input + "\n\n" if user_input else "") + f"[Attached file: {file_name}]\n```\n{file_text}\n```"
+            # Reference file by PATH in the user message — agent uses read_file
+            # or rag_index tools on demand. This keeps context small (path is cheap,
+            # file body only loaded into context when the agent actually needs it).
+            if file_path and file_name:
+                size_kb = file_size / 1024
+                ref = (
+                    f"[File attached: {file_name} ({size_kb:.1f} KB) — saved at {file_path}. "
+                    f"To view contents call read_file(path). "
+                    f"To add to the knowledge base call tool_search('rag') then rag_index(path).]"
+                )
+                user_input = (user_input + "\n\n" if user_input else "") + ref
 
             _log.info(f"ws message: thread={thread_id or 'active'} | {user_input[:100]}" +
                        (" [+image]" if image_b64 else "") +
@@ -1663,7 +1738,12 @@ async def websocket_chat(ws: WebSocket):
                             break  # agent finished
                         await _ws_send_safe(ws, msg)
 
-                def _run_with_queue(user_input, thread_id, image_b64, image_path):
+                # Assemble file metadata for persistence (shown in UI on reload)
+                file_meta = None
+                if file_path and file_name:
+                    file_meta = {"path": file_path, "name": file_name, "size": file_size}
+
+                def _run_with_queue(user_input, thread_id, image_b64, image_path, file_meta):
                     """Wrap _run_agent_sync, routing content/thinking/status to queue."""
                     import agent as _agent
 
@@ -1692,7 +1772,8 @@ async def websocket_chat(ws: WebSocket):
                     try:
                         return _run_agent_sync(user_input, thread_id,
                                                image_b64=image_b64,
-                                               image_path=image_path)
+                                               image_path=image_path,
+                                               file_meta=file_meta)
                     finally:
                         # Signal queue drain to stop
                         asyncio.run_coroutine_threadsafe(stream_queue.put(None), loop)
@@ -1700,7 +1781,7 @@ async def websocket_chat(ws: WebSocket):
                 # Run agent + queue drain concurrently
                 agent_task = loop.run_in_executor(
                     None, functools.partial(_run_with_queue, user_input,
-                                            thread_id, image_b64, image_path))
+                                            thread_id, image_b64, image_path, file_meta))
                 drain_task = asyncio.ensure_future(_drain_stream_queue())
                 result = await agent_task
                 await drain_task  # ensure all queued messages are sent

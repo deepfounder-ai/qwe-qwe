@@ -1274,31 +1274,38 @@ def _handle_update(update: dict, token: str, bot_username: str):
         except Exception as e:
             _log.error(f"photo download failed: {e}")
 
-    # Handle document files — download, extract text, prepend to message
+    # Handle document files — save to uploads dir and reference by PATH.
+    # Agent uses read_file(path) or rag_index_file(path) on demand.
     doc = msg.get("document")
     if doc:
         try:
-            fname = doc.get("file_name", "file.txt")
+            import re as _re
+            from pathlib import Path
+            from server import UPLOADS_DIR
+            fname_raw = doc.get("file_name", "file.txt")
             file_id = doc["file_id"]
             file_info = _api("getFile", get_token(), file_id=file_id)
             if file_info and file_info.get("ok"):
                 file_path_remote = file_info["result"]["file_path"]
                 url = f"https://api.telegram.org/file/bot{get_token()}/{file_path_remote}"
                 file_data = requests.get(url, timeout=30).content
-                # Save to temp file and extract text using shared helper
-                import tempfile
-                from pathlib import Path
-                from server import _extract_file_text
-                ext = Path(fname).suffix or ".txt"
-                tmp = Path(tempfile.mktemp(suffix=ext))
-                try:
-                    tmp.write_bytes(file_data)
-                    file_text = _extract_file_text(tmp)
-                    if not file_text.startswith("["):  # not an error message
-                        text = (text + "\n\n" if text else "") + f"[Attached file: {fname}]\n```\n{file_text}\n```"
-                        _log.info(f"document from @{username}: {fname} ({len(file_data)}b → {len(file_text)} chars)")
-                finally:
-                    tmp.unlink(missing_ok=True)
+                # Sanitize filename and save under a uuid-prefixed name
+                import uuid as _uuid
+                fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:80] or "file.txt"
+                stem = Path(fname_safe).stem
+                ext = Path(fname_safe).suffix or ".txt"
+                doc_id = str(_uuid.uuid4())[:8]
+                saved = UPLOADS_DIR / f"{doc_id}_{stem}{ext}"
+                saved.write_bytes(file_data)
+                abs_path = str(saved.resolve())
+                size_kb = len(file_data) / 1024
+                ref = (
+                    f"[File attached: {fname_raw} ({size_kb:.1f} KB) — saved at {abs_path}. "
+                    f"To view contents call read_file(path). "
+                    f"To add to the knowledge base call tool_search('rag') then rag_index(path).]"
+                )
+                text = (text + "\n\n" if text else "") + ref
+                _log.info(f"document from @{username}: {fname_raw} → {abs_path} ({len(file_data)}b)")
         except Exception as e:
             _log.error(f"document download failed: {e}")
 
