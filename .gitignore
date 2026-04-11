@@ -39,3 +39,4 @@ skills/
 !skills/browser.py
 !skills/spicy_duck.py
 .claude/
+CLAUDE.md
