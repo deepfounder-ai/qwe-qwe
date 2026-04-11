@@ -23,11 +23,32 @@ _HIDDEN_SKILLS = {
 }
 
 
+def _active_preset_skills_dir() -> Path | None:
+    """The active preset's skills/ directory, if any. Import lazily to avoid
+    a circular import chain at module load."""
+    try:
+        import presets
+        return presets.get_active_skills_dir()
+    except Exception:
+        return None
+
+
 def _all_skill_paths() -> dict[str, Path]:
-    """Return {name: path} for all skills. User skills override built-in.
-    Hidden skills only appear when their activation key is set."""
+    """Return {name: path} for all skills. Later dirs override earlier ones.
+
+    Priority (highest wins):
+        1. Active preset skills (~/.qwe-qwe/presets/<id>/skills/)
+        2. User skills (~/.qwe-qwe/skills/)
+        3. Built-in skills (skills/)
+
+    Hidden skills only appear when their activation key is set.
+    """
     skills = {}
-    for d in (BUILTIN_SKILLS_DIR, USER_SKILLS_DIR):
+    search_dirs = [BUILTIN_SKILLS_DIR, USER_SKILLS_DIR]
+    preset_dir = _active_preset_skills_dir()
+    if preset_dir is not None:
+        search_dirs.append(preset_dir)
+    for d in search_dirs:
         if not d.exists():
             continue
         for f in sorted(d.glob("*.py")):
@@ -44,7 +65,18 @@ def _all_skill_paths() -> dict[str, Path]:
 
 
 def _find_skill(name: str) -> Path | None:
-    """Find a skill file by name, checking user dir first."""
+    """Find a skill file by name.
+
+    Check order (first hit wins):
+        1. Active preset skills
+        2. User skills
+        3. Built-in skills
+    """
+    preset_dir = _active_preset_skills_dir()
+    if preset_dir is not None:
+        p = preset_dir / f"{name}.py"
+        if p.exists():
+            return p
     user_path = USER_SKILLS_DIR / f"{name}.py"
     if user_path.exists():
         return user_path

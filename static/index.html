@@ -860,6 +860,71 @@ summary:focus-visible, [role="button"]:focus-visible,
 .cron-help { font-size: 11px; color: var(--text-dim); margin-top: 10px; line-height: 1.6; }
 .cron-help code { background: var(--surface2); padding: 2px 6px; border-radius: var(--radius-sm); font-family: var(--mono); border: 1px solid var(--border); }
 
+/* ── Market page ── */
+.market-content { padding: 28px 36px; overflow-y: auto; flex: 1; animation: sectionIn var(--med) var(--ease-out); max-width: 1200px; }
+.market-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 12px; }
+.market-header h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
+.market-header h2 i { color: var(--accent); }
+.market-content .desc { font-size: 13px; color: var(--text-dim); margin-bottom: 22px; line-height: 1.6; }
+.market-active-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; margin-bottom: 18px;
+  background: linear-gradient(135deg, var(--accent-bg) 0%, transparent 100%);
+  border: 1px solid rgba(245,166,35,0.3);
+  border-radius: var(--radius-md);
+  box-shadow: var(--accent-shadow), var(--inset-hl);
+}
+.market-active-banner i { color: var(--accent); font-size: 22px; }
+.market-active-banner .banner-text { flex: 1; font-size: 13px; }
+.market-active-banner .banner-text b { color: var(--accent); }
+.market-active-banner .banner-text .dim { color: var(--text-dim); margin-left: 6px; font-size: 11px; }
+.market-active-banner button {
+  background: transparent; border: 1px solid var(--border); color: var(--text-mid);
+  padding: 6px 14px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px;
+  transition: all var(--fast) var(--ease);
+}
+.market-active-banner button:hover { border-color: var(--accent); color: var(--accent); }
+
+.market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+.market-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 18px; display: flex; flex-direction: column; gap: 10px;
+  transition: all var(--fast) var(--ease);
+  box-shadow: var(--shadow-sm), var(--inset-hl);
+  animation: msgIn 0.35s var(--ease-out) both;
+}
+.market-card:hover { border-color: var(--border-light); transform: translateY(-1px); box-shadow: var(--shadow-md), var(--inset-hl); }
+.market-card.active {
+  border-color: rgba(245,166,35,0.5);
+  background: linear-gradient(135deg, var(--accent-bg) 0%, var(--surface) 40%);
+  box-shadow: var(--accent-shadow), var(--inset-hl);
+}
+.market-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.market-card-title { font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+.market-card-version { font-size: 11px; color: var(--text-dim); font-family: var(--mono); margin-left: 6px; }
+.market-card-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.market-badge {
+  display: inline-block; padding: 2px 10px; border-radius: var(--radius-pill);
+  font-size: 10px; font-family: var(--mono); font-weight: 500;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text-mid);
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.market-badge.category { background: rgba(74,159,232,0.12); border-color: rgba(74,159,232,0.25); color: var(--blue); }
+.market-badge.free { background: rgba(60,199,122,0.12); border-color: rgba(60,199,122,0.25); color: var(--green); }
+.market-badge.commercial { background: rgba(245,166,35,0.12); border-color: rgba(245,166,35,0.3); color: var(--accent); }
+.market-badge.trial { background: rgba(176,133,245,0.12); border-color: rgba(176,133,245,0.3); color: #b085f5; }
+.market-card-author { font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+.market-card-desc { font-size: 13px; color: var(--text-mid); line-height: 1.55; flex: 1; }
+.market-card-footer { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.market-card-footer .s-btn { padding: 7px 14px; font-size: 12px; }
+.market-card.active .market-card-title::before {
+  content: '● '; color: var(--accent);
+}
+
 /* ── Knowledge page ── */
 .knowledge-content { padding: 28px 36px; overflow-y: auto; flex: 1; animation: sectionIn var(--med) var(--ease-out); }
 .knowledge-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
@@ -1103,6 +1168,7 @@ summary:focus-visible, [role="button"]:focus-visible,
     <div class="header-nav">
       <button class="nav-btn active" data-page="chat" onclick="showPage('chat')"><i class="ph ph-chat-circle"></i> Chat</button>
       <button class="nav-btn" data-page="knowledge" onclick="showPage('knowledge')"><i class="ph ph-books"></i> Knowledge</button>
+      <button class="nav-btn" data-page="market" onclick="showPage('market')"><i class="ph ph-storefront"></i> Market</button>
       <button class="nav-btn" data-page="cron" onclick="showPage('cron')"><i class="ph ph-clock"></i> Cron</button>
       <button class="nav-btn" data-page="settings" onclick="showPage('settings')"><i class="ph ph-gear"></i> Settings</button>
     </div>
@@ -1257,6 +1323,32 @@ summary:focus-visible, [role="button"]:focus-visible,
         <svg id="knGraphSvg" width="100%" height="100%"></svg>
       </div>
       <div id="knGraphInfo" style="margin-top:12px;font-size:12px;color:var(--text-dim);font-family:var(--mono)"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Market page -->
+<div class="page" id="pageMarket">
+  <div class="market-content">
+    <div class="market-header">
+      <h2><i class="ph ph-storefront"></i> Market</h2>
+      <button class="s-btn" onclick="loadPresets()" title="Refresh"><i class="ph ph-arrows-clockwise"></i> Refresh</button>
+    </div>
+    <p class="desc">Install business presets (.qwp archives) to turn the agent into a specialist for your domain.</p>
+
+    <div id="marketActiveBanner" class="market-active-banner" style="display:none"></div>
+
+    <!-- Upload zone -->
+    <div class="kn-upload-zone" id="marketUploadZone" style="margin-bottom:18px">
+      <i class="ph ph-package"></i>
+      <span><strong>Drop a .qwp file here</strong> or <a onclick="document.getElementById('marketUploadInput').click()">browse</a> to install a preset from disk.</span>
+      <input type="file" id="marketUploadInput" accept=".qwp,.zip" style="display:none" onchange="handleMarketUploadInput(this)">
+    </div>
+    <div class="kn-upload-status" id="marketUploadStatus"></div>
+
+    <!-- Installed presets grid -->
+    <div class="market-grid" id="marketGrid">
+      <div class="cron-empty">No presets installed yet.</div>
     </div>
   </div>
 </div>
@@ -2025,12 +2117,15 @@ function showPage(page) {
   currentPage = page;
   document.getElementById('pageChatWrap').classList.toggle('active', page === 'chat');
   document.getElementById('pageKnowledge').classList.toggle('active', page === 'knowledge');
+  const pm = document.getElementById('pageMarket');
+  if (pm) pm.classList.toggle('active', page === 'market');
   document.getElementById('pageCron').classList.toggle('active', page === 'cron');
   document.getElementById('pageSettings').classList.toggle('active', page === 'settings');
   // Update nav buttons
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   if (page === 'settings') loadAllSettings();
   if (page === 'cron') loadCron();
+  if (page === 'market') loadPresets();
   if (page === 'knowledge') knLoadIndexed();
   if (page === 'chat') input.focus();
 }
@@ -3168,6 +3263,216 @@ async function loadTgStreamingState() {
     if (el) el.checked = d.enabled;
   } catch(e) {}
 }
+
+// ── Market (business presets) ──
+let _marketCache = { items: [], active: null };
+
+async function loadPresets() {
+  const grid = document.getElementById('marketGrid');
+  const banner = document.getElementById('marketActiveBanner');
+  try {
+    const res = await fetch('/api/presets');
+    const data = await res.json();
+    _marketCache = data;
+    renderMarket();
+  } catch (e) {
+    grid.innerHTML = `<div class="cron-empty">Failed to load presets: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+function renderMarket() {
+  const grid = document.getElementById('marketGrid');
+  const banner = document.getElementById('marketActiveBanner');
+  const items = _marketCache.items || [];
+  const activeId = _marketCache.active;
+
+  // Active banner
+  if (activeId) {
+    const active = items.find(i => i.id === activeId);
+    if (active) {
+      banner.style.display = 'flex';
+      banner.innerHTML = `
+        <i class="ph ph-sparkle"></i>
+        <div class="banner-text">
+          Running as <b>${escapeHtml(active.name)}</b>
+          <span class="dim">${escapeHtml(active.category)} · v${escapeHtml(active.version)}</span>
+        </div>
+        <button onclick="deactivatePreset()">Deactivate</button>
+      `;
+    } else {
+      banner.style.display = 'none';
+    }
+  } else {
+    banner.style.display = 'none';
+  }
+
+  // Grid
+  if (!items.length) {
+    grid.innerHTML = `<div class="cron-empty">No presets installed yet. Drop a .qwp archive above to get started.</div>`;
+    return;
+  }
+
+  grid.innerHTML = items.map(p => {
+    const m = p.manifest || {};
+    const desc = (m.description && m.description.short) || '';
+    const licType = p.license_type || 'free';
+    const activeCls = p.active ? ' active' : '';
+    const activateBtn = p.active
+      ? `<button class="s-btn" onclick="deactivatePreset()">Deactivate</button>`
+      : `<button class="s-btn primary" onclick="activatePreset('${escapeJs(p.id)}')">Activate</button>`;
+    return `
+      <div class="market-card${activeCls}">
+        <div class="market-card-head">
+          <div>
+            <span class="market-card-title">${escapeHtml(p.name)}</span>
+            <span class="market-card-version">v${escapeHtml(p.version)}</span>
+          </div>
+          <div class="market-card-badges">
+            <span class="market-badge category">${escapeHtml(p.category)}</span>
+            <span class="market-badge ${licType}">${escapeHtml(licType)}</span>
+          </div>
+        </div>
+        <div class="market-card-author">by ${escapeHtml(p.author_name || 'unknown')}</div>
+        <div class="market-card-desc">${escapeHtml(desc || '—')}</div>
+        <div class="market-card-footer">
+          ${activateBtn}
+          <button class="s-btn danger" onclick="removePreset('${escapeJs(p.id)}')">Remove</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function escapeJs(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function activatePreset(id) {
+  const status = document.getElementById('marketUploadStatus');
+  status.className = 'kn-upload-status';
+  status.textContent = `Activating ${id}...`;
+  try {
+    const res = await fetch(`/api/presets/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'activation failed' }));
+      throw new Error(err.error || 'activation failed');
+    }
+    status.className = 'kn-upload-status ok';
+    status.textContent = `✓ Activated ${id}`;
+    await loadPresets();
+    // Soul may have changed — refresh the Soul settings card if it's been loaded
+    try { await loadSoulSettings(); } catch (e) {}
+    setTimeout(() => { status.textContent = ''; }, 4000);
+  } catch (e) {
+    status.className = 'kn-upload-status err';
+    status.textContent = `✗ ${e.message || e}`;
+  }
+}
+
+async function deactivatePreset() {
+  const status = document.getElementById('marketUploadStatus');
+  status.className = 'kn-upload-status';
+  status.textContent = 'Deactivating...';
+  try {
+    const res = await fetch('/api/presets/deactivate', { method: 'POST' });
+    if (!res.ok) throw new Error('deactivate failed');
+    status.className = 'kn-upload-status ok';
+    status.textContent = '✓ Deactivated — original soul restored';
+    await loadPresets();
+    try { await loadSoulSettings(); } catch (e) {}
+    setTimeout(() => { status.textContent = ''; }, 4000);
+  } catch (e) {
+    status.className = 'kn-upload-status err';
+    status.textContent = `✗ ${e.message || e}`;
+  }
+}
+
+async function removePreset(id) {
+  if (!confirm(`Remove preset "${id}"? This deletes its files and knowledge.`)) return;
+  const status = document.getElementById('marketUploadStatus');
+  status.className = 'kn-upload-status';
+  status.textContent = `Removing ${id}...`;
+  try {
+    const res = await fetch(`/api/presets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'remove failed' }));
+      throw new Error(err.error || 'remove failed');
+    }
+    status.className = 'kn-upload-status ok';
+    status.textContent = `✓ Removed ${id}`;
+    await loadPresets();
+    setTimeout(() => { status.textContent = ''; }, 4000);
+  } catch (e) {
+    status.className = 'kn-upload-status err';
+    status.textContent = `✗ ${e.message || e}`;
+  }
+}
+
+function handleMarketUploadInput(inp) {
+  const files = Array.from(inp.files || []);
+  if (files.length) installPreset(files[0]);
+  inp.value = '';
+}
+
+async function installPreset(file, opts = {}) {
+  const status = document.getElementById('marketUploadStatus');
+  status.className = 'kn-upload-status';
+  status.textContent = `Installing ${file.name}...`;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (opts.overwrite) fd.append('overwrite', '1');
+    const res = await fetch('/api/presets/install', { method: 'POST', body: fd });
+    if (res.status === 409 && !opts.overwrite) {
+      if (confirm(`Preset already installed. Overwrite?`)) {
+        return installPreset(file, { overwrite: true });
+      }
+      status.className = 'kn-upload-status';
+      status.textContent = '';
+      return;
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'install failed' }));
+      let msg = err.error || 'install failed';
+      if (err.details && Array.isArray(err.details)) {
+        msg += ':\n  ' + err.details.join('\n  ');
+      }
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    status.className = 'kn-upload-status ok';
+    status.textContent = `✓ Installed ${data.name} v${data.version}`;
+    await loadPresets();
+    setTimeout(() => { status.textContent = ''; }, 5000);
+  } catch (e) {
+    status.className = 'kn-upload-status err';
+    status.textContent = `✗ ${e.message || e}`;
+  }
+}
+
+// Drag & drop for market upload zone
+(function setupMarketDnD() {
+  const attach = () => {
+    const zone = document.getElementById('marketUploadZone');
+    if (!zone || zone.dataset.dndBound) return;
+    zone.dataset.dndBound = '1';
+    ['dragenter','dragover'].forEach(evt => {
+      zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('drag-active'); });
+    });
+    ['dragleave','drop'].forEach(evt => {
+      zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('drag-active'); });
+    });
+    zone.addEventListener('drop', (e) => {
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) installPreset(files[0]);
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
 
 // ── Cron ──
 async function loadCron() {

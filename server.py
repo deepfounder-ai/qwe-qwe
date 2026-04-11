@@ -1262,6 +1262,114 @@ async def file_browse(request: Request):
     }
 
 
+# ── Business presets ────────────────────────────────────────────────────
+
+@app.get("/api/presets")
+async def presets_list():
+    """List all installed presets."""
+    import presets
+    return {"items": presets.list_installed(), "active": presets.get_active()}
+
+
+@app.get("/api/presets/{preset_id}")
+async def presets_info(preset_id: str):
+    """Get full manifest of an installed preset."""
+    import presets
+    info = presets.get_info(preset_id)
+    if not info:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return info
+
+
+@app.post("/api/presets/install")
+async def presets_install(request: Request):
+    """Upload and install a .qwp archive from the user's computer."""
+    import presets
+    import uuid as _uuid
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart" not in content_type:
+        return JSONResponse({"error": "multipart/form-data required"}, status_code=400)
+
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        return JSONResponse({"error": "no file"}, status_code=400)
+
+    data = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(data) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"},
+            status_code=413,
+        )
+
+    fname_raw = getattr(file, "filename", None) or "preset.qwp"
+    stage_dir = UPLOADS_DIR / "presets"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    staged = stage_dir / f"{_uuid.uuid4().hex[:8]}_{Path(fname_raw).name}"
+    staged.write_bytes(data)
+
+    overwrite = (form.get("overwrite") or "") in ("1", "true", "yes")
+    try:
+        info = presets.load_any(str(staged))
+        errors = presets.validate(info)
+        if errors:
+            return JSONResponse({"error": "validation failed", "details": errors}, status_code=400)
+        result = presets.install(info, overwrite=overwrite)
+    except FileExistsError as e:
+        return JSONResponse(
+            {"error": str(e), "code": "already_installed"},
+            status_code=409,
+        )
+    except Exception as e:
+        _log.error(f"preset install failed: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    _log.info(f"preset installed via web: {result['id']} v{result['version']}")
+    return result
+
+
+@app.post("/api/presets/{preset_id}/activate")
+async def presets_activate(preset_id: str):
+    """Activate a preset. Deactivates the current one first."""
+    import presets
+    try:
+        return presets.activate(preset_id)
+    except Exception as e:
+        _log.error(f"preset activate failed: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/presets/deactivate")
+async def presets_deactivate():
+    """Deactivate the current preset (restores the soul backup)."""
+    import presets
+    current = presets.get_active()
+    if not current:
+        return {"ok": True, "was_active": None}
+    presets.deactivate()
+    return {"ok": True, "was_active": current}
+
+
+@app.delete("/api/presets/{preset_id}")
+async def presets_delete(preset_id: str):
+    """Uninstall a preset. Deactivates it first if active."""
+    import presets
+    try:
+        presets.uninstall(preset_id)
+    except Exception as e:
+        _log.error(f"preset uninstall failed: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "id": preset_id}
+
+
+# ── Knowledge Base ──────────────────────────────────────────────────────
+
 @app.post("/api/knowledge/upload")
 async def knowledge_upload(request: Request):
     """Upload a file from the user's computer to the uploads directory.

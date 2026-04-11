@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.12.0 — 2026-04-11
+
+### Business Presets (.qwp)
+- **New `presets.py` module** — full install/activate/uninstall lifecycle for domain-specific agent configurations
+- **`.qwp` archive format** — zip containing `preset.yaml` manifest, system prompt, Python skills, markdown knowledge
+- **Gumroad-ready** — authors package presets once, buyers install with a drag-drop
+- **Soul replacement**: activating a preset backs up current soul, applies the preset's traits; deactivate restores the backup
+- **System prompt injection**: preset prompt appended as `## Active preset:` section after personality, inside `soul.to_prompt()`
+- **Skills discovery extended**: `skills/__init__.py` picks up skills from the active preset's `skills/` dir (no mixing with user skills)
+- **Knowledge auto-indexing**: preset knowledge files go through `rag.index_file` with a `preset:<id>` tag, cleaned up on uninstall
+- **Single-active constraint**: activating preset B while A is active deactivates A first (keeps soul/prompt semantics clean)
+- **Path safety**: sanitized filenames, blocked zip traversal, validated via JSON schema shipped in `schemas/preset.schema.yaml`
+- New config path: `PRESETS_DIR = ~/.qwe-qwe/presets/`
+- New DB table: `presets` (id, version, name, category, author, license, manifest, installed_at)
+
+### CLI — `qwe-qwe preset`
+- Argparse subcommand: `qwe-qwe preset list|install|activate|deactivate|info|rm`
+- Slash command `/preset` in interactive mode follows the same layout
+- Supports three install sources: `.qwp` archive, unpacked directory, or bare id (via `QWE_MARKET_PATH`)
+
+### Web UI — Market tab
+- **New "Market" page** between Knowledge and Cron — storefront icon in the header
+- Drop zone for `.qwp` archives with drag-drop and browse button
+- Card grid for installed presets with category badge, license badge (free/commercial/trial)
+- Active preset banner with "Running as [name]" + one-click deactivate
+- Activate / Deactivate / Remove per card
+- Hooks into `loadSoulSettings()` so the Soul card reflects preset traits immediately on activation
+- CSS: new `.market-*` classes, reuses existing design tokens (`--accent-shadow`, `--inset-hl`, `--radius-pill`)
+
+### Server endpoints
+- `GET    /api/presets`                  — list installed
+- `GET    /api/presets/{id}`             — full manifest
+- `POST   /api/presets/install`          — multipart upload (.qwp / .zip)
+- `POST   /api/presets/{id}/activate`
+- `POST   /api/presets/deactivate`
+- `DELETE /api/presets/{id}`
+
+### Dev-link workflow (`QWE_MARKET_PATH`)
+- Set env var to the local market repo root
+- `qwe-qwe preset install <bare-id>` resolves `$QWE_MARKET_PATH/presets/*/<id>/` and installs directly from the dir
+- No packing needed during development — edit, overwrite, test
+
+### Dependencies
+- Added `PyYAML>=6.0`, `jsonschema>=4.0`
+
+### Tests
+- `tests/test_presets.py` — 13 tests covering load (dir + zip), validation (ok + bad schema + missing file), install / uninstall / list, activate / deactivate / soul backup-restore, single-active constraint, system prompt suffix hook, skills dir hook
+- Isolated via `QWE_DATA_DIR` env + module reload
+
+### Companion release: `qwe-qwe market`
+- **`tools/validate.py`** — schema + file-existence + id uniqueness checks for every preset under `presets/`
+- **`tools/pack.py`** — validate + zip → `dist/<id>-<version>.qwp`
+- **`.github/workflows/validate.yml`** — CI on every PR
+- `.gitignore` for `dist/`, `__pycache__/`, local tool output
+- `CONTRIBUTING.md` expanded with sections 10–11: validation/packing workflow + dev-link testing
+- `README.md` describes the `.qwp` format and `QWE_MARKET_PATH`
+
+---
+
 ## v0.11.0 — 2026-04-11
 
 ### Web UI Redesign

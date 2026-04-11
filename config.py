@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -43,6 +43,8 @@ USER_SKILLS_DIR = DATA_DIR / "skills"
 USER_SKILLS_DIR.mkdir(exist_ok=True)
 WORKSPACE_DIR = DATA_DIR / "workspace"
 WORKSPACE_DIR.mkdir(exist_ok=True)
+PRESETS_DIR = DATA_DIR / "presets"
+PRESETS_DIR.mkdir(exist_ok=True)
 
 # ── Auto-migrate old data from project root to DATA_DIR ──
 _PROJECT_ROOT = Path(__file__).parent

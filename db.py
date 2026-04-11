@@ -47,6 +47,17 @@ def _migrate(conn: sqlite3.Connection):
             ts REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
+        CREATE TABLE IF NOT EXISTS presets (
+            id TEXT PRIMARY KEY,
+            version TEXT NOT NULL,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            author_name TEXT,
+            license_type TEXT,
+            manifest_json TEXT NOT NULL,
+            installed_at REAL NOT NULL,
+            source_path TEXT
+        );
     """)
     conn.commit()
 

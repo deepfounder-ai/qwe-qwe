@@ -403,6 +403,20 @@ SAFETY: Stop means stop. Immediately. Always. No exceptions.""")
     except Exception:
         pass
 
+    # ── 7b. ACTIVE PRESET (business role / domain instructions) ──
+    try:
+        import presets as _presets
+        preset_suffix = _presets.get_system_prompt_suffix()
+        if preset_suffix:
+            info = _presets.get_active_info()
+            pname = info.get("name") if info else None
+            header = f"\n## Active preset: {pname}\n" if pname else "\n## Active preset\n"
+            lines.append(header + preset_suffix)
+    except Exception as e:
+        # Never let a preset error kill the prompt build
+        import logger as _logger
+        _logger.get("soul").debug(f"preset suffix skipped: {e}")
+
     # ── 8. DYNAMIC DATA — LAST (preserves KV cache for everything above) ──
     # llama.cpp caches prompt tokens sequentially; any change invalidates all tokens after it
     from datetime import datetime, timezone, timedelta

@@ -1,0 +1,253 @@
+# JSON Schema (в YAML) для валидации preset.yaml в пресетах qwe-qwe market.
+# Соответствует SPEC.md, schema_version: 1
+#
+# Как пользоваться:
+#   import yaml, jsonschema
+#   schema = yaml.safe_load(open("schemas/preset.schema.yaml"))
+#   preset = yaml.safe_load(open("presets/<cat>/<id>/preset.yaml"))
+#   jsonschema.validate(preset, schema)
+
+$schema: "http://json-schema.org/draft-07/schema#"
+title: qwe-qwe market preset manifest
+type: object
+additionalProperties: false
+
+required:
+  - schema_version
+  - id
+  - name
+  - category
+  - version
+  - author
+  - license
+  - description
+  - soul
+  - system_prompt
+  - compatibility
+
+properties:
+
+  schema_version:
+    type: integer
+    const: 1
+
+  id:
+    type: string
+    pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    minLength: 2
+    maxLength: 64
+    description: Уникальный lowercase-kebab идентификатор пресета.
+
+  name:
+    type: string
+    minLength: 2
+    maxLength: 80
+
+  category:
+    type: string
+    pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+
+  version:
+    type: string
+    pattern: "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$"
+    description: SemVer версия пресета.
+
+  author:
+    type: object
+    additionalProperties: false
+    required: [name]
+    properties:
+      name: { type: string, minLength: 1 }
+      url:  { type: string, format: uri }
+      email: { type: string, format: email }
+
+  license:
+    type: object
+    additionalProperties: false
+    required: [type]
+    properties:
+      type:
+        type: string
+        enum: [free, commercial, trial]
+      price:
+        type: object
+        additionalProperties: false
+        required: [amount, currency, model]
+        properties:
+          amount:
+            type: number
+            minimum: 0
+          currency:
+            type: string
+            pattern: "^[A-Z]{3}$"
+          model:
+            type: string
+            enum: [one-time, subscription]
+          period:
+            oneOf:
+              - type: "null"
+              - type: string
+                enum: [monthly, yearly]
+      terms_url: { type: string, format: uri }
+
+  description:
+    type: object
+    additionalProperties: false
+    required: [short, long, language]
+    properties:
+      short:
+        type: string
+        minLength: 10
+        maxLength: 160
+      long:
+        type: string
+        minLength: 20
+      language:
+        type: string
+        pattern: "^[a-z]{2}$"
+
+  tags:
+    type: array
+    items: { type: string }
+    uniqueItems: true
+
+  target_audience:
+    type: array
+    items: { type: string }
+
+  icon:
+    type: string
+
+  screenshots:
+    type: array
+    items: { type: string }
+
+  soul:
+    type: object
+    additionalProperties: false
+    required: [agent_name, language, traits]
+    properties:
+      agent_name:
+        type: string
+        minLength: 1
+        maxLength: 40
+      language:
+        type: string
+        pattern: "^[a-z]{2}$"
+      traits:
+        type: object
+        additionalProperties: false
+        required:
+          - humor
+          - honesty
+          - curiosity
+          - brevity
+          - formality
+          - proactivity
+          - empathy
+          - creativity
+        properties:
+          humor:       { $ref: "#/definitions/traitLevel" }
+          honesty:     { $ref: "#/definitions/traitLevel" }
+          curiosity:   { $ref: "#/definitions/traitLevel" }
+          brevity:     { $ref: "#/definitions/traitLevel" }
+          formality:   { $ref: "#/definitions/traitLevel" }
+          proactivity: { $ref: "#/definitions/traitLevel" }
+          empathy:     { $ref: "#/definitions/traitLevel" }
+          creativity:  { $ref: "#/definitions/traitLevel" }
+      custom_traits:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [name, level]
+          properties:
+            name:        { type: string, minLength: 1 }
+            description: { type: string }
+            level:       { $ref: "#/definitions/traitLevel" }
+
+  system_prompt:
+    type: object
+    additionalProperties: false
+    oneOf:
+      - required: [path]
+      - required: [text]
+    properties:
+      path: { type: string }
+      text: { type: string, minLength: 1 }
+
+  skills:
+    type: object
+    additionalProperties: false
+    properties:
+      custom:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [path, name]
+          properties:
+            path:        { type: string }
+            name:        { type: string, pattern: "^[a-z_][a-z0-9_]*$" }
+            description: { type: string }
+      required_builtin:
+        type: array
+        items: { type: string }
+        uniqueItems: true
+
+  knowledge:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [path, title]
+      properties:
+        path:  { type: string }
+        title: { type: string, minLength: 1 }
+        tags:
+          type: array
+          items: { type: string }
+
+  install:
+    type: object
+    additionalProperties: false
+    properties:
+      steps:
+        type: array
+        items: { type: string }
+      env_vars:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:
+              type: string
+              pattern: "^[A-Z][A-Z0-9_]*$"
+            description: { type: string }
+            default:     { type: string }
+            required:    { type: boolean }
+
+  compatibility:
+    type: object
+    additionalProperties: false
+    required: [qwe_qwe_version]
+    properties:
+      qwe_qwe_version:
+        type: string
+      models:
+        type: object
+        additionalProperties: false
+        properties:
+          recommended:
+            type: array
+            items: { type: string }
+          minimum_params_b:
+            type: number
+            minimum: 0
+
+definitions:
+  traitLevel:
+    type: string
+    enum: [low, moderate, high]

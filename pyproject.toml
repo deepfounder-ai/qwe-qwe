@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwe-qwe"
-version = "0.11.0"
+version = "0.12.0"
 description = "Lightweight offline AI agent for local models"
 readme = "README.md"
 license = {text = "MIT"}
@@ -22,6 +22,8 @@ dependencies = [
     "requests>=2.31.0",
     "Pillow>=10.0",
     "pypdf>=4.0",
+    "PyYAML>=6.0",
+    "jsonschema>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -33,10 +35,10 @@ qwe-qwe = "cli:main_entry"
 
 [tool.setuptools]
 packages = ["skills"]
-py-modules = ["cli", "agent", "config", "db", "discovery", "inference_setup", "logger", "mcp_client", "memory", "providers", "rag", "scheduler", "server", "soul", "stt", "synthesis", "tasks", "telegram_bot", "threads", "tools", "tts", "updater", "vault"]
+py-modules = ["cli", "agent", "config", "db", "discovery", "inference_setup", "logger", "mcp_client", "memory", "presets", "providers", "rag", "scheduler", "server", "soul", "stt", "synthesis", "tasks", "telegram_bot", "threads", "tools", "tts", "updater", "vault"]
 
 [tool.setuptools.package-data]
-"*" = ["static/**/*"]
+"*" = ["static/**/*", "schemas/*.yaml"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["tests", "tests/*"]

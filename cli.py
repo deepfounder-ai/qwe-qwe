@@ -233,6 +233,140 @@ def handle_skills_command(args: str):
         render()
 
 
+def handle_preset_command(args: str):
+    """`/preset` slash command dispatcher.
+
+    Subcommands:
+        /preset                      — list installed + active
+        /preset install <src>        — install from .qwp/dir/id
+        /preset activate <id>
+        /preset deactivate
+        /preset info <id>
+        /preset rm <id>              — uninstall
+    """
+    import presets as _p
+
+    parts = args.split(maxsplit=1)
+    sub = parts[0] if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+
+    # Default: list installed
+    if not sub or sub == "list":
+        items = _p.list_installed()
+        active = _p.get_active()
+        if not items:
+            console.print("  [dim]No presets installed.[/]")
+            if os.environ.get("QWE_MARKET_PATH"):
+                console.print(f"  [dim]QWE_MARKET_PATH = {os.environ['QWE_MARKET_PATH']}[/]")
+                console.print("  [dim]Install via: /preset install <id>[/]")
+            else:
+                console.print("  [dim]Install via: /preset install <path-to-.qwp>[/]")
+            return
+        console.print(f"  [bold magenta]🏪 Installed presets[/]  [dim]({len(items)} total)[/]\n")
+        for it in items:
+            marker = "[green]●[/]" if it["active"] else "[dim]○[/]"
+            lic = f"[dim]{it['license_type']}[/]"
+            cat = f"[cyan]{it['category']}[/]"
+            name = f"[bold]{it['name']}[/]" if it["active"] else it["name"]
+            console.print(f"  {marker} {name} [dim]v{it['version']}[/] · {cat} · {lic}")
+            console.print(f"      [dim]{it['id']} — {it['author_name']}[/]")
+        if active:
+            console.print(f"\n  [green]Active:[/] {active}")
+        return
+
+    if sub == "install":
+        if not rest:
+            console.print("  [dim]Usage: /preset install <path-to-.qwp-or-dir-or-id>[/]")
+            return
+        try:
+            info = _p.load_any(rest)
+            errors = _p.validate(info)
+            if errors:
+                console.print("  [red]✗ Validation failed:[/]")
+                for err in errors:
+                    console.print(f"    [red]-[/] {err}")
+                return
+            result = _p.install(info)
+            console.print(
+                f"  [green]✓ Installed[/] [bold]{result['name']}[/] "
+                f"[dim]v{result['version']} · {result['category']}[/]"
+            )
+            console.print(f"  [dim]{result['path']}[/]")
+        except FileExistsError as e:
+            console.print(f"  [yellow]{e}[/]")
+        except Exception as e:
+            console.print(f"  [red]✗ Install failed:[/] {e}")
+        return
+
+    if sub == "activate":
+        if not rest:
+            console.print("  [dim]Usage: /preset activate <id>[/]")
+            return
+        try:
+            _p.activate(rest)
+            console.print(f"  [green]✓ Activated:[/] [bold]{rest}[/]")
+            console.print("  [dim]Soul, skills and knowledge are now driven by this preset.[/]")
+            console.print("  [dim]Run /preset deactivate to restore your previous soul.[/]")
+        except Exception as e:
+            console.print(f"  [red]✗ Activate failed:[/] {e}")
+        return
+
+    if sub in ("deactivate", "off"):
+        try:
+            current = _p.get_active()
+            if not current:
+                console.print("  [dim]No preset active.[/]")
+                return
+            _p.deactivate()
+            console.print(f"  [yellow]✓ Deactivated:[/] {current}")
+            console.print("  [dim]Original soul restored.[/]")
+        except Exception as e:
+            console.print(f"  [red]✗ Deactivate failed:[/] {e}")
+        return
+
+    if sub == "info":
+        if not rest:
+            console.print("  [dim]Usage: /preset info <id>[/]")
+            return
+        info = _p.get_info(rest)
+        if not info:
+            console.print(f"  [red]Preset not installed: {rest}[/]")
+            return
+        m = info["manifest"]
+        console.print(f"  [bold]{info['name']}[/] [dim]v{info['version']}[/]")
+        console.print(f"  [dim]id:[/] {info['id']}")
+        console.print(f"  [dim]category:[/] {info['category']}")
+        console.print(f"  [dim]author:[/] {info['author_name']}")
+        console.print(f"  [dim]license:[/] {info['license_type']}")
+        desc = (m.get("description") or {}).get("short", "")
+        if desc:
+            console.print(f"  [dim]desc:[/] {desc}")
+        skills_block = m.get("skills") or {}
+        custom_skills = skills_block.get("custom") or []
+        if custom_skills:
+            console.print(f"  [dim]skills:[/] {', '.join(s['name'] for s in custom_skills)}")
+        kn = m.get("knowledge") or []
+        if kn:
+            console.print(f"  [dim]knowledge:[/] {len(kn)} file(s)")
+        if info["active"]:
+            console.print("  [green]● currently active[/]")
+        return
+
+    if sub in ("rm", "uninstall", "remove"):
+        if not rest:
+            console.print("  [dim]Usage: /preset rm <id>[/]")
+            return
+        try:
+            _p.uninstall(rest)
+            console.print(f"  [yellow]✓ Uninstalled:[/] {rest}")
+        except Exception as e:
+            console.print(f"  [red]✗ Uninstall failed:[/] {e}")
+        return
+
+    console.print(f"  [dim]Unknown: /preset {sub}[/]")
+    console.print("  [dim]Subcommands: list, install, activate, deactivate, info, rm[/]")
+
+
 def handle_cron(args: str):
     if args.startswith("rm "):
         try:
@@ -635,6 +769,9 @@ def main():
         if user_input.startswith("/skills"):
             handle_skills_command(user_input[7:].strip())
             continue
+        if user_input == "/preset" or user_input.startswith("/preset "):
+            handle_preset_command(user_input[7:].strip())
+            continue
         if user_input == "/tasks":
             show_tasks()
             continue
@@ -748,6 +885,7 @@ def show_help():
         ("[bold]Agent[/]", ""),
         ("/soul", "edit personality traits"),
         ("/skills", "toggle skill plugins"),
+        ("/preset", "business preset: list/install/activate/rm"),
         ("/model [name]", "switch model"),
         ("/provider [name]", "switch provider"),
         ("/thinking", "toggle thinking mode"),
@@ -1351,6 +1489,19 @@ def doctor():
             return "⚠ FTS5 tables not found (BM25 not active)"
     check("BM25", _check_fts)
 
+    # ── 13b. Presets ──
+    def _check_presets():
+        import presets
+        items = presets.list_installed()
+        active = presets.get_active()
+        count = len(items)
+        if count == 0:
+            return "✓ 0 installed"
+        if active:
+            return f"✓ {count} installed, active: {active}"
+        return f"✓ {count} installed, none active"
+    check("Presets", _check_presets)
+
     # ── 14. Disk ──
     console.print("  [dim]── System ──[/]")
     def _check_disk():
@@ -1425,9 +1576,118 @@ def _run_update_cli():
     sys.exit(0 if result["success"] else 1)
 
 
+def _preset_cli(argv: list[str]) -> int:
+    """Non-interactive `qwe-qwe preset <action> [args]` command.
+
+    Lightweight: prints to stdout instead of using rich for scriptability.
+    """
+    import presets as _p
+    if not argv:
+        # Default to list
+        argv = ["list"]
+    action = argv[0]
+    rest = argv[1:]
+
+    if action == "list":
+        items = _p.list_installed()
+        if not items:
+            print("No presets installed.")
+            return 0
+        active = _p.get_active()
+        for it in items:
+            marker = "●" if it["active"] else "○"
+            print(f"{marker} {it['id']}  v{it['version']}  [{it['category']}]  {it['name']}")
+        if active:
+            print(f"\nActive: {active}")
+        return 0
+
+    if action == "install":
+        if not rest:
+            print("usage: qwe-qwe preset install <path-to-.qwp-or-dir-or-id>", file=sys.stderr)
+            return 2
+        try:
+            info = _p.load_any(rest[0])
+            errors = _p.validate(info)
+            if errors:
+                print("Validation failed:", file=sys.stderr)
+                for err in errors:
+                    print(f"  - {err}", file=sys.stderr)
+                return 1
+            result = _p.install(info)
+            print(f"✓ Installed {result['name']} v{result['version']} ({result['category']})")
+            print(f"  {result['path']}")
+            return 0
+        except Exception as e:
+            print(f"✗ Install failed: {e}", file=sys.stderr)
+            return 1
+
+    if action == "activate":
+        if not rest:
+            print("usage: qwe-qwe preset activate <id>", file=sys.stderr)
+            return 2
+        try:
+            r = _p.activate(rest[0])
+            print(f"✓ Activated: {r['name']} ({r['id']})")
+            return 0
+        except Exception as e:
+            print(f"✗ Activate failed: {e}", file=sys.stderr)
+            return 1
+
+    if action == "deactivate":
+        current = _p.get_active()
+        if not current:
+            print("No preset active.")
+            return 0
+        _p.deactivate()
+        print(f"✓ Deactivated: {current}")
+        return 0
+
+    if action == "info":
+        if not rest:
+            print("usage: qwe-qwe preset info <id>", file=sys.stderr)
+            return 2
+        info = _p.get_info(rest[0])
+        if not info:
+            print(f"Preset not installed: {rest[0]}", file=sys.stderr)
+            return 1
+        m = info["manifest"]
+        print(f"{info['name']} v{info['version']}")
+        print(f"  id:       {info['id']}")
+        print(f"  category: {info['category']}")
+        print(f"  author:   {info['author_name']}")
+        print(f"  license:  {info['license_type']}")
+        desc = (m.get("description") or {}).get("short", "")
+        if desc:
+            print(f"  desc:     {desc}")
+        if info["active"]:
+            print("  ● currently active")
+        return 0
+
+    if action in ("rm", "uninstall", "remove"):
+        if not rest:
+            print("usage: qwe-qwe preset rm <id>", file=sys.stderr)
+            return 2
+        try:
+            _p.uninstall(rest[0])
+            print(f"✓ Uninstalled: {rest[0]}")
+            return 0
+        except Exception as e:
+            print(f"✗ Uninstall failed: {e}", file=sys.stderr)
+            return 1
+
+    print(f"Unknown preset action: {action}", file=sys.stderr)
+    print("Actions: list, install, activate, deactivate, info, rm", file=sys.stderr)
+    return 2
+
+
 def main_entry():
     """Unified entry point: `qwe-qwe` for CLI, `qwe-qwe --web` for web server."""
     import argparse
+
+    # Peel off the "preset" subcommand before argparse — simpler than nested parsers
+    if len(sys.argv) >= 2 and sys.argv[1] == "preset":
+        sys.exit(_preset_cli(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="qwe-qwe — offline AI agent")
     parser.add_argument("--web", action="store_true", help="Start web server instead of CLI")
     parser.add_argument("--doctor", action="store_true", help="Run diagnostics")
