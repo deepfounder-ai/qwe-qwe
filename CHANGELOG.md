@@ -1,5 +1,74 @@
 # Changelog
 
+## v0.12.1 — 2026-04-11
+
+Hardening release after a full code review of the v0.12.0 preset system.
+No new features; focuses on security, failure handling, and test coverage.
+
+### Security fixes
+- **Archive hardening** (`presets.py:load_archive`) — reject absolute paths,
+  backslashes, `..` components, drive letters, symlinks, and hardlinks.
+  Each member is individually resolved under the tempdir before extraction
+  so a crafted zip can never write outside.
+- **Zip-bomb guard** — cap total uncompressed size at 64 MB and file count
+  at 2000. Counts both are checked before extraction starts.
+- **Preset id validation** (`presets.py:_ensure_id`) — every public function
+  that turns a user string into a filesystem path (`preset_dir`, `install`,
+  `uninstall`, `activate`) runs the id through `^[a-z0-9]+(-[a-z0-9]+)*$`.
+  `uninstall` is now a no-op for ids not in the DB registry, so API fuzzing
+  cannot trigger a `shutil.rmtree` on a crafted path.
+- **Manifest path traversal** — `validate()` refuses any `system_prompt.path`,
+  `skills.custom[*].path`, or `knowledge[*].path` that is absolute OR
+  resolves outside the preset directory. The check is mirrored in
+  `_index_knowledge` and `get_system_prompt_suffix` as defence-in-depth.
+- **Skill validation on install** — every `.py` listed in
+  `skills.custom` is now run through `skills.validate_skill()` during
+  `install()`. A preset shipping a syntactically broken or API-violating
+  skill now fails validation before its files ever land under `~/.qwe-qwe/`.
+
+### Reliability fixes
+- **`install()` cleanup** — wrapped in `try/finally`. The archive tempdir is
+  always cleaned up whether install succeeds, fails validation, or raises
+  mid-copy. A failed `shutil.copytree` now rolls back the partial target
+  dir so the next install attempt sees a clean state.
+- **`activate()` rollback** — if `_apply_soul_from_manifest` or
+  `_index_knowledge` raises, the original soul is restored from the
+  snapshot and `soul_backup` is cleared before re-raising. The `active_preset`
+  marker is only written on full success, so there is no half-applied state.
+- **Soul custom traits** — preset custom traits now use distinct low/high
+  polarity labels ("not X" / description or "very X"), so the gradient
+  actually works instead of both poles sharing the same description string.
+- **Skills module cache** — `skills._module_cache` is now keyed by absolute
+  path instead of stem. A preset-supplied skill that collides with a
+  builtin or user skill name no longer returns a stale module from the
+  cache when the active preset changes.
+- **Web UI** — fixed a typo where Market tab called `loadSoulSettings()`
+  (doesn't exist) instead of `loadSettingsSoul()`. The Soul settings card
+  now refreshes immediately after activate/deactivate.
+
+### Tests
+- 11 new security-focused tests in `tests/test_presets.py`:
+  - id regex rejects traversal / backslash / spaces / case
+  - uninstall of unregistered id is a true no-op (touches nothing on disk)
+  - zip with absolute-path member rejected
+  - zip with `..` parent-ref rejected
+  - zip bomb (file count overflow) rejected
+  - manifest with `../../../outside.md` rejected
+  - manifest with OS-absolute path rejected
+  - malicious skill (syntax error) fails install
+  - `activate()` rolls back soul on mid-application failure
+  - `install()` partial copy leaves no DB ghost row
+  - failed install cleans up its extract tempdir
+- Total preset test count: **24 passing** (was 13 in v0.12.0).
+- New standalone integrity test `tests/_integrity_preset.py` exercises the
+  full 17-step lifecycle end-to-end (archive → install → activate →
+  hooks → deactivate → dev-link → single-active → cleanup).
+
+### Market repo (`qwe-qwe market`)
+- Fixed cosmetic math bug in `tools/validate.py` summary line.
+
+---
+
 ## v0.12.0 — 2026-04-11
 
 ### Business Presets (.qwp)

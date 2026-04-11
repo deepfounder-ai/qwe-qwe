@@ -3361,7 +3361,7 @@ async function activatePreset(id) {
     status.textContent = `✓ Activated ${id}`;
     await loadPresets();
     // Soul may have changed — refresh the Soul settings card if it's been loaded
-    try { await loadSoulSettings(); } catch (e) {}
+    try { if (typeof loadSettingsSoul === 'function') await loadSettingsSoul(); } catch (e) {}
     setTimeout(() => { status.textContent = ''; }, 4000);
   } catch (e) {
     status.className = 'kn-upload-status err';
@@ -3379,7 +3379,7 @@ async function deactivatePreset() {
     status.className = 'kn-upload-status ok';
     status.textContent = '✓ Deactivated — original soul restored';
     await loadPresets();
-    try { await loadSoulSettings(); } catch (e) {}
+    try { if (typeof loadSettingsSoul === 'function') await loadSettingsSoul(); } catch (e) {}
     setTimeout(() => { status.textContent = ''; }, 4000);
   } catch (e) {
     status.className = 'kn-upload-status err';

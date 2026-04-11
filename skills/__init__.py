@@ -85,7 +85,10 @@ def _find_skill(name: str) -> Path | None:
         return builtin_path
     return None
 
-# Module cache: name -> (mtime, module)
+# Module cache: absolute path -> (mtime, module)
+# Keyed by the FULL path (not the stem) so a preset-supplied skill that
+# collides with a builtin name doesn't return a stale module from the
+# cache when the active preset changes.
 _module_cache: dict[str, tuple[float, ModuleType]] = {}
 
 
@@ -96,7 +99,8 @@ def _load_module(path: Path) -> ModuleType:
     except OSError:
         raise ImportError(f"Skill file not found: {path}")
 
-    cached = _module_cache.get(path.stem)
+    cache_key = str(path.resolve())
+    cached = _module_cache.get(cache_key)
     if cached and cached[0] == mtime:
         return cached[1]
 
@@ -105,7 +109,7 @@ def _load_module(path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    _module_cache[path.stem] = (mtime, mod)
+    _module_cache[cache_key] = (mtime, mod)
     return mod
 
 

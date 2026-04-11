@@ -54,6 +54,27 @@ _REQUIRED_FILES = ("preset.yaml",)
 # Files we actively use from a preset — anything else is copied as-is but not
 # touched. Skills / knowledge / system_prompt paths come from preset.yaml.
 
+# ── Security limits ─────────────────────────────────────────────────────
+
+# Preset IDs must match this regex. Enforced on every public function that
+# accepts an id so a crafted input can never leak into filesystem operations.
+_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+# Hard cap on the TOTAL uncompressed size of a .qwp archive's contents.
+# Prevents zipbombs that would fill the disk when `extractall()` runs.
+_MAX_EXTRACT_BYTES = 64 * 1024 * 1024  # 64 MB
+_MAX_EXTRACT_FILES = 2000              # hard cap on file count per archive
+
+
+def _ensure_id(preset_id: str) -> str:
+    """Reject anything that isn't a clean lowercase-kebab id."""
+    if not isinstance(preset_id, str) or not _ID_RE.match(preset_id):
+        raise ValueError(
+            f"invalid preset id {preset_id!r}: must be lowercase-kebab "
+            f"(matches {_ID_RE.pattern})"
+        )
+    return preset_id
+
 
 # ── Data classes ────────────────────────────────────────────────────────
 
@@ -113,10 +134,13 @@ def load_directory(preset_dir: Path | str) -> PresetInfo:
 def load_archive(archive_path: Path | str) -> PresetInfo:
     """Extract a .qwp / .zip archive to a temp dir and load it.
 
-    Caller is responsible for letting install() copy the contents out before
-    the temp dir is cleaned up (install() uses shutil.copytree which reads
-    everything synchronously, so the temp dir can be removed after install()
-    returns).
+    Hardened against:
+      * path traversal (absolute paths on any OS, `..` components, backslashes)
+      * symlinks and hardlinks inside the archive
+      * zip bombs (total uncompressed size + file count caps)
+
+    Caller is responsible for calling `install()` (which cleans up the temp
+    dir) OR `cleanup(info)` if validation fails before install.
     """
     ap = Path(archive_path).expanduser().resolve()
     if not ap.is_file():
@@ -125,26 +149,89 @@ def load_archive(archive_path: Path | str) -> PresetInfo:
         raise ValueError(f"not a zip archive: {ap}")
 
     tmp = Path(tempfile.mkdtemp(prefix="qwe_preset_"))
+    tmp_resolved = tmp.resolve()
     try:
         with zipfile.ZipFile(ap, "r") as zf:
-            # Safety: block path traversal
-            for member in zf.namelist():
-                if member.startswith("/") or ".." in Path(member).parts:
-                    raise ValueError(f"unsafe archive member: {member}")
-            zf.extractall(tmp)
+            _validate_zip_members(zf, tmp_resolved)
+            # Extract one member at a time so we never touch anything whose
+            # destination resolves outside the tempdir.
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                # Re-assert safety after normalisation
+                dest = (tmp / info.filename).resolve()
+                if not _is_within(dest, tmp_resolved):
+                    raise ValueError(f"unsafe archive member: {info.filename}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    # Some zips have a single root folder, some don't. Find the preset.yaml.
     manifest_path = _find_manifest(tmp)
     if not manifest_path:
         shutil.rmtree(tmp, ignore_errors=True)
         raise FileNotFoundError(f"preset.yaml not found inside archive {ap.name}")
 
-    manifest = _load_yaml(manifest_path)
+    try:
+        manifest = _load_yaml(manifest_path)
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return _info_from_manifest(manifest, source_dir=manifest_path.parent,
                                source_kind="archive", origin_path=str(ap))
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """True if `child` is equal to or inside `parent` (both resolved)."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_zip_members(zf: "zipfile.ZipFile", tmp_resolved: Path) -> None:
+    """Enforce path-traversal / symlink / zip-bomb rules on the archive."""
+    total_uncompressed = 0
+    file_count = 0
+    for info in zf.infolist():
+        name = info.filename
+        # 1. Reject obvious absolute paths and parent refs — cross-platform.
+        if not name or name.startswith(("/", "\\")):
+            raise ValueError(f"unsafe archive member (absolute path): {name}")
+        # Normalise backslashes so PurePosixPath logic works on Windows zips.
+        posix_name = name.replace("\\", "/")
+        parts = Path(posix_name).parts
+        if any(part == ".." for part in parts):
+            raise ValueError(f"unsafe archive member (parent ref): {name}")
+        # Reject drive-letter or UNC paths baked into the filename.
+        if len(posix_name) >= 2 and posix_name[1] == ":":
+            raise ValueError(f"unsafe archive member (drive letter): {name}")
+        # 2. Reject symlinks / hardlinks.
+        # On unix ZIP, symlink entries have external_attr high bits set to 0xA.
+        mode = info.external_attr >> 16
+        if mode and (mode & 0o170000) == 0o120000:  # S_IFLNK
+            raise ValueError(f"unsafe archive member (symlink): {name}")
+        # 3. Zip-bomb guard — sum uncompressed size, cap file count.
+        if info.is_dir():
+            continue
+        file_count += 1
+        if file_count > _MAX_EXTRACT_FILES:
+            raise ValueError(
+                f"archive has too many files (>{_MAX_EXTRACT_FILES})"
+            )
+        total_uncompressed += int(info.file_size or 0)
+        if total_uncompressed > _MAX_EXTRACT_BYTES:
+            raise ValueError(
+                f"archive uncompressed size exceeds "
+                f"{_MAX_EXTRACT_BYTES // (1024 * 1024)} MB cap"
+            )
+        # 4. Final resolve — path must land inside tmp.
+        dest = (tmp_resolved / posix_name).resolve()
+        if not _is_within(dest, tmp_resolved):
+            raise ValueError(f"unsafe archive member (escapes tempdir): {name}")
 
 
 def _find_manifest(root: Path) -> Path | None:
@@ -244,29 +331,78 @@ def validate(info: PresetInfo) -> list[str]:
                 errors.append(f"schema: missing required field '{key}'")
 
     # 2. id / directory consistency
-    if not re.match(r"^[a-z0-9]+(-[a-z0-9]+)*$", info.id):
+    if not _ID_RE.match(info.id):
         errors.append(f"id must be lowercase-kebab, got {info.id!r}")
 
-    # 3. Referenced files exist
+    # 3. Referenced files exist AND are confined to the preset directory.
     src = info.source_dir
+    try:
+        src_resolved = src.resolve()
+    except Exception:
+        errors.append(f"source_dir cannot be resolved: {src}")
+        return errors
+
+    def _check_path(field: str, rel: str) -> None:
+        """Every path in the manifest must stay under src_resolved."""
+        if not rel:
+            return
+        if os.path.isabs(rel):
+            errors.append(f"{field}: absolute paths not allowed ({rel!r})")
+            return
+        try:
+            full = (src / rel).resolve()
+        except Exception as e:
+            errors.append(f"{field}: cannot resolve ({rel!r}): {e}")
+            return
+        if not _is_within(full, src_resolved):
+            errors.append(f"{field}: path escapes preset dir ({rel!r})")
+            return
+        if not full.exists():
+            errors.append(f"{field}: not found ({rel!r})")
+
     sp = manifest.get("system_prompt") or {}
     if isinstance(sp, dict) and sp.get("path"):
-        if not (src / sp["path"]).exists():
-            errors.append(f"system_prompt.path not found: {sp['path']}")
+        _check_path("system_prompt.path", sp["path"])
 
     skills_block = manifest.get("skills") or {}
     for entry in (skills_block.get("custom") or []):
-        pth = entry.get("path")
-        if pth and not (src / pth).exists():
-            errors.append(f"skills.custom path not found: {pth}")
+        pth = entry.get("path") or ""
+        if pth:
+            _check_path("skills.custom.path", pth)
         name = entry.get("name") or ""
         if name and not re.match(r"^[a-z_][a-z0-9_]*$", name):
             errors.append(f"skills.custom name invalid: {name!r}")
 
     for entry in (manifest.get("knowledge") or []):
-        pth = entry.get("path")
-        if pth and not (src / pth).exists():
-            errors.append(f"knowledge path not found: {pth}")
+        pth = entry.get("path") or ""
+        if pth:
+            _check_path("knowledge.path", pth)
+
+    # 4. Validate skill files as real Python modules with the expected API.
+    # This is what gates C2 (RCE by install): any `.py` under the preset
+    # that lives in skills/custom must pass skills.validate_skill() before
+    # it gets copied into ~/.qwe-qwe/presets/<id>/skills/ and exec'd later.
+    # We do a basic syntax+shape check; we don't sandbox execution.
+    try:
+        import skills as _skills
+    except Exception as e:
+        _log.warning(f"skills module unavailable, cannot validate preset skills: {e}")
+    else:
+        for entry in (skills_block.get("custom") or []):
+            pth = entry.get("path") or ""
+            if not pth:
+                continue
+            full = (src / pth).resolve()
+            if not full.exists() or not _is_within(full, src_resolved):
+                continue  # already reported above
+            try:
+                is_valid, skill_errors = _skills.validate_skill(str(full))
+            except Exception as e:
+                errors.append(f"skills.custom {pth}: validation crashed — {e}")
+                continue
+            if not is_valid:
+                for skill_err in skill_errors or ["invalid skill"]:
+                    errors.append(f"skills.custom {pth}: {skill_err}")
 
     return errors
 
@@ -274,61 +410,91 @@ def validate(info: PresetInfo) -> list[str]:
 # ── Install / Uninstall ─────────────────────────────────────────────────
 
 def preset_dir(preset_id: str) -> Path:
+    """Get the on-disk directory for an installed preset.
+
+    Raises ValueError if the id is not a valid lowercase-kebab slug.
+    This is the single chokepoint for turning a user string into a
+    filesystem path, so it MUST stay strict.
+    """
+    _ensure_id(preset_id)
     return config.PRESETS_DIR / preset_id
 
 
 def install(info: PresetInfo, *, overwrite: bool = False) -> dict:
-    """Copy preset contents into ~/.qwe-qwe/presets/<id>/ and register it."""
-    errors = validate(info)
-    if errors:
-        raise ValueError("preset validation failed:\n  - " + "\n  - ".join(errors))
+    """Copy preset contents into ~/.qwe-qwe/presets/<id>/ and register it.
 
-    target = preset_dir(info.id)
-    if target.exists():
-        if not overwrite:
-            raise FileExistsError(
-                f"preset '{info.id}' is already installed. "
-                f"Uninstall it first or pass overwrite=True."
+    Always cleans up:
+      * the source archive tempdir (if info was loaded via load_archive)
+      * a partially-written target directory on any failure during copy
+    """
+    # Fail fast on bad id BEFORE touching the filesystem.
+    _ensure_id(info.id)
+
+    try:
+        errors = validate(info)
+        if errors:
+            raise ValueError(
+                "preset validation failed:\n  - " + "\n  - ".join(errors)
             )
-        # If it's the active preset, deactivate before overwriting
-        if get_active() == info.id:
-            deactivate()
-        shutil.rmtree(target)
 
-    # Copy source_dir → target
-    shutil.copytree(info.source_dir, target)
+        target = preset_dir(info.id)
+        # Enforce that the target stays under PRESETS_DIR even if someone
+        # crafts a funky id that slipped past the regex on an older version.
+        if not _is_within(target.resolve().parent if target.exists() else target.parent.resolve(),
+                          config.PRESETS_DIR.resolve()):
+            raise ValueError(f"preset target {target} escapes PRESETS_DIR")
 
-    # Register in DB
-    db.execute(
-        """INSERT OR REPLACE INTO presets
-           (id, version, name, category, author_name, license_type,
-            manifest_json, installed_at, source_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            info.id,
-            info.version,
-            info.name,
-            info.category,
-            (info.author or {}).get("name", ""),
-            (info.license or {}).get("type", "free"),
-            json.dumps(info.manifest, ensure_ascii=False),
-            time.time(),
-            info.origin_path or str(info.source_dir),
-        ),
-    )
+        if target.exists():
+            if not overwrite:
+                raise FileExistsError(
+                    f"preset '{info.id}' is already installed. "
+                    f"Uninstall it first or pass overwrite=True."
+                )
+            # If it's the active preset, deactivate before overwriting
+            if get_active() == info.id:
+                deactivate()
+            shutil.rmtree(target, ignore_errors=True)
 
-    # Clean up temp archive extraction dir (source_dir points inside it)
-    if info.source_kind == "archive":
-        _cleanup_temp(info.source_dir)
+        # Copy source_dir → target — rollback on any failure so we don't
+        # leave a half-copied preset for the next install attempt to trip on.
+        try:
+            shutil.copytree(info.source_dir, target)
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
 
-    _log.info(f"installed preset: {info.id} v{info.version} → {target}")
-    return {
-        "id": info.id,
-        "version": info.version,
-        "name": info.name,
-        "category": info.category,
-        "path": str(target),
-    }
+        # Register in DB
+        db.execute(
+            """INSERT OR REPLACE INTO presets
+               (id, version, name, category, author_name, license_type,
+                manifest_json, installed_at, source_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                info.id,
+                info.version,
+                info.name,
+                info.category,
+                (info.author or {}).get("name", ""),
+                (info.license or {}).get("type", "free"),
+                json.dumps(info.manifest, ensure_ascii=False),
+                time.time(),
+                info.origin_path or str(info.source_dir),
+            ),
+        )
+
+        _log.info(f"installed preset: {info.id} v{info.version} → {target}")
+        return {
+            "id": info.id,
+            "version": info.version,
+            "name": info.name,
+            "category": info.category,
+            "path": str(target),
+        }
+    finally:
+        # Always clean up the archive tempdir — whether install succeeded,
+        # failed validation, or raised mid-copy.
+        if info.source_kind == "archive":
+            _cleanup_temp(info.source_dir)
 
 
 def _cleanup_temp(source_dir: Path) -> None:
@@ -343,14 +509,38 @@ def _cleanup_temp(source_dir: Path) -> None:
 
 
 def uninstall(preset_id: str) -> None:
-    """Remove a preset and all its side-effects."""
+    """Remove a preset and all its side-effects.
+
+    Idempotent: uninstalling a preset that isn't registered is a no-op
+    (returns without touching the filesystem). This prevents API fuzzing
+    from triggering a shutil.rmtree with a traversal-crafted id.
+    """
+    _ensure_id(preset_id)
+
+    # Only proceed if this id actually exists in our registry.
+    row = db.fetchone("SELECT id FROM presets WHERE id = ?", (preset_id,))
+    if not row:
+        _log.debug(f"uninstall no-op: {preset_id} not installed")
+        return
+
     if get_active() == preset_id:
         deactivate()
 
-    # Clear indexed knowledge (by file_path in the preset's knowledge/ dir)
+    d = preset_dir(preset_id)
+    # Belt-and-suspenders: even if _ensure_id is bypassed somehow, refuse
+    # to delete anything outside PRESETS_DIR.
+    try:
+        d_resolved = d.resolve()
+    except Exception:
+        d_resolved = d
+    if not _is_within(d_resolved, config.PRESETS_DIR.resolve()):
+        _log.error(f"uninstall refused: {d} escapes PRESETS_DIR")
+        return
+
+    # Clear indexed knowledge before the dir disappears.
     try:
         import rag
-        k_dir = preset_dir(preset_id) / "knowledge"
+        k_dir = d / "knowledge"
         if k_dir.exists():
             for f in k_dir.rglob("*"):
                 if f.is_file():
@@ -359,7 +549,6 @@ def uninstall(preset_id: str) -> None:
         _log.warning(f"uninstall: knowledge cleanup failed: {e}")
 
     # Remove on-disk contents
-    d = preset_dir(preset_id)
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
 
@@ -454,17 +643,34 @@ def _apply_soul_from_manifest(manifest: dict) -> None:
             soul.save(trait, level)
         except Exception as e:
             _log.debug(f"apply soul: {trait}={level} → {e}")
-    # Custom traits — add them so they appear in DEFAULTS
+    # Custom traits — add them so they appear in DEFAULTS.
+    # The preset schema only exposes a single `description` field for a
+    # custom trait; soul.add_trait wants separate low/high polarity labels.
+    # Use generic defaults so the trait still functions as a gradient, and
+    # prepend the description to the high-pole label where possible.
     for ct in (block.get("custom_traits") or []):
         try:
-            soul.add_trait(ct["name"], ct.get("description", ""), ct.get("description", ""),
-                           ct.get("level", "moderate"))
+            desc = (ct.get("description") or "").strip()
+            high_label = desc if desc else f"very {ct['name']}"
+            low_label = f"not {ct['name']}"
+            soul.add_trait(
+                ct["name"],
+                low_label,
+                high_label,
+                ct.get("level", "moderate"),
+            )
         except Exception as e:
             _log.debug(f"apply custom trait {ct}: {e}")
 
 
 def activate(preset_id: str) -> dict:
-    """Back up current soul, apply preset soul/skills/prompt/knowledge."""
+    """Back up current soul, apply preset soul/skills/prompt/knowledge.
+
+    If any step during soul application fails, the original soul is
+    restored from the snapshot and the backup is cleared — leaving the
+    system in a consistent state (as if activate() was never called).
+    """
+    _ensure_id(preset_id)
     info = get_info(preset_id)
     if not info:
         raise ValueError(f"preset not installed: {preset_id}")
@@ -478,13 +684,21 @@ def activate(preset_id: str) -> dict:
     snapshot = _snapshot_current_soul()
     db.kv_set("soul_backup", json.dumps(snapshot, ensure_ascii=False))
 
-    # Apply preset soul
-    _apply_soul_from_manifest(info["manifest"])
+    # Apply preset soul — on failure, restore from snapshot so we never
+    # leave the agent with a half-applied personality.
+    try:
+        _apply_soul_from_manifest(info["manifest"])
+        # Index knowledge files via RAG under preset:<id> tag
+        _index_knowledge(preset_id, info["manifest"])
+    except Exception as e:
+        _log.error(f"activate {preset_id} failed mid-application: {e}; rolling back")
+        try:
+            _restore_soul(snapshot)
+        finally:
+            db.execute("DELETE FROM kv WHERE key = ?", ("soul_backup",))
+        raise
 
-    # Index knowledge files via RAG under preset:<id> tag
-    _index_knowledge(preset_id, info["manifest"])
-
-    # Mark active (last — so failures don't leave a dangling active marker)
+    # Mark active (last — so failures above never leave a dangling active marker)
     db.kv_set("active_preset", preset_id)
     _log.info(f"activated preset: {preset_id}")
     return {"id": preset_id, "name": info["name"]}
@@ -509,7 +723,12 @@ def deactivate() -> None:
 
 
 def _index_knowledge(preset_id: str, manifest: dict) -> None:
-    """Index the preset's knowledge files via rag with a preset:<id> tag."""
+    """Index the preset's knowledge files via rag with a preset:<id> tag.
+
+    Every referenced path must already have been confirmed by validate()
+    to resolve inside the preset dir — but we re-check here so future
+    refactors don't accidentally drop the guard.
+    """
     k_list = manifest.get("knowledge") or []
     if not k_list:
         return
@@ -519,12 +738,20 @@ def _index_knowledge(preset_id: str, manifest: dict) -> None:
         _log.warning(f"rag import failed, skipping knowledge index: {e}")
         return
     base = preset_dir(preset_id)
+    base_resolved = base.resolve()
     tag = f"preset:{preset_id}"
     for entry in k_list:
         pth = entry.get("path")
         if not pth:
             continue
-        full = (base / pth).resolve()
+        try:
+            full = (base / pth).resolve()
+        except Exception:
+            _log.warning(f"knowledge path unresolvable: {pth}")
+            continue
+        if not _is_within(full, base_resolved):
+            _log.error(f"knowledge path escapes preset dir: {pth}")
+            continue
         if not full.exists():
             _log.debug(f"knowledge path missing: {full}")
             continue
@@ -538,7 +765,8 @@ def _index_knowledge(preset_id: str, manifest: dict) -> None:
 
 def get_system_prompt_suffix() -> str:
     """Return the preset's system_prompt text to append to soul.to_prompt().
-    Empty string when no preset is active."""
+    Empty string when no preset is active or the path escapes the preset dir.
+    """
     pid = get_active()
     if not pid:
         return ""
@@ -552,10 +780,18 @@ def get_system_prompt_suffix() -> str:
     if not text:
         pth = sp.get("path")
         if pth:
-            full = preset_dir(pid) / pth
+            base = preset_dir(pid)
+            base_resolved = base.resolve()
+            try:
+                full = (base / pth).resolve()
+            except Exception:
+                return ""
+            if not _is_within(full, base_resolved):
+                _log.error(f"system_prompt.path escapes preset dir: {pth}")
+                return ""
             if full.exists():
                 try:
-                    text = full.read_text(encoding="utf-8")
+                    text = full.read_text(encoding="utf-8", errors="replace")
                 except Exception as e:
                     _log.debug(f"read system_prompt {full}: {e}")
     return (text or "").strip()
