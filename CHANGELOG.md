@@ -1,5 +1,105 @@
 # Changelog
 
+## v0.12.2 — 2026-04-11
+
+New **signed presets** + four deduplication refactors, all code-reviewed.
+
+### Signed presets (ed25519)
+
+Marketplace authors can now sign `.qwp` archives with an ed25519 private key
+so buyers can cryptographically verify presets before installing them.
+
+**Main repo (`presets.py`)**:
+- `generate_keypair()`, `sign_bytes()`, `verify_bytes()` — low-level primitives
+- `verify_archive(path)` — auto-discovers adjacent `.sig` file, returns
+  `{verified, signed, status, fingerprint, reason}` with status ∈
+  {`unsigned`, `verified`, `untrusted`, `corrupt`, `error`}
+- **Trust store**: `add_trusted_pubkey`, `remove_trusted_pubkey`,
+  `get_trusted_pubkeys`, `pubkey_fingerprint` — PEMs stored in DB KV,
+  normalized to LF line endings + single trailing newline for CRLF/LF
+  round-trip stability
+- **Fingerprint prefix removal** requires ≥ 8 hex chars and refuses to
+  delete when the prefix matches multiple keys
+- **Signature policy** (`get_signature_policy` / `set_signature_policy`)
+  — controlled by `QWE_PRESET_SIGNATURE_POLICY` env var OR DB KV:
+  - `off` — skip all signature checks
+  - `warn` (default) — allow unsigned and signed-but-untrusted, reject
+    `corrupt` / `error` statuses as strong tamper signals
+  - `require` — only `verified` status is allowed; everything else raises
+- `load_archive` integrates verification **before** zip extraction and
+  bounds the raw archive read to `_MAX_EXTRACT_BYTES` (64 MB)
+- `ImportError` (missing `cryptography`) now propagates out of
+  `verify_bytes` instead of being mistaken for "signature invalid"
+
+**Market repo (`qwe-qwe market`)**:
+- `tools/keygen.py` — generate ed25519 keypair with Windows permissions warning
+- `tools/sign.py` — detached-sign a packed archive
+- `tools/pack.py --sign KEY` — pack + sign in one step
+
+**CLI**:
+- `qwe-qwe preset trust list|add <pub.pem>|rm <fingerprint>`
+  (uses `shlex` so Windows paths with spaces parse correctly)
+- `qwe-qwe preset policy [off|warn|require]` — read or set the policy
+- Slash command `/preset trust`, `/preset policy` do the same inside
+  interactive mode
+
+### Refactors (no behavior change)
+
+- **`cli.py:_preset_exec(action, rest) -> dict`**: single pure-logic
+  dispatcher. `handle_preset_command` (rich) and `_preset_cli` (plain)
+  are now thin formatters over structured result dicts. Previously
+  ~180 lines of duplicated dispatch code.
+- **`server.py:_stage_upload(request, subdir)`**: new helper returning a
+  typed `StagedUpload` dataclass. Both `/api/presets/install` and
+  `/api/knowledge/upload` now use it. No more inline multipart parsing,
+  and the helper awaits `form.close()` in `finally` so Starlette's
+  temp-file descriptors are released immediately.
+- **`static/index.html:bindDnD(zoneId, onFiles)`**: shared drag-drop
+  wiring. Replaces two near-identical `setupMarketDnD` / `setupKnUploadDnD`
+  IIFEs. Idempotent via `dataset.dndBound` gate.
+
+### Tests
+
+- **`tests/test_presets.py`** — 37 tests (was 24). New:
+  - Signature primitives roundtrip
+  - Policy `off` / `warn` / `require` matrix
+  - Trusted-signed archive accepted under `require`
+  - Tampered archive rejected under `require`
+  - Corrupt `.sig` file (wrong byte length) rejected in `warn`
+  - Untrusted-but-validly-signed allowed in `warn`
+  - Trust store add / list / remove, CRLF PEM normalization
+  - Short fingerprint prefix rejected
+  - Ambiguous fingerprint prefix rejected
+- **`tests/test_server_presets.py`** (new) — 13 FastAPI TestClient tests
+  covering every `/api/presets/*` endpoint: list, info, install happy
+  path, missing-file 400, non-multipart 400, bad-manifest 400,
+  duplicate 409, overwrite 200, activate / deactivate, delete, invalid-id
+- **`tests/_integrity_preset.py`** — still passes all 17 lifecycle steps
+
+### Fixes from v0.12.2 review
+
+- H1: `verify_bytes` re-raises `ImportError` for missing `cryptography`
+- H2: fingerprint prefix `<8` chars / ambiguous match now raises `ValueError`
+- H3: `verify_archive` distinguishes `corrupt` vs `untrusted` statuses;
+  warn mode allows untrusted, rejects corrupt
+- H4: `_stage_upload` no longer leaks Starlette form references; added
+  `await form.close()` in `finally`
+- M1: new `StagedUpload` dataclass (typed replacement for `(Path, dict)`)
+- M2: archive size is bounded via `ap.stat().st_size` **before**
+  `read_bytes()` — prevents a 2 GB archive from OOM-ing signature check
+- M3: PEM keys are normalized to canonical LF form before storage so
+  CRLF and LF copies of the same key dedupe correctly
+- M4: explicit fallback branch in both CLI formatters catches typos in
+  new result kinds (`⚠ Unhandled preset result kind: ...`)
+- M5: `test_install_missing_file_400` now sends an explicit multipart
+  request with a different field name (no reliance on `files={}` semantics)
+- L2: `_preset_trust` uses `shlex` to split args so quoted paths with
+  spaces work on Windows
+- L4: `keygen.py` warns when private-key permissions couldn't be
+  restricted (Windows)
+
+---
+
 ## v0.12.1 — 2026-04-11
 
 Hardening release after a full code review of the v0.12.0 preset system.

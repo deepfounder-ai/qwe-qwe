@@ -300,6 +300,93 @@ _TEXT_EXTENSIONS = {
     ".sh", ".bat", ".sql", ".xml", ".env", ".gitignore",
 }
 
+from dataclasses import dataclass as _dataclass, field as _field
+
+
+@_dataclass
+class StagedUpload:
+    """Result of `_stage_upload()` — one file + any extra string form fields."""
+    path: Path
+    name: str       # original filename (not sanitized)
+    size: int
+    ext: str
+    extras: dict    # other form fields (string values only) — NO references
+                    # to Starlette UploadFile / form objects, so there is no
+                    # resource leak after this returns.
+
+
+async def _stage_upload(request: Request, subdir: str, default_name: str = "file"
+                        ) -> StagedUpload | JSONResponse:
+    """Validate a multipart upload, sanitize the filename, stage it under
+    ``UPLOADS_DIR/<subdir>/<uuid>_<name>``, and return a ``StagedUpload``.
+
+    Returns a JSONResponse with an appropriate status code on failure so
+    callers can simply::
+
+        staged = await _stage_upload(request, "presets")
+        if isinstance(staged, JSONResponse):
+            return staged
+        # staged is a StagedUpload
+
+    Form parsing + file reading are both confined to this helper. Once it
+    returns, no Starlette form or UploadFile objects remain reachable, so
+    their temp files are released promptly.
+    """
+    import uuid as _uuid
+    import re as _re
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart" not in content_type:
+        return JSONResponse({"error": "multipart/form-data required"}, status_code=400)
+
+    form = await request.form()
+    try:
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "no file"}, status_code=400)
+
+        data = await file.read(_MAX_UPLOAD_BYTES + 1)
+        if len(data) > _MAX_UPLOAD_BYTES:
+            return JSONResponse(
+                {"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"},
+                status_code=413,
+            )
+
+        fname_raw = getattr(file, "filename", None) or default_name
+        # Path(fname_raw).name strips directory traversal from browser-supplied names.
+        fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:100] or default_name
+        stem = Path(fname_safe).stem
+        ext = Path(fname_safe).suffix or ""
+
+        target_dir = UPLOADS_DIR / subdir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        doc_id = _uuid.uuid4().hex[:8]
+        save_path = target_dir / f"{doc_id}_{stem}{ext}"
+        save_path.write_bytes(data)
+
+        # Extract extra string form fields (ignore any additional UploadFile
+        # entries — callers never need them).
+        extras = {
+            k: str(v)
+            for k, v in form.multi_items()
+            if k != "file" and isinstance(v, str)
+        }
+
+        return StagedUpload(
+            path=save_path,
+            name=fname_raw,
+            size=len(data),
+            ext=ext,
+            extras=extras,
+        )
+    finally:
+        # Release any UploadFile temp-file handles the form holds.
+        try:
+            await form.close()
+        except Exception:
+            pass
+
+
 def _extract_file_text(filepath: Path, max_chars: int = 8000) -> str:
     """Extract text content from a file. Supports text files and PDFs."""
     ext = filepath.suffix.lower()
@@ -1285,36 +1372,20 @@ async def presets_info(preset_id: str):
 async def presets_install(request: Request):
     """Upload and install a .qwp archive from the user's computer."""
     import presets
-    import uuid as _uuid
 
-    content_type = request.headers.get("content-type", "")
-    if "multipart" not in content_type:
-        return JSONResponse({"error": "multipart/form-data required"}, status_code=400)
+    staged = await _stage_upload(request, "presets", default_name="preset.qwp")
+    if isinstance(staged, JSONResponse):
+        return staged
+    overwrite = staged.extras.get("overwrite", "") in ("1", "true", "yes")
 
-    form = await request.form()
-    file = form.get("file")
-    if not file:
-        return JSONResponse({"error": "no file"}, status_code=400)
-
-    data = await file.read(_MAX_UPLOAD_BYTES + 1)
-    if len(data) > _MAX_UPLOAD_BYTES:
-        return JSONResponse(
-            {"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"},
-            status_code=413,
-        )
-
-    fname_raw = getattr(file, "filename", None) or "preset.qwp"
-    stage_dir = UPLOADS_DIR / "presets"
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    staged = stage_dir / f"{_uuid.uuid4().hex[:8]}_{Path(fname_raw).name}"
-    staged.write_bytes(data)
-
-    overwrite = (form.get("overwrite") or "") in ("1", "true", "yes")
     try:
-        info = presets.load_any(str(staged))
+        info = presets.load_any(str(staged.path))
         errors = presets.validate(info)
         if errors:
-            return JSONResponse({"error": "validation failed", "details": errors}, status_code=400)
+            return JSONResponse(
+                {"error": "validation failed", "details": errors},
+                status_code=400,
+            )
         result = presets.install(info, overwrite=overwrite)
     except FileExistsError as e:
         return JSONResponse(
@@ -1326,7 +1397,7 @@ async def presets_install(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
     finally:
         try:
-            staged.unlink(missing_ok=True)
+            staged.path.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -1377,42 +1448,15 @@ async def knowledge_upload(request: Request):
     Returns its absolute path so the frontend can immediately stage it
     for indexing (without roundtripping through the LLM / chat).
     """
-    import uuid as _uuid
-    import re as _re
-
-    content_type = request.headers.get("content-type", "")
-    if "multipart" not in content_type:
-        return JSONResponse({"error": "multipart/form-data required"}, status_code=400)
-
-    form = await request.form()
-    file = form.get("file")
-    if not file:
-        return JSONResponse({"error": "no file"}, status_code=400)
-
-    data = await file.read(_MAX_UPLOAD_BYTES + 1)
-    if len(data) > _MAX_UPLOAD_BYTES:
-        return JSONResponse(
-            {"error": f"file too large (max {_MAX_UPLOAD_BYTES // 1024 // 1024}MB)"},
-            status_code=413,
-        )
-
-    fname_raw = getattr(file, "filename", None) or "file.txt"
-    fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:100] or "file.txt"
-    stem = Path(fname_safe).stem
-    ext = Path(fname_safe).suffix or ".txt"
-    doc_id = str(_uuid.uuid4())[:8]
-
-    kb_dir = UPLOADS_DIR / "kb"
-    kb_dir.mkdir(parents=True, exist_ok=True)
-    save_path = kb_dir / f"{doc_id}_{stem}{ext}"
-    save_path.write_bytes(data)
-
-    _log.info(f"kb upload: {fname_raw} → {save_path} ({len(data)} bytes)")
+    staged = await _stage_upload(request, "kb", default_name="file.txt")
+    if isinstance(staged, JSONResponse):
+        return staged
+    _log.info(f"kb upload: {staged.name} → {staged.path} ({staged.size} bytes)")
     return {
-        "path": str(save_path.resolve()),
-        "name": fname_raw,
-        "size": len(data),
-        "ext": ext,
+        "path": str(staged.path.resolve()),
+        "name": staged.name,
+        "size": staged.size,
+        "ext": staged.ext or ".txt",
     }
 
 

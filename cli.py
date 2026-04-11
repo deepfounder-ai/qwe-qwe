@@ -233,8 +233,161 @@ def handle_skills_command(args: str):
         render()
 
 
+# ── Preset action dispatcher ──────────────────────────────────────────
+#
+# The slash-command handler and the argparse subcommand both need to run the
+# same set of actions. Only the rendering differs (rich Console vs plain
+# stdout). To avoid two parallel 80-line dispatchers, _preset_exec does the
+# work and returns a structured result; each wrapper formats it.
+
+def _preset_exec(action: str, rest: str) -> dict:
+    """Run a preset subcommand. Returns a structured result dict.
+
+    Shape (varies by kind):
+        {"kind": "list",        "items": [...], "active": str|None}
+        {"kind": "install_ok",  "result": {...}}
+        {"kind": "activate_ok", "id": str, "name": str}
+        {"kind": "deactivate_ok","id": str}
+        {"kind": "deactivate_noop"}
+        {"kind": "info",        "info": {...}}
+        {"kind": "rm_ok",       "id": str}
+        {"kind": "usage",       "action": str, "usage": str}
+        {"kind": "validation",  "errors": [...]}
+        {"kind": "error",       "message": str, "exit_code": int}
+        {"kind": "unknown",     "action": str}
+    """
+    import presets as _p
+
+    if not action or action == "list":
+        return {
+            "kind": "list",
+            "items": _p.list_installed(),
+            "active": _p.get_active(),
+        }
+
+    if action == "install":
+        if not rest:
+            return {
+                "kind": "usage",
+                "action": "install",
+                "usage": "install <path-to-.qwp-or-dir-or-id>",
+            }
+        try:
+            info = _p.load_any(rest)
+            errors = _p.validate(info)
+            if errors:
+                return {"kind": "validation", "errors": errors}
+            return {"kind": "install_ok", "result": _p.install(info)}
+        except FileExistsError as e:
+            return {"kind": "error", "message": str(e), "exit_code": 1, "already": True}
+        except Exception as e:
+            return {"kind": "error", "message": f"Install failed: {e}", "exit_code": 1}
+
+    if action == "activate":
+        if not rest:
+            return {"kind": "usage", "action": "activate", "usage": "activate <id>"}
+        try:
+            r = _p.activate(rest)
+            return {"kind": "activate_ok", "id": r["id"], "name": r["name"]}
+        except Exception as e:
+            return {"kind": "error", "message": f"Activate failed: {e}", "exit_code": 1}
+
+    if action in ("deactivate", "off"):
+        current = _p.get_active()
+        if not current:
+            return {"kind": "deactivate_noop"}
+        try:
+            _p.deactivate()
+            return {"kind": "deactivate_ok", "id": current}
+        except Exception as e:
+            return {"kind": "error", "message": f"Deactivate failed: {e}", "exit_code": 1}
+
+    if action == "info":
+        if not rest:
+            return {"kind": "usage", "action": "info", "usage": "info <id>"}
+        info = _p.get_info(rest)
+        if not info:
+            return {
+                "kind": "error",
+                "message": f"Preset not installed: {rest}",
+                "exit_code": 1,
+            }
+        return {"kind": "info", "info": info}
+
+    if action in ("rm", "uninstall", "remove"):
+        if not rest:
+            return {"kind": "usage", "action": "rm", "usage": "rm <id>"}
+        try:
+            _p.uninstall(rest)
+            return {"kind": "rm_ok", "id": rest}
+        except Exception as e:
+            return {"kind": "error", "message": f"Uninstall failed: {e}", "exit_code": 1}
+
+    if action == "trust":
+        return _preset_trust(rest, _p)
+
+    if action == "policy":
+        if not rest:
+            return {"kind": "policy_show", "policy": _p.get_signature_policy()}
+        try:
+            _p.set_signature_policy(rest.strip())
+            return {"kind": "policy_set", "policy": rest.strip()}
+        except Exception as e:
+            return {"kind": "error", "message": str(e), "exit_code": 2}
+
+    return {"kind": "unknown", "action": action}
+
+
+def _preset_trust(rest: str, _p) -> dict:
+    """Handle `/preset trust <subcommand>`."""
+    from pathlib import Path
+    import shlex, os as _os
+    # shlex respects quotes so Windows paths with spaces like
+    #   trust add "C:\Users\me\my keys\key.pub.pem"
+    # split cleanly. On Windows we use posix=False so backslashes stay
+    # intact.
+    try:
+        tokens = shlex.split(rest, posix=(_os.name != "nt"))
+    except ValueError:
+        tokens = rest.split()
+    sub = tokens[0] if tokens else "list"
+    arg = tokens[1] if len(tokens) > 1 else ""
+
+    if sub == "list":
+        pems = _p.get_trusted_pubkeys()
+        return {
+            "kind": "trust_list",
+            "keys": [
+                {"fingerprint": _p.pubkey_fingerprint(pem), "pem": pem}
+                for pem in pems
+            ],
+        }
+
+    if sub == "add":
+        if not arg:
+            return {"kind": "usage", "action": "trust add", "usage": "trust add <path-to-pub.pem>"}
+        p = Path(arg).expanduser()
+        if not p.is_file():
+            return {"kind": "error", "message": f"public key not found: {p}", "exit_code": 1}
+        try:
+            pem = p.read_text(encoding="utf-8")
+            fp = _p.add_trusted_pubkey(pem)
+            return {"kind": "trust_added", "fingerprint": fp, "path": str(p)}
+        except Exception as e:
+            return {"kind": "error", "message": f"Add failed: {e}", "exit_code": 1}
+
+    if sub in ("rm", "remove"):
+        if not arg:
+            return {"kind": "usage", "action": "trust rm", "usage": "trust rm <fingerprint-prefix>"}
+        if _p.remove_trusted_pubkey(arg.strip()):
+            return {"kind": "trust_removed", "fingerprint": arg.strip()}
+        return {"kind": "error", "message": f"no trusted key matching {arg!r}", "exit_code": 1}
+
+    return {"kind": "unknown", "action": f"trust {sub}"}
+
+
 def handle_preset_command(args: str):
-    """`/preset` slash command dispatcher.
+    """`/preset` slash command dispatcher — rich rendering.
 
     Subcommands:
         /preset                      — list installed + active
@@ -244,16 +397,15 @@ def handle_preset_command(args: str):
         /preset info <id>
         /preset rm <id>              — uninstall
     """
-    import presets as _p
-
     parts = args.split(maxsplit=1)
     sub = parts[0] if parts else ""
     rest = parts[1] if len(parts) > 1 else ""
 
-    # Default: list installed
-    if not sub or sub == "list":
-        items = _p.list_installed()
-        active = _p.get_active()
+    result = _preset_exec(sub, rest)
+    kind = result["kind"]
+
+    if kind == "list":
+        items = result["items"]
         if not items:
             console.print("  [dim]No presets installed.[/]")
             if os.environ.get("QWE_MARKET_PATH"):
@@ -270,68 +422,42 @@ def handle_preset_command(args: str):
             name = f"[bold]{it['name']}[/]" if it["active"] else it["name"]
             console.print(f"  {marker} {name} [dim]v{it['version']}[/] · {cat} · {lic}")
             console.print(f"      [dim]{it['id']} — {it['author_name']}[/]")
-        if active:
-            console.print(f"\n  [green]Active:[/] {active}")
+        if result["active"]:
+            console.print(f"\n  [green]Active:[/] {result['active']}")
         return
 
-    if sub == "install":
-        if not rest:
-            console.print("  [dim]Usage: /preset install <path-to-.qwp-or-dir-or-id>[/]")
-            return
-        try:
-            info = _p.load_any(rest)
-            errors = _p.validate(info)
-            if errors:
-                console.print("  [red]✗ Validation failed:[/]")
-                for err in errors:
-                    console.print(f"    [red]-[/] {err}")
-                return
-            result = _p.install(info)
-            console.print(
-                f"  [green]✓ Installed[/] [bold]{result['name']}[/] "
-                f"[dim]v{result['version']} · {result['category']}[/]"
-            )
-            console.print(f"  [dim]{result['path']}[/]")
-        except FileExistsError as e:
-            console.print(f"  [yellow]{e}[/]")
-        except Exception as e:
-            console.print(f"  [red]✗ Install failed:[/] {e}")
+    if kind == "install_ok":
+        r = result["result"]
+        console.print(
+            f"  [green]✓ Installed[/] [bold]{r['name']}[/] "
+            f"[dim]v{r['version']} · {r['category']}[/]"
+        )
+        console.print(f"  [dim]{r['path']}[/]")
         return
 
-    if sub == "activate":
-        if not rest:
-            console.print("  [dim]Usage: /preset activate <id>[/]")
-            return
-        try:
-            _p.activate(rest)
-            console.print(f"  [green]✓ Activated:[/] [bold]{rest}[/]")
-            console.print("  [dim]Soul, skills and knowledge are now driven by this preset.[/]")
-            console.print("  [dim]Run /preset deactivate to restore your previous soul.[/]")
-        except Exception as e:
-            console.print(f"  [red]✗ Activate failed:[/] {e}")
+    if kind == "validation":
+        console.print("  [red]✗ Validation failed:[/]")
+        for err in result["errors"]:
+            console.print(f"    [red]-[/] {err}")
         return
 
-    if sub in ("deactivate", "off"):
-        try:
-            current = _p.get_active()
-            if not current:
-                console.print("  [dim]No preset active.[/]")
-                return
-            _p.deactivate()
-            console.print(f"  [yellow]✓ Deactivated:[/] {current}")
-            console.print("  [dim]Original soul restored.[/]")
-        except Exception as e:
-            console.print(f"  [red]✗ Deactivate failed:[/] {e}")
+    if kind == "activate_ok":
+        console.print(f"  [green]✓ Activated:[/] [bold]{result['id']}[/]")
+        console.print("  [dim]Soul, skills and knowledge are now driven by this preset.[/]")
+        console.print("  [dim]Run /preset deactivate to restore your previous soul.[/]")
         return
 
-    if sub == "info":
-        if not rest:
-            console.print("  [dim]Usage: /preset info <id>[/]")
-            return
-        info = _p.get_info(rest)
-        if not info:
-            console.print(f"  [red]Preset not installed: {rest}[/]")
-            return
+    if kind == "deactivate_ok":
+        console.print(f"  [yellow]✓ Deactivated:[/] {result['id']}")
+        console.print("  [dim]Original soul restored.[/]")
+        return
+
+    if kind == "deactivate_noop":
+        console.print("  [dim]No preset active.[/]")
+        return
+
+    if kind == "info":
+        info = result["info"]
         m = info["manifest"]
         console.print(f"  [bold]{info['name']}[/] [dim]v{info['version']}[/]")
         console.print(f"  [dim]id:[/] {info['id']}")
@@ -352,19 +478,58 @@ def handle_preset_command(args: str):
             console.print("  [green]● currently active[/]")
         return
 
-    if sub in ("rm", "uninstall", "remove"):
-        if not rest:
-            console.print("  [dim]Usage: /preset rm <id>[/]")
-            return
-        try:
-            _p.uninstall(rest)
-            console.print(f"  [yellow]✓ Uninstalled:[/] {rest}")
-        except Exception as e:
-            console.print(f"  [red]✗ Uninstall failed:[/] {e}")
+    if kind == "rm_ok":
+        console.print(f"  [yellow]✓ Uninstalled:[/] {result['id']}")
         return
 
-    console.print(f"  [dim]Unknown: /preset {sub}[/]")
-    console.print("  [dim]Subcommands: list, install, activate, deactivate, info, rm[/]")
+    if kind == "usage":
+        console.print(f"  [dim]Usage: /preset {result['usage']}[/]")
+        return
+
+    if kind == "error":
+        if result.get("already"):
+            console.print(f"  [yellow]{result['message']}[/]")
+        else:
+            console.print(f"  [red]✗ {result['message']}[/]")
+        return
+
+    if kind == "trust_list":
+        keys = result["keys"]
+        if not keys:
+            console.print("  [dim]Trust store is empty.[/]")
+            console.print("  [dim]Add a key: /preset trust add <path-to-pub.pem>[/]")
+            return
+        console.print(f"  [bold magenta]Trusted signing keys[/]  [dim]({len(keys)} total)[/]\n")
+        for k in keys:
+            console.print(f"  [green]●[/] [mono]{k['fingerprint']}[/]")
+        return
+
+    if kind == "trust_added":
+        console.print(f"  [green]✓ Trusted[/] {result['fingerprint']}")
+        console.print(f"  [dim]{result['path']}[/]")
+        return
+
+    if kind == "trust_removed":
+        console.print(f"  [yellow]✓ Removed[/] {result['fingerprint']}")
+        return
+
+    if kind == "policy_show":
+        console.print(f"  [dim]signature policy:[/] [bold]{result['policy']}[/]")
+        console.print("  [dim]Values: off | warn | require[/]")
+        return
+
+    if kind == "policy_set":
+        console.print(f"  [green]✓ Signature policy:[/] [bold]{result['policy']}[/]")
+        return
+
+    if kind == "unknown":
+        console.print(f"  [dim]Unknown: /preset {result['action']}[/]")
+        console.print("  [dim]Subcommands: list, install, activate, deactivate, info, rm, trust, policy[/]")
+        return
+
+    # Fallback — new result kinds must be added to both formatters.
+    console.print(f"  [red]⚠ Unhandled preset result kind: {kind}[/]")
+    console.print(f"  [dim]{result}[/]")
 
 
 def handle_cron(args: str):
@@ -1579,77 +1744,55 @@ def _run_update_cli():
 def _preset_cli(argv: list[str]) -> int:
     """Non-interactive `qwe-qwe preset <action> [args]` command.
 
-    Lightweight: prints to stdout instead of using rich for scriptability.
+    Thin plain-text formatter over `_preset_exec`. Used by the argparse
+    subcommand — prints to stdout/stderr so output is pipe-friendly.
     """
-    import presets as _p
     if not argv:
-        # Default to list
         argv = ["list"]
     action = argv[0]
-    rest = argv[1:]
+    rest = " ".join(argv[1:])
 
-    if action == "list":
-        items = _p.list_installed()
+    result = _preset_exec(action, rest)
+    kind = result["kind"]
+
+    if kind == "list":
+        items = result["items"]
         if not items:
             print("No presets installed.")
             return 0
-        active = _p.get_active()
         for it in items:
             marker = "●" if it["active"] else "○"
             print(f"{marker} {it['id']}  v{it['version']}  [{it['category']}]  {it['name']}")
-        if active:
-            print(f"\nActive: {active}")
+        if result["active"]:
+            print(f"\nActive: {result['active']}")
         return 0
 
-    if action == "install":
-        if not rest:
-            print("usage: qwe-qwe preset install <path-to-.qwp-or-dir-or-id>", file=sys.stderr)
-            return 2
-        try:
-            info = _p.load_any(rest[0])
-            errors = _p.validate(info)
-            if errors:
-                print("Validation failed:", file=sys.stderr)
-                for err in errors:
-                    print(f"  - {err}", file=sys.stderr)
-                return 1
-            result = _p.install(info)
-            print(f"✓ Installed {result['name']} v{result['version']} ({result['category']})")
-            print(f"  {result['path']}")
-            return 0
-        except Exception as e:
-            print(f"✗ Install failed: {e}", file=sys.stderr)
-            return 1
-
-    if action == "activate":
-        if not rest:
-            print("usage: qwe-qwe preset activate <id>", file=sys.stderr)
-            return 2
-        try:
-            r = _p.activate(rest[0])
-            print(f"✓ Activated: {r['name']} ({r['id']})")
-            return 0
-        except Exception as e:
-            print(f"✗ Activate failed: {e}", file=sys.stderr)
-            return 1
-
-    if action == "deactivate":
-        current = _p.get_active()
-        if not current:
-            print("No preset active.")
-            return 0
-        _p.deactivate()
-        print(f"✓ Deactivated: {current}")
+    if kind == "install_ok":
+        r = result["result"]
+        print(f"✓ Installed {r['name']} v{r['version']} ({r['category']})")
+        print(f"  {r['path']}")
         return 0
 
-    if action == "info":
-        if not rest:
-            print("usage: qwe-qwe preset info <id>", file=sys.stderr)
-            return 2
-        info = _p.get_info(rest[0])
-        if not info:
-            print(f"Preset not installed: {rest[0]}", file=sys.stderr)
-            return 1
+    if kind == "validation":
+        print("Validation failed:", file=sys.stderr)
+        for err in result["errors"]:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    if kind == "activate_ok":
+        print(f"✓ Activated: {result['name']} ({result['id']})")
+        return 0
+
+    if kind == "deactivate_ok":
+        print(f"✓ Deactivated: {result['id']}")
+        return 0
+
+    if kind == "deactivate_noop":
+        print("No preset active.")
+        return 0
+
+    if kind == "info":
+        info = result["info"]
         m = info["manifest"]
         print(f"{info['name']} v{info['version']}")
         print(f"  id:       {info['id']}")
@@ -1663,20 +1806,51 @@ def _preset_cli(argv: list[str]) -> int:
             print("  ● currently active")
         return 0
 
-    if action in ("rm", "uninstall", "remove"):
-        if not rest:
-            print("usage: qwe-qwe preset rm <id>", file=sys.stderr)
-            return 2
-        try:
-            _p.uninstall(rest[0])
-            print(f"✓ Uninstalled: {rest[0]}")
-            return 0
-        except Exception as e:
-            print(f"✗ Uninstall failed: {e}", file=sys.stderr)
-            return 1
+    if kind == "rm_ok":
+        print(f"✓ Uninstalled: {result['id']}")
+        return 0
 
-    print(f"Unknown preset action: {action}", file=sys.stderr)
-    print("Actions: list, install, activate, deactivate, info, rm", file=sys.stderr)
+    if kind == "usage":
+        print(f"usage: qwe-qwe preset {result['usage']}", file=sys.stderr)
+        return 2
+
+    if kind == "error":
+        prefix = "" if result.get("already") else "✗ "
+        print(f"{prefix}{result['message']}", file=sys.stderr)
+        return result.get("exit_code", 1)
+
+    if kind == "trust_list":
+        keys = result["keys"]
+        if not keys:
+            print("Trust store is empty.")
+            return 0
+        for k in keys:
+            print(f"● {k['fingerprint']}")
+        return 0
+
+    if kind == "trust_added":
+        print(f"✓ Trusted {result['fingerprint']}  ({result['path']})")
+        return 0
+
+    if kind == "trust_removed":
+        print(f"✓ Removed {result['fingerprint']}")
+        return 0
+
+    if kind == "policy_show":
+        print(f"policy: {result['policy']}")
+        return 0
+
+    if kind == "policy_set":
+        print(f"✓ Policy set to: {result['policy']}")
+        return 0
+
+    if kind == "unknown":
+        print(f"Unknown preset action: {result['action']}", file=sys.stderr)
+        print("Actions: list, install, activate, deactivate, info, rm, trust, policy",
+              file=sys.stderr)
+        return 2
+
+    print(f"Unhandled preset result kind: {kind}", file=sys.stderr)
     return 2
 
 

@@ -76,6 +76,289 @@ def _ensure_id(preset_id: str) -> str:
     return preset_id
 
 
+# ── Ed25519 signatures ──────────────────────────────────────────────────
+#
+# A preset author packs a .qwp and signs the raw archive bytes with their
+# ed25519 private key, producing a detached <archive>.sig (64 raw bytes).
+# Buyers download both. At install time, we look for the adjacent .sig
+# file, verify against any pubkey in the trust store, and record the
+# outcome. Policy lives in the `preset_signature_policy` KV:
+#
+#   off     — never check signatures (useful for dev)
+#   warn    — verify if .sig exists, warn if missing, never reject  (default)
+#   require — reject anything not signed by a trusted pubkey
+#
+# The `preset_trusted_pubkeys` KV holds a JSON list of PEM-encoded public
+# keys. CLI management is intentionally minimal in v0.12.2 — we expose
+# add/list/rm via a tiny API here that CLI/Web UI consume.
+
+_SIG_SUFFIX = ".sig"
+_POLICY_KEY = "preset_signature_policy"
+_TRUST_KEY = "preset_trusted_pubkeys"
+_POLICY_VALUES = ("off", "warn", "require")
+
+
+def get_signature_policy() -> str:
+    """Current policy. Env var wins, then KV, then default 'warn'."""
+    env = os.environ.get("QWE_PRESET_SIGNATURE_POLICY") or ""
+    env = env.strip().lower()
+    if env in _POLICY_VALUES:
+        return env
+    kv = (db.kv_get(_POLICY_KEY) or "").strip().lower()
+    if kv in _POLICY_VALUES:
+        return kv
+    return "warn"
+
+
+def set_signature_policy(policy: str) -> None:
+    policy = (policy or "").strip().lower()
+    if policy not in _POLICY_VALUES:
+        raise ValueError(f"policy must be one of {_POLICY_VALUES}")
+    db.kv_set(_POLICY_KEY, policy)
+
+
+def get_trusted_pubkeys() -> list[str]:
+    """List of PEM-encoded ed25519 public keys the user trusts."""
+    raw = db.kv_get(_TRUST_KEY) or "[]"
+    try:
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [str(k) for k in val if k]
+    except Exception:
+        pass
+    return []
+
+
+def _normalize_pem(pem: str) -> str:
+    """Normalize a PEM public key to canonical form: stripped of leading
+    whitespace, normalized newlines, exactly one trailing newline. This
+    way files with `\\r\\n` endings or extra blank lines round-trip as
+    byte-identical to files with `\\n` only, and the trust store stays
+    deduplicated regardless of the source format.
+    """
+    text = pem.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text + "\n"
+
+
+def add_trusted_pubkey(pem: str) -> str:
+    """Append a PEM public key to the trust store. Returns its fingerprint.
+
+    The key is normalized to canonical form (LF line endings, single
+    trailing newline) before storage so files with Windows CRLF endings
+    deduplicate correctly against the same key imported via HTTP.
+    """
+    normalized = _normalize_pem(pem)
+    if not normalized.startswith("-----BEGIN PUBLIC KEY-----"):
+        raise ValueError("expected a PEM-encoded public key (BEGIN PUBLIC KEY)")
+    # Parse it to fail fast on garbage
+    _load_public_key(normalized)
+    current = get_trusted_pubkeys()
+    if normalized not in current:
+        current.append(normalized)
+        db.kv_set(_TRUST_KEY, json.dumps(current, ensure_ascii=False))
+    return pubkey_fingerprint(normalized)
+
+
+# Fingerprint prefix must be at least this long to prevent accidental
+# removal of multiple keys at once.
+_MIN_FP_PREFIX = 8
+
+
+def remove_trusted_pubkey(fingerprint_prefix: str) -> bool:
+    """Remove a trusted key by its fingerprint prefix.
+
+    Requires a prefix of at least `_MIN_FP_PREFIX` hex chars (8 = 32 bits
+    of entropy), and refuses to delete if the prefix matches more than
+    one key in the store. Returns True if exactly one key was removed,
+    False otherwise.
+    """
+    fp_prefix = (fingerprint_prefix or "").strip().lower()
+    if not fp_prefix:
+        return False
+    if len(fp_prefix) < _MIN_FP_PREFIX:
+        raise ValueError(
+            f"fingerprint prefix too short: {fp_prefix!r} "
+            f"(need ≥{_MIN_FP_PREFIX} hex chars to disambiguate)"
+        )
+    current = get_trusted_pubkeys()
+    matching = [pem for pem in current if pubkey_fingerprint(pem).startswith(fp_prefix)]
+    if len(matching) == 0:
+        return False
+    if len(matching) > 1:
+        raise ValueError(
+            f"fingerprint prefix {fp_prefix!r} matches {len(matching)} keys; "
+            f"use a longer prefix to disambiguate"
+        )
+    kept = [pem for pem in current if pem != matching[0]]
+    db.kv_set(_TRUST_KEY, json.dumps(kept, ensure_ascii=False))
+    return True
+
+
+def pubkey_fingerprint(pem: str) -> str:
+    """Short stable fingerprint of a PEM public key (first 16 hex chars
+    of sha256 over the DER-encoded key). Human-comparable but not strong
+    enough for uniqueness — use the full PEM for equality checks."""
+    import hashlib
+    try:
+        pk = _load_public_key(pem)
+        raw = pk.public_bytes(
+            encoding=_crypto_encoding().Raw,
+            format=_crypto_pubfmt().Raw,
+        )
+        return hashlib.sha256(raw).hexdigest()[:16]
+    except Exception:
+        return "?" * 16
+
+
+def _load_public_key(pem: str):
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    return load_pem_public_key(pem.encode("utf-8"))
+
+
+def _load_private_key(pem: str):
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    return load_pem_private_key(pem.encode("utf-8"), password=None)
+
+
+def _crypto_encoding():
+    from cryptography.hazmat.primitives.serialization import Encoding
+    return Encoding
+
+
+def _crypto_pubfmt():
+    from cryptography.hazmat.primitives.serialization import PublicFormat
+    return PublicFormat
+
+
+def generate_keypair() -> tuple[str, str]:
+    """Generate a fresh ed25519 keypair. Returns (private_pem, public_pem)."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, PrivateFormat, PublicFormat, NoEncryption,
+    )
+    sk = Ed25519PrivateKey.generate()
+    priv_pem = sk.private_bytes(
+        encoding=Encoding.PEM,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    ).decode("utf-8")
+    pub_pem = sk.public_key().public_bytes(
+        encoding=Encoding.PEM,
+        format=PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    return priv_pem, pub_pem
+
+
+def sign_bytes(data: bytes, private_pem: str) -> bytes:
+    """Sign arbitrary bytes with an ed25519 private key. Returns 64 raw bytes."""
+    sk = _load_private_key(private_pem)
+    return sk.sign(data)
+
+
+def verify_bytes(data: bytes, signature: bytes, public_pem: str) -> bool:
+    """Return True iff `signature` is a valid ed25519 signature for `data`
+    under the given public key PEM.
+
+    Raises ImportError if the `cryptography` package is missing — callers
+    should treat that as a hard error, NOT as "signature invalid", so
+    users can tell the difference between a tampered archive and a
+    misconfigured environment.
+    """
+    try:
+        from cryptography.exceptions import InvalidSignature
+    except ImportError:
+        # cryptography not installed at all — let it surface
+        raise
+    try:
+        pk = _load_public_key(public_pem)
+    except ImportError:
+        raise
+    except Exception:
+        # Malformed key → not usable, treat as "not verified" rather than crash
+        return False
+    try:
+        pk.verify(signature, data)
+        return True
+    except InvalidSignature:
+        return False
+    except Exception:
+        # Unknown verification failure — be conservative and say not verified
+        return False
+
+
+def verify_archive(archive_path: Path, *, sig_path: Path | None = None
+                   ) -> dict:
+    """Verify the signature of an archive against the trust store.
+
+    Returns a dict with the following keys:
+        verified   : bool  — True iff a trusted key signed this archive
+        signed     : bool  — True iff a .sig file was found alongside the archive
+        status     : str   — one of:
+                       "unsigned"      no .sig file
+                       "verified"      sig matches a trusted pubkey
+                       "untrusted"     sig exists and is syntactically valid but
+                                       no trusted pubkey signs this archive;
+                                       could be tampering OR a key we don't know
+                       "corrupt"       sig file unreadable / bad length
+                       "error"         I/O or other failure
+        fingerprint: str | None  — trusted pubkey fingerprint (only when verified)
+        reason     : str   — human-readable explanation
+
+    Callers decide what to do with "untrusted" based on policy.
+    """
+    archive_path = Path(archive_path)
+    sig_path = Path(sig_path) if sig_path else Path(str(archive_path) + _SIG_SUFFIX)
+
+    if not sig_path.exists():
+        return {
+            "verified": False,
+            "signed": False,
+            "status": "unsigned",
+            "fingerprint": None,
+            "reason": f"no signature file at {sig_path.name}",
+        }
+
+    try:
+        sig = sig_path.read_bytes()
+        data = archive_path.read_bytes()
+    except Exception as e:
+        return {
+            "verified": False,
+            "signed": True,
+            "status": "error",
+            "fingerprint": None,
+            "reason": f"cannot read signature/archive: {e}",
+        }
+
+    # ed25519 signatures are always exactly 64 bytes. Anything else is
+    # a corrupt or truncated sig file.
+    if len(sig) != 64:
+        return {
+            "verified": False,
+            "signed": True,
+            "status": "corrupt",
+            "fingerprint": None,
+            "reason": f"signature file is {len(sig)} bytes (expected 64)",
+        }
+
+    for pem in get_trusted_pubkeys():
+        if verify_bytes(data, sig, pem):
+            return {
+                "verified": True,
+                "signed": True,
+                "status": "verified",
+                "fingerprint": pubkey_fingerprint(pem),
+                "reason": "verified against trusted pubkey",
+            }
+    return {
+        "verified": False,
+        "signed": True,
+        "status": "untrusted",
+        "fingerprint": None,
+        "reason": "signature did not match any trusted pubkey",
+    }
+
+
 # ── Data classes ────────────────────────────────────────────────────────
 
 @dataclass
@@ -91,6 +374,7 @@ class PresetInfo:
     source_dir: Path              # directory on disk containing preset.yaml
     source_kind: str = "directory"  # "archive" | "directory"
     origin_path: str | None = None  # original path user passed (archive or dir)
+    signature: dict = field(default_factory=dict)  # result of verify_archive()
 
 
 # ── YAML / schema helpers ───────────────────────────────────────────────
@@ -148,6 +432,53 @@ def load_archive(archive_path: Path | str) -> PresetInfo:
     if not zipfile.is_zipfile(ap):
         raise ValueError(f"not a zip archive: {ap}")
 
+    # Bound the archive size BEFORE reading into memory for signature check.
+    # _validate_zip_members re-checks individual files, but the raw archive
+    # size needs its own cap so a 2 GB zip doesn't OOM us in read_bytes().
+    try:
+        archive_size = ap.stat().st_size
+    except OSError as e:
+        raise ValueError(f"cannot stat archive: {e}")
+    if archive_size > _MAX_EXTRACT_BYTES:
+        raise ValueError(
+            f"archive size {archive_size} exceeds "
+            f"{_MAX_EXTRACT_BYTES // (1024 * 1024)} MB cap"
+        )
+
+    # Verify signature BEFORE we touch the zip contents.
+    #
+    # Policy semantics:
+    #   require — only "verified" status is allowed; everything else raises.
+    #   warn    — "verified" is best, "unsigned" logs a warning, "untrusted"
+    #             logs a warning (the user may not yet have imported the
+    #             publisher's pubkey), "corrupt"/"error" ALWAYS raise because
+    #             a bad sig file is a strong tampering signal.
+    #   off     — skip all checks.
+    sig_result = verify_archive(ap)
+    policy = get_signature_policy()
+    status = sig_result["status"]
+
+    if policy == "require":
+        if status != "verified":
+            raise ValueError(
+                f"signature policy=require but archive is not verified: "
+                f"{sig_result['reason']}"
+            )
+    elif policy == "warn":
+        if status in ("corrupt", "error"):
+            raise ValueError(
+                f"signature file rejected: {sig_result['reason']}"
+            )
+        if status == "unsigned":
+            _log.warning(f"preset archive {ap.name} is not signed")
+        elif status == "untrusted":
+            _log.warning(
+                f"preset archive {ap.name} is signed but the signing key is "
+                f"not in the trust store (add it via: qwe-qwe preset trust add <pub.pem>)"
+            )
+        # status == "verified" — no log needed, happy path
+    # policy == "off" → skip all checks
+
     tmp = Path(tempfile.mkdtemp(prefix="qwe_preset_"))
     tmp_resolved = tmp.resolve()
     try:
@@ -179,8 +510,10 @@ def load_archive(archive_path: Path | str) -> PresetInfo:
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    return _info_from_manifest(manifest, source_dir=manifest_path.parent,
+    info = _info_from_manifest(manifest, source_dir=manifest_path.parent,
                                source_kind="archive", origin_path=str(ap))
+    info.signature = sig_result
+    return info
 
 
 def _is_within(child: Path, parent: Path) -> bool:

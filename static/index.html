@@ -3451,20 +3451,30 @@ async function installPreset(file, opts = {}) {
 }
 
 // Drag & drop for market upload zone
-(function setupMarketDnD() {
+// Shared drag-drop binder. Re-used by Market tab + Knowledge Base upload.
+// Idempotent: multiple calls for the same zone id are no-ops.
+function bindDnD(zoneId, onFiles) {
   const attach = () => {
-    const zone = document.getElementById('marketUploadZone');
+    const zone = document.getElementById(zoneId);
     if (!zone || zone.dataset.dndBound) return;
     zone.dataset.dndBound = '1';
-    ['dragenter','dragover'].forEach(evt => {
-      zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('drag-active'); });
+    ['dragenter', 'dragover'].forEach(evt => {
+      zone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.add('drag-active');
+      });
     });
-    ['dragleave','drop'].forEach(evt => {
-      zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('drag-active'); });
+    ['dragleave', 'drop'].forEach(evt => {
+      zone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.remove('drag-active');
+      });
     });
     zone.addEventListener('drop', (e) => {
       const files = Array.from(e.dataTransfer?.files || []);
-      if (files.length) installPreset(files[0]);
+      if (files.length) onFiles(files);
     });
   };
   if (document.readyState === 'loading') {
@@ -3472,7 +3482,9 @@ async function installPreset(file, opts = {}) {
   } else {
     attach();
   }
-})();
+}
+
+bindDnD('marketUploadZone', (files) => installPreset(files[0]));
 
 // ── Cron ──
 async function loadCron() {
@@ -4108,29 +4120,7 @@ async function knUploadFiles(files) {
 }
 
 // Drag & drop wiring for the upload zone
-(function setupKnUploadDnD() {
-  const attach = () => {
-    const zone = document.getElementById('knUploadZone');
-    if (!zone || zone.dataset.dndBound) return;
-    zone.dataset.dndBound = '1';
-    ['dragenter','dragover'].forEach(evt => {
-      zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('drag-active'); });
-    });
-    ['dragleave','drop'].forEach(evt => {
-      zone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('drag-active'); });
-    });
-    zone.addEventListener('drop', (e) => {
-      const files = Array.from(e.dataTransfer?.files || []);
-      if (files.length) knUploadFiles(files);
-    });
-  };
-  // Run on DOMContentLoaded or immediately if already loaded
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', attach);
-  } else {
-    attach();
-  }
-})();
+bindDnD('knUploadZone', (files) => knUploadFiles(files));
 
 async function knBrowse(path) {
   const hidden = document.getElementById('knShowHidden')?.checked || false;
