@@ -21,6 +21,9 @@ Features:
 - Supergroup topics: Telegram topic_id ↔ qwe-qwe thread
 """
 
+import atexit
+import os
+import sys
 import threading
 import time
 import json
@@ -39,6 +42,139 @@ _thread: threading.Thread | None = None
 _running = False
 _on_message: Callable | None = None
 _pending_code: str | None = None  # verification code awaiting confirmation
+_lock_held = False                 # True while this process owns the lock
+
+
+# ── Single-instance lock ───────────────────────────────────────────────
+#
+# Telegram allows exactly one long-poll client per bot token. If a second
+# qwe-qwe process (or a stale background uvicorn from a previous session)
+# also calls start(), both clients `getUpdates` and Telegram returns a
+# "Conflict: terminated by other getUpdates request" error on whoever
+# isn't the latest caller — spamming the log.
+#
+# To prevent this we take a process-level lock via a PID file at
+# ~/.qwe-qwe/telegram.lock BEFORE entering the polling loop:
+#
+#   * if the file doesn't exist → create it atomically, write our PID
+#   * if it exists and holds a LIVE PID → another instance already runs,
+#     back off silently
+#   * if it exists but the PID is DEAD → stale lock from a crashed process,
+#     remove and retake
+#
+# The lock is released by stop() OR an atexit handler OR the next call to
+# start() that detects a stale PID.
+
+
+def _pid_alive(pid: int) -> bool:
+    """Cross-platform check whether `pid` is a live process."""
+    if pid <= 0 or pid == os.getpid():
+        return pid == os.getpid()
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            h = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if not h:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code))
+                return exit_code.value == STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, ProcessLookupError, PermissionError):
+        return sys.platform != "win32"
+
+
+def _lock_file_path() -> "Path":
+    from pathlib import Path
+    return Path(config.DATA_DIR) / "telegram.lock"
+
+
+# Rate-limit the "lock held" log line so a loop of repeated start() calls
+# (from a buggy caller) doesn't spam the log. Only log once per minute.
+_last_lock_held_log = 0.0
+
+
+def _acquire_lock() -> bool:
+    """Try to acquire the telegram single-instance PID lock.
+
+    Returns True iff this process now owns the lock. Clears stale locks
+    left by crashed processes. Safe to call repeatedly.
+    """
+    global _lock_held, _last_lock_held_log
+    lock_path = _lock_file_path()
+
+    # Stale-lock sweep
+    if lock_path.exists():
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            other_pid = int(raw) if raw else 0
+        except (OSError, ValueError):
+            other_pid = 0
+        if other_pid and _pid_alive(other_pid):
+            # Expected state — not a warning. Downgrade to INFO and
+            # rate-limit to avoid spamming the log if some caller loops.
+            now = time.time()
+            if now - _last_lock_held_log > 60:
+                _log.info(
+                    f"telegram lock held by PID {other_pid}; "
+                    f"not starting a second bot instance"
+                )
+                _last_lock_held_log = now
+            return False
+        # Stale → remove
+        try:
+            lock_path.unlink()
+            _log.info(f"removed stale telegram lock (PID {other_pid or '?'} not alive)")
+        except OSError:
+            pass
+
+    # Atomic create — O_EXCL wins the race even if two processes are
+    # attempting to acquire simultaneously.
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # Rare but legit race: another process beat us to the atomic create
+        # between our stale-sweep check above and here. Same rate limit.
+        now = time.time()
+        if now - _last_lock_held_log > 60:
+            _log.info("telegram lock race: another instance acquired it first")
+            _last_lock_held_log = now
+        return False
+    except OSError as e:
+        _log.error(f"failed to create telegram lock at {lock_path}: {e}")
+        return False
+
+    try:
+        os.write(fd, str(os.getpid()).encode("utf-8"))
+    finally:
+        os.close(fd)
+    _lock_held = True
+    return True
+
+
+def _release_lock() -> None:
+    """Release the telegram lock if we own it. Idempotent + safe at exit."""
+    global _lock_held
+    if not _lock_held:
+        return
+    path = _lock_file_path()
+    try:
+        if path.exists():
+            raw = path.read_text(encoding="utf-8").strip()
+            if raw == str(os.getpid()):
+                path.unlink()
+    except OSError:
+        pass
+    _lock_held = False
 
 
 # ── Config ──
@@ -1167,7 +1303,12 @@ def get_me(token: str | None = None) -> dict:
 # ── Polling loop ──
 
 def start(on_message: Callable | None = None):
-    """Start the Telegram bot polling loop."""
+    """Start the Telegram bot polling loop.
+
+    Acquires a process-level lock first so a second qwe-qwe instance
+    (e.g. a leftover uvicorn) never ends up fighting the first one
+    over getUpdates.
+    """
     global _thread, _running, _on_message
 
     if _running:
@@ -1179,17 +1320,25 @@ def start(on_message: Callable | None = None):
         _log.warning("no bot token configured")
         return
 
+    if not _acquire_lock():
+        # Another live qwe-qwe instance already owns the lock. Don't start
+        # polling — bail silently to avoid log spam.
+        return
+
     _on_message = on_message
     _running = True
+    # Ensure the lock is released even if the process exits uncleanly.
+    atexit.register(_release_lock)
     _thread = threading.Thread(target=_poll_loop, args=(token,), daemon=True)
     _thread.start()
     _log.info("telegram bot started")
 
 
 def stop():
-    """Stop the polling loop."""
+    """Stop the polling loop and release the single-instance lock."""
     global _running
     _running = False
+    _release_lock()
     _log.info("telegram bot stopped")
 
 

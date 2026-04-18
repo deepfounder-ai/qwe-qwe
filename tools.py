@@ -132,6 +132,7 @@ _CORE_TOOL_NAMES = {
     "self_config",  # manage own settings
     "http_request", "spawn_task",
     "tool_search",  # meta-tool to discover more tools
+    "browser_open", "browser_snapshot",  # web browsing — most requested tools
 }
 
 # Session-level: tools activated by tool_search (persists within agent turn)
@@ -387,7 +388,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "http_request",
-            "description": "Make HTTP request to any URL. Use for APIs, webhooks, Telegram bot, etc.",
+            "description": "Make HTTP request to REST APIs / webhooks / JSON endpoints (Telegram bot API, weather API, GitHub API, etc.). DO NOT use for web pages — always use browser_open for websites, HTML pages, search results, news, articles.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -460,11 +461,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_search",
-            "description": "Find and activate additional tools by keyword. Use when you need a capability not in your current tools (e.g. 'browser', 'notes', 'schedule', 'secret', 'mcp', 'profile', 'rag', 'model', 'skill', 'timer').",
+            "description": "Find and activate additional tools by keyword. Use when you need a capability not in your current tools. IMPORTANT: for ANY web/internet task (search, news, open URL, browse site) use keyword 'browser'.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Keyword: browser, notes, schedule, secret, mcp, profile, rag, skill, timer, cron, model"},
+                    "query": {"type": "string", "description": "Keyword: browser (web/internet/news/search), notes, schedule, secret, mcp, profile, rag, skill, timer, cron, model"},
                 },
                 "required": ["query"],
             },
@@ -476,9 +477,19 @@ TOOLS = [
 # ── Tool search index ──
 # Maps keywords to tool names for discovery
 
+_BROWSER_ALL = [
+    "browser_open", "browser_snapshot", "browser_screenshot",
+    "browser_click", "browser_fill", "browser_eval", "browser_close",
+    "browser_back", "browser_forward", "browser_reload",
+    "browser_accessibility", "browser_console",
+    "browser_hover", "browser_select", "browser_press_key", "browser_wait_for", "browser_upload", "browser_drag",
+    "browser_tabs", "browser_tab_new", "browser_tab_switch", "browser_tab_close",
+    "browser_network",
+]
+
 _TOOL_SEARCH_INDEX = {
-    "browser": ["browser_open", "browser_snapshot", "browser_screenshot", "browser_click", "browser_fill", "browser_eval", "browser_close"],
-    "web": ["browser_open", "browser_snapshot", "browser_screenshot", "http_request"],
+    "browser": _BROWSER_ALL,
+    "web": _BROWSER_ALL + ["http_request"],
     "search": ["browser_open", "memory_search", "rag_search"],
     "google": ["browser_open"],
     "notes": ["create_note", "list_notes", "read_note", "delete_note", "edit_note"],
@@ -508,6 +519,12 @@ _TOOL_SEARCH_INDEX = {
     "screenshot": ["browser_screenshot"],
     "navigate": ["browser_open"],
     "click": ["browser_click", "browser_fill"],
+    "news": ["browser_open", "browser_snapshot"],
+    "internet": ["browser_open", "browser_snapshot"],
+    "browse": ["browser_open", "browser_snapshot", "browser_screenshot"],
+    "url": ["browser_open"],
+    "site": ["browser_open", "browser_snapshot"],
+    "page": ["browser_open", "browser_snapshot"],
     "lovense": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
     "spicy": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
     "duck": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
@@ -578,7 +595,11 @@ def _do_self_config(args: dict) -> str:
 
 def _do_tool_search(query: str) -> str:
     """Search for tools by keyword. Returns matching tool names and activates them."""
-    query_lower = query.lower().strip()
+    import re as _re
+    # Sanitize: strip hallucinated tool_call syntax, XML tags, etc.
+    query = _re.sub(r'[<>{}|"\']', ' ', query)
+    query = _re.sub(r'tool_call|call:|function', '', query, flags=_re.IGNORECASE)
+    query_lower = query.lower().strip().split()[0] if query.strip() else ""  # take first word only
     found = set()
 
     # Direct keyword match
@@ -597,6 +618,14 @@ def _do_tool_search(query: str) -> str:
     if not found:
         return f"No tools found for '{query}'. Available keywords: browser, notes, schedule, secret, mcp, profile, rag, skill, soul, timer, model"
 
+    # Check if tools already activated — short-circuit to prevent repeated tool_search
+    if found and found.issubset(_active_extra_tools):
+        tool_list = ", ".join(sorted(found))
+        return (
+            f"ALREADY ACTIVE: {tool_list}. "
+            f"Do NOT call tool_search again. Call the tool directly (e.g., browser_open)."
+        )
+
     # Activate found tools for this turn
     _active_extra_tools.update(found)
 
@@ -608,7 +637,7 @@ def _do_tool_search(query: str) -> str:
         if fn["name"] in found:
             params = list(fn.get("parameters", {}).get("properties", {}).keys())
             lines.append(f"  - {fn['name']}({', '.join(params)}): {fn.get('description', '')}")
-    lines.append("\nYou can now call these tools directly.")
+    lines.append("\nCall these tools directly NOW. Do NOT call tool_search again.")
     return "\n".join(lines)
 
 
@@ -672,9 +701,12 @@ def execute(name: str, args: dict) -> str:
             return f"Saved (id: {pid[:8]})"
 
         elif name == "read_file":
-            p = _resolve_path(args["path"])
+            _raw = args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+            if not _raw:
+                return "Error: missing required argument 'path'"
+            p = _resolve_path(_raw)
             if not p.exists():
-                return f"Error: file not found: {args['path']}"
+                return f"Error: file not found: {_raw}"
             text = p.read_text(encoding="utf-8", errors="replace")
             total_len = len(text)
             if total_len > 8000:
@@ -688,10 +720,14 @@ def execute(name: str, args: dict) -> str:
             return text
 
         elif name == "write_file":
-            p = _resolve_path(args["path"], for_write=True)
+            _raw = args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+            if not _raw:
+                return "Error: missing required argument 'path'"
+            p = _resolve_path(_raw, for_write=True)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(args["content"], encoding="utf-8")
-            return f"Written {len(args['content'])} chars to {p}"
+            content = args.get("content", "")
+            p.write_text(content, encoding="utf-8")
+            return f"Written {len(content)} chars to {p}"
 
         elif name == "shell":
             cmd = args["command"]
@@ -822,8 +858,10 @@ def execute(name: str, args: dict) -> str:
             import urllib.request
             import urllib.error
             import socket
-            from urllib.parse import urlparse
+            from urllib.parse import urlparse, quote
             url = args["url"]
+            # Encode non-ASCII characters in URL (e.g. Cyrillic)
+            url = quote(url, safe=':/?#[]@!$&\'()*+,;=-._~%')
             # Basic URL validation (no SSRF blocking — qwe-qwe is a local agent)
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https"):
@@ -837,8 +875,15 @@ def execute(name: str, args: dict) -> str:
                 hdrs.update(args["headers"])
             data = body.encode("utf-8") if body else None
             req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+            # For localhost HTTPS, skip SSL verification (self-signed certs are normal)
+            ssl_ctx = None
+            if parsed.scheme == "https" and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+                import ssl as _ssl
+                ssl_ctx = _ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = _ssl.CERT_NONE
             try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
+                with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
                     text = resp.read().decode("utf-8", errors="replace")
                     if len(text) > 10000:
                         text = text[:10000] + "\n...(truncated)"
@@ -855,7 +900,10 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "rag_index":
             import rag
-            path = Path(args["path"]).expanduser()
+            raw_path = args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+            if not raw_path:
+                return "Error: missing required argument 'path'"
+            path = Path(raw_path).expanduser()
             if path.is_dir():
                 results = rag.index_directory(str(path))
                 indexed = sum(1 for r in results if r["status"] == "indexed")
@@ -909,12 +957,11 @@ def get_all_tools(compact: bool = False) -> list[dict]:
     """Get core tools + activated extra tools (from tool_search).
 
     Only core tools are always sent. Extended tools appear after tool_search activates them.
-    This saves ~2000 tokens per request for small models.
+    Fewer tools = better tool-calling accuracy on local models.
     """
     all_available = _get_all_tools_full()
 
     # Check if hidden skills are active — their tools bypass tool_search
-    # Cached per-turn (reset in _reset_active_tools)
     global _spicy_duck_on
     if _spicy_duck_on is None:
         import db as _db

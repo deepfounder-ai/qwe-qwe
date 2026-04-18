@@ -210,6 +210,11 @@ def kv_get(key: str) -> str | None:
     return row[0] if row else None
 
 
+def kv_delete(key: str) -> bool:
+    """Delete a KV entry. Returns True if a row was actually removed."""
+    return execute("DELETE FROM kv WHERE key = ?", (key,)) > 0
+
+
 def kv_inc(key: str, delta: int = 1) -> int:
     """Atomically increment a counter. Creates if not exists.
     Uses RETURNING clause (SQLite 3.35+) for single-statement atomicity.

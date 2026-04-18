@@ -404,7 +404,7 @@ body {
   background: linear-gradient(90deg, transparent, rgba(245,166,35,0.12), transparent);
   pointer-events: none;
 }
-.input-row { display: flex; gap: 10px; align-items: end; max-width: 980px; margin: 0 auto; }
+.input-row { display: flex; gap: 4px; align-items: center; max-width: 980px; margin: 0 auto; }
 .img-preview { position: relative; display: inline-block; margin-bottom: 10px; animation: msgIn 0.3s var(--ease-out); }
 .img-preview img { max-height: 84px; border-radius: var(--radius-md); border: 1px solid var(--border); box-shadow: var(--shadow-md); }
 .img-preview .img-remove {
@@ -414,18 +414,151 @@ body {
   transition: all var(--fast) var(--ease); box-shadow: var(--shadow-md);
 }
 .img-preview .img-remove:hover { transform: scale(1.12) rotate(90deg); }
-.btn-attach, .btn-mic {
-  background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim);
-  width: 46px; height: 46px; border-radius: var(--radius-md); cursor: pointer; font-size: 18px;
+/* Mobile "more" menu (hidden on desktop) */
+.btn-more { display: none; }
+.more-menu { display: none; }
+.btn-more.active {
+  border-color: var(--accent); color: var(--accent);
+  background: rgba(245,166,35,0.08);
+}
+.more-menu.open {
+  display: block;
+  position: absolute; bottom: 60px; left: 12px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  padding: 6px; z-index: 60; min-width: 200px;
+  animation: msgIn 0.2s var(--ease-out);
+}
+.more-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 10px 12px;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text); font-size: 14px; text-align: left;
+  border-radius: var(--radius-md);
+  transition: background var(--fast) var(--ease);
+}
+.more-item:hover, .more-item:active {
+  background: var(--surface2);
+}
+.more-item i { font-size: 18px; color: var(--text-dim); width: 20px; }
+.more-item.active i { color: var(--accent); }
+
+.btn-attach, .btn-mic, .btn-video, .btn-live, .btn-more {
+  background: transparent; border: none; color: var(--text-dim);
+  width: 42px; height: 42px; border-radius: 50%; cursor: pointer; font-size: 20px;
   display: flex; align-items: center; justify-content: center;
   transition: all var(--fast) var(--ease); flex-shrink: 0;
-  box-shadow: var(--shadow-sm);
 }
-.btn-attach:hover, .btn-mic:hover {
-  border-color: rgba(245,166,35,0.5); color: var(--accent);
-  transform: translateY(-1px); box-shadow: var(--shadow-md);
+.btn-attach:hover, .btn-mic:hover, .btn-video:hover, .btn-live:hover, .btn-more:hover {
+  color: var(--accent); background: var(--surface2);
 }
-.btn-attach:active, .btn-mic:active { transform: translateY(0); }
+.btn-attach:active, .btn-mic:active, .btn-video:active, .btn-live:active, .btn-more:active { transform: scale(0.94); }
+/* .btn-more hidden on desktop — the shared flex rule above would show it, re-hide here */
+.btn-more { display: none; }
+.btn-live.active {
+  border-color: #e74c3c; color: #fff;
+  background: linear-gradient(135deg, #e74c3c, #c0392b);
+  box-shadow: 0 0 0 3px rgba(231,76,60,0.18), 0 0 16px rgba(231,76,60,0.4);
+}
+.btn-live.listening { animation: pulse-live-listen 1.4s ease-in-out infinite; }
+.btn-live.thinking  { animation: pulse-live-think 1.8s ease-in-out infinite; }
+.btn-live.speaking  { animation: pulse-live-speak 0.9s ease-in-out infinite; }
+@keyframes pulse-live-listen {
+  0%,100% { box-shadow: 0 0 0 3px rgba(231,76,60,0.2), 0 0 16px rgba(231,76,60,0.45); }
+  50%     { box-shadow: 0 0 0 7px rgba(231,76,60,0.05), 0 0 28px rgba(231,76,60,0.7); }
+}
+@keyframes pulse-live-think {
+  0%,100% { box-shadow: 0 0 0 3px rgba(245,166,35,0.2), 0 0 16px rgba(245,166,35,0.45); border-color:#f5a623; background:linear-gradient(135deg,#f5a623,#d48806);}
+  50%     { box-shadow: 0 0 0 7px rgba(245,166,35,0.05), 0 0 26px rgba(245,166,35,0.7); border-color:#f5a623; background:linear-gradient(135deg,#f5a623,#d48806);}
+}
+@keyframes pulse-live-speak {
+  0%,100% { box-shadow: 0 0 0 3px rgba(60,199,122,0.2), 0 0 16px rgba(60,199,122,0.45); border-color:#3cc77a; background:linear-gradient(135deg,#3cc77a,#2a9d60);}
+  50%     { box-shadow: 0 0 0 7px rgba(60,199,122,0.05), 0 0 26px rgba(60,199,122,0.7); border-color:#3cc77a; background:linear-gradient(135deg,#3cc77a,#2a9d60);}
+}
+.live-status {
+  position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+  background: var(--surface1); border: 1px solid var(--border);
+  padding: 8px 16px; border-radius: 20px;
+  font-size: 12px; color: var(--text-dim); z-index: 60;
+  box-shadow: var(--shadow-lg); backdrop-filter: blur(8px);
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono);
+}
+.live-status .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #e74c3c; box-shadow: 0 0 8px currentColor;
+  animation: pulse-status 1.4s ease-in-out infinite;
+}
+.live-status.thinking .dot { background: #f5a623; }
+.live-status.speaking .dot { background: #3cc77a; }
+.live-volume {
+  display: inline-block; width: 40px; height: 4px;
+  background: var(--surface2); border-radius: 2px; overflow: hidden;
+  margin-left: 6px;
+}
+.live-volume-bar {
+  height: 100%; background: #e74c3c;
+  transition: width 100ms linear; width: 0;
+}
+.btn-video.active {
+  border-color: var(--green); color: var(--green);
+  background: rgba(60,199,122,0.08);
+  box-shadow: 0 0 0 3px rgba(60,199,122,0.12), 0 0 12px rgba(60,199,122,0.25);
+  animation: pulse-video 2.5s ease-in-out infinite;
+}
+@keyframes pulse-video {
+  0%,100% { box-shadow: 0 0 0 3px rgba(60,199,122,0.12), 0 0 12px rgba(60,199,122,0.25); }
+  50%     { box-shadow: 0 0 0 5px rgba(60,199,122,0.06), 0 0 18px rgba(60,199,122,0.35); }
+}
+
+/* Vision camera overlay (PiP style — top-right so it doesn't cover messages) */
+.vision-overlay {
+  position: fixed; top: 60px; right: 24px; z-index: 50;
+  width: 400px; height: 300px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 2px solid rgba(60,199,122,0.4);
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.06);
+  background: #000;
+  animation: msgIn 0.35s var(--ease-out);
+  opacity: 0.92;
+  transition: opacity var(--fast) var(--ease);
+}
+.vision-overlay:hover { opacity: 1; }
+.vision-overlay video {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.vision-controls {
+  position: absolute; top: 6px; right: 6px;
+  display: flex; gap: 4px;
+}
+.vision-controls button {
+  width: 28px; height: 28px;
+  background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.15);
+  color: #fff; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--fast) var(--ease);
+  backdrop-filter: blur(4px);
+}
+.vision-controls button:hover {
+  background: rgba(0,0,0,0.7); border-color: rgba(255,255,255,0.3);
+}
+.vision-status {
+  position: absolute; bottom: 6px; left: 6px;
+  font-size: 10px; color: var(--green); font-family: var(--mono);
+  background: rgba(0,0,0,0.5); padding: 2px 8px;
+  border-radius: var(--radius-sm); backdrop-filter: blur(4px);
+  display: flex; align-items: center; gap: 4px;
+}
+.vision-status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pulse-status 2.5s ease-in-out infinite;
+}
 .btn-mic.recording {
   border-color: var(--error); color: var(--error);
   animation: pulse-rec 1.4s ease-in-out infinite;
@@ -467,26 +600,28 @@ body {
 .msg-file-chip .msg-file-size { color: var(--text-dim); font-family: var(--mono); flex-shrink: 0; }
 #input {
   flex: 1; background: var(--surface2); border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 13px 16px; color: var(--text); font-family: var(--sans); font-size: 14.5px;
-  resize: none; outline: none; max-height: 160px; min-height: 46px; line-height: 1.45;
-  transition: all var(--fast) var(--ease);
+  border-radius: 22px;
+  padding: 11px 18px; color: var(--text); font-family: var(--sans); font-size: 14.5px;
+  resize: none; outline: none; max-height: 160px; min-height: 42px; line-height: 1.45;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
   box-shadow: var(--shadow-sm);
+  margin: 0 4px;
 }
 #input:focus {
-  border-color: rgba(245,166,35,0.5);
-  box-shadow: var(--accent-glow), var(--shadow-md);
+  border-color: rgba(245,166,35,0.4);
+  box-shadow: var(--accent-glow);
   background: #1c1c22;
 }
 #input::placeholder { color: var(--text-dim); }
 #send {
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
-  color: var(--on-accent); border: none; border-radius: var(--radius-md);
-  padding: 0 22px; height: 46px; font-weight: 600; cursor: pointer; font-size: 14px;
+  color: var(--on-accent); border: none; border-radius: 50%;
+  width: 42px; height: 42px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 600; cursor: pointer; font-size: 16px;
   flex-shrink: 0;
   transition: all var(--fast) var(--ease);
   box-shadow: var(--accent-shadow), var(--inset-hl-strong);
-  letter-spacing: 0.01em;
 }
 #send:hover:not(:disabled) {
   transform: translateY(-1px);
@@ -495,8 +630,10 @@ body {
 #send:active:not(:disabled) { transform: translateY(0); box-shadow: var(--accent-shadow); }
 #send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: var(--shadow-sm); }
 .stop-btn {
-  background: var(--error); color: #fff; border: none; border-radius: var(--radius-md);
-  padding: 0 16px; height: 46px; font-size: 16px; cursor: pointer; font-weight: bold; flex-shrink: 0;
+  background: var(--error); color: #fff; border: none; border-radius: 50%;
+  width: 42px; height: 42px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; cursor: pointer; flex-shrink: 0;
   transition: all var(--fast) var(--ease);
   box-shadow: var(--error-shadow);
 }
@@ -1137,9 +1274,12 @@ summary:focus-visible, [role="button"]:focus-visible,
   .chat { padding: 16px 12px 8px; gap: 14px; }
   .input-area { padding: 10px 12px 14px; }
   .input-row { gap: 8px; }
-  .input-row .btn-attach, .input-row .btn-mic { display: none; }
-  #send { padding: 0 18px; height: 44px; font-size: 14px; }
-  #input { max-height: 140px; min-height: 44px; }
+  .input-row .btn-attach, .input-row .btn-mic, .input-row .btn-video, .input-row .btn-live { display: none; }
+  .input-row .btn-more { display: flex; }
+  .vision-overlay { width: 240px; height: 180px; top: 50px; right: 10px; border-radius: var(--radius-md); }
+  #send { width: 40px; height: 40px; font-size: 15px; }
+  #input { max-height: 140px; min-height: 40px; padding: 10px 16px; }
+  .stop-btn { width: 40px; height: 40px; }
   .cron-content, .knowledge-content { padding: 18px 16px; }
   .logo { display: none; }
   .kn-split { flex-direction: column; height: auto; }
@@ -1195,15 +1335,34 @@ summary:focus-visible, [role="button"]:focus-visible,
 <!-- Chat page -->
 <div class="page active" id="pageChatWrap">
   <div class="chat" id="chat"><div class="chat-spacer"></div></div>
+  <!-- Vision camera overlay (PiP) -->
+  <div class="vision-overlay" id="visionOverlay" style="display:none">
+    <video id="visionVideo" autoplay muted playsinline></video>
+    <div class="vision-controls">
+      <button onclick="switchCamera()" id="switchCamBtn" title="Switch camera" style="display:none">⟲</button>
+      <button onclick="toggleVision()" title="Close camera">✕</button>
+    </div>
+    <div class="vision-status" id="visionStatus">LIVE</div>
+  </div>
+  <canvas id="visionCanvas" style="display:none"></canvas>
   <div class="input-area">
     <div class="img-preview" id="imgPreview" style="display:none"></div>
     <div class="input-row">
+      <button class="btn-more" id="moreBtn" onclick="toggleMoreMenu(event)" title="More actions"><i class="ph ph-dots-three-vertical"></i></button>
+      <div class="more-menu" id="moreMenu">
+        <button class="more-item" onclick="document.getElementById('fileInput').click();closeMoreMenu()"><i class="ph ph-paperclip"></i><span>Attach file</span></button>
+        <button class="more-item" id="moreMic" onclick="toggleRecording();closeMoreMenu()"><i class="ph ph-microphone"></i><span>Voice message</span></button>
+        <button class="more-item" id="moreVideo" onclick="toggleVision();closeMoreMenu()"><i class="ph ph-video-camera"></i><span>Camera</span></button>
+        <button class="more-item" id="moreLive" onclick="toggleLiveMode();closeMoreMenu()"><i class="ph ph-radio"></i><span>Live voice mode</span></button>
+      </div>
       <button class="btn-attach" onclick="document.getElementById('fileInput').click()" title="Attach file"><i class="ph ph-paperclip"></i></button>
       <button class="btn-mic" id="micBtn" onclick="toggleRecording()" title="Voice message"><i class="ph ph-microphone"></i></button>
+      <button class="btn-video" id="videoBtn" onclick="toggleVision()" title="Vision mode — camera"><i class="ph ph-video-camera"></i></button>
+      <button class="btn-live" id="liveBtn" onclick="toggleLiveMode()" title="Live voice mode — hands-free conversation"><i class="ph ph-radio"></i></button>
       <input type="file" id="fileInput" accept="image/*,.txt,.py,.js,.ts,.md,.json,.csv,.log,.html,.css,.pdf,.yaml,.yml,.toml,.xml,.sql,.sh,.ini,.cfg,.env" style="display:none" onchange="handleFileSelect(this)">
       <textarea id="input" placeholder="message..." rows="1"></textarea>
-      <button id="send" onclick="send()">Send</button>
-      <button id="stop" class="stop-btn" onclick="stopGeneration()" style="display:none" title="Stop generation">■</button>
+      <button id="send" onclick="send()" title="Send"><i class="ph ph-paper-plane-tilt"></i></button>
+      <button id="stop" class="stop-btn" onclick="stopGeneration()" style="display:none" title="Stop generation"><i class="ph ph-stop-circle"></i></button>
     </div>
     <div class="recording-bar" id="recBar">
       <span class="recording-dot"></span>
@@ -1454,28 +1613,19 @@ summary:focus-visible, [role="button"]:focus-visible,
           </div>
         </div>
         <div class="s-card">
-          <div class="s-card-title"><i class="ph ph-cpu"></i> Local Inference</div>
-          <div class="s-row"><span class="s-row-label">GPU</span><span id="infGpu">detecting...</span></div>
-          <div class="s-row"><span class="s-row-label">Memory</span><span id="infMem">—</span></div>
-          <div class="s-row"><span class="s-row-label">Ollama</span><span id="infOllama">—</span></div>
+          <div class="s-card-title"><i class="ph ph-compass-tool"></i> Tool Router</div>
+          <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">Small instruct model (1-3B) that routes user messages to the right tool. Runs before the main model — dramatically improves tool calling reliability. Leave empty to disable.</p>
           <div class="s-row">
-            <span class="s-row-label">Pull model</span>
-            <select class="s-select" id="infModelSelect" style="max-width:180px"></select>
-            <button class="s-btn" onclick="infPullModel()" style="margin-left:8px"><i class="ph ph-download"></i></button>
-            <button class="s-btn primary" onclick="infConfigure()" style="margin-left:4px"><i class="ph ph-check"></i> Use</button>
+            <span class="s-row-label">Router API URL</span>
+            <input class="s-input" id="routerUrl" type="text" placeholder="http://localhost:8081/v1" style="width:250px"
+              onchange="saveAgentSetting('router_url', this.value, this, 'str')">
           </div>
-          <div id="infModelStatus" style="margin:4px 0 0 0;font-size:12px;color:var(--text-dim)"></div>
-        </div>
-        <div class="s-card">
-          <div class="s-card-title"><i class="ph ph-gear"></i> Inference Settings</div>
           <div class="s-row">
-            <span class="s-row-label">Context window (num_ctx)</span>
-            <input class="s-input" id="infNumCtx" type="number" value="16384" min="2048" max="131072" style="width:100px" onchange="saveInfSettings()">
+            <span class="s-row-label">Router model</span>
+            <input class="s-input" id="routerModel" type="text" placeholder="(auto-detect)" style="width:250px"
+              onchange="saveAgentSetting('router_model', this.value, this, 'str')">
           </div>
-          <div class="s-row" style="opacity:0.7">
-            <span class="s-row-label">Embeddings</span>
-            <span style="font-size:13px;color:var(--text-dim)">FastEmbed (ONNX, local) — MiniLM + SPLADE++</span>
-          </div>
+          <div id="routerStatus" style="font-size:12px;color:var(--text-dim);margin-top:4px;"></div>
         </div>
       </div>
 
@@ -1605,15 +1755,34 @@ summary:focus-visible, [role="button"]:focus-visible,
               </select>
             </div>
             <div class="s-row" style="align-items:center;">
-              <span class="s-row-label">OpenAI key (fallback)</span>
-              <input type="password" class="s-input" id="voiceSttOpenaiKey" style="width:200px;" placeholder="sk-..." onchange="saveAgentSetting('stt_openai_key', this.value, this, 'str')">
+              <span class="s-row-label">Backend</span>
+              <select class="s-input" id="voiceSttBackend" style="width:140px;" onchange="saveAgentSetting('stt_backend', this.value, this, 'str')">
+                <option value="auto">auto (API if key)</option>
+                <option value="local">local (faster-whisper)</option>
+                <option value="api">api (cloud only)</option>
+              </select>
             </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">API URL</span>
+              <input type="text" class="s-input" id="voiceSttApiUrl" style="width:280px;" placeholder="Empty = OpenAI. Groq: https://api.groq.com/openai/v1" onchange="saveAgentSetting('stt_api_url', this.value, this, 'str')">
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">API model</span>
+              <input type="text" class="s-input" id="voiceSttApiModel" style="width:200px;" placeholder="whisper-1" onchange="saveAgentSetting('stt_api_model', this.value, this, 'str')">
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">API key</span>
+              <input type="password" class="s-input" id="voiceSttOpenaiKey" style="width:200px;" placeholder="sk-... or gsk_..." onchange="saveAgentSetting('stt_openai_key', this.value, this, 'str')">
+            </div>
+            <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0;line-height:1.5">
+              <i class="ph ph-lightbulb"></i> <b>Groq (free, fast):</b> set API URL to <code>https://api.groq.com/openai/v1</code>, model to <code>whisper-large-v3-turbo</code>, get free key at console.groq.com
+            </p>
           </div>
         </div>
 
         <!-- TTS Card -->
         <div class="s-card">
-          <div class="s-card-title"><i class="ph ph-speaker-high"></i> Text-to-Speech (TTS) — s2.cpp (S2 Pro GGUF)</div>
+          <div class="s-card-title"><i class="ph ph-speaker-high"></i> Text-to-Speech (TTS)</div>
           <div class="s-row" style="align-items:center;">
             <span class="s-row-label">Enable TTS</span>
             <label class="toggle-switch">
@@ -1628,8 +1797,23 @@ summary:focus-visible, [role="button"]:focus-visible,
           <div style="margin-top:12px;">
             <div class="s-row" style="align-items:center;">
               <span class="s-row-label">API URL</span>
-              <input type="text" class="s-input" id="voiceTtsApiUrl" style="width:280px;" placeholder="http://localhost:3030" onchange="saveAgentSetting('tts_api_url', this.value, this, 'str')">
+              <input type="text" class="s-input" id="voiceTtsApiUrl" style="width:280px;" placeholder="Local: http://localhost:8000/tts · Cloud: https://api.openai.com/v1/audio/speech" onchange="saveAgentSetting('tts_api_url', this.value, this, 'str')">
             </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">API key</span>
+              <input type="password" class="s-input" id="voiceTtsApiKey" style="width:200px;" placeholder="For cloud APIs (OpenAI/ElevenLabs)" onchange="saveAgentSetting('tts_api_key', this.value, this, 'str')">
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">Model</span>
+              <input type="text" class="s-input" id="voiceTtsApiModel" style="width:200px;" placeholder="tts-1" onchange="saveAgentSetting('tts_api_model', this.value, this, 'str')">
+            </div>
+            <div class="s-row" style="align-items:center;">
+              <span class="s-row-label">Voice</span>
+              <input type="text" class="s-input" id="voiceTtsApiVoice" style="width:200px;" placeholder="alloy / echo / nova / shimmer" onchange="saveAgentSetting('tts_api_voice', this.value, this, 'str')">
+            </div>
+            <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0;line-height:1.5">
+              <i class="ph ph-lightbulb"></i> <b>Auto-detection by URL:</b> <code>/v1/audio/speech</code> → OpenAI cloud · <code>/tts</code> → voice-cloning endpoint · <code>/generate</code> → s2.cpp
+            </p>
           </div>
           <details style="margin-top:12px;">
             <summary style="cursor:pointer; color:var(--text-dim); font-size:12px;"><i class="ph ph-user-sound"></i> Voice Cloning (optional)</summary>
@@ -1792,7 +1976,7 @@ summary:focus-visible, [role="button"]:focus-visible,
           </div>
         </div>
         <div class="s-card">
-          <div class="s-card-title"><i class="ph ph-dna"></i> Agent Personality</div>
+          <div class="s-card-title"><i class="ph ph-dna"></i> Agent Settings</div>
           <p style="color:var(--text-dim); font-size:12px; margin:0 0 12px;">Fine-tune agent behavior. Changes take effect immediately.</p>
           <div id="agentSettings">Loading...</div>
         </div>
@@ -2231,6 +2415,26 @@ async function removeTrait(name) {
 // Providers & Models
 let allProviders = [], currentModels = [];
 async function loadSettingsProviders() {
+  // Load router settings
+  try {
+    const rRes = await fetch('/api/settings');
+    const rData = await rRes.json();
+    if (rData.router_url) document.getElementById('routerUrl').value = rData.router_url.value || '';
+    if (rData.router_model) document.getElementById('routerModel').value = rData.router_model.value || '';
+    // Check router connectivity
+    const rUrl = rData.router_url?.value;
+    const statusEl = document.getElementById('routerStatus');
+    if (rUrl) {
+      try {
+        const testRes = await fetch('/api/router/status');
+        const testData = await testRes.json();
+        if (testData.online) statusEl.innerHTML = `<span style="color:#4ade80"><i class="ph ph-check-circle"></i> Connected: ${testData.model}</span>`;
+        else statusEl.innerHTML = `<span style="color:#f44"><i class="ph ph-x-circle"></i> Not reachable</span>`;
+      } catch { statusEl.innerHTML = '<span style="color:var(--text-dim)">Could not check status</span>'; }
+    } else {
+      statusEl.innerHTML = '<span style="color:var(--text-dim)">Disabled (no URL set)</span>';
+    }
+  } catch(e) { console.log('router settings load error', e); }
   const [pRes, sRes] = await Promise.all([fetch('/api/providers'), fetch('/api/status')]);
   allProviders = await pRes.json();
   const status = await sRes.json();
@@ -2940,8 +3144,10 @@ const STAT_LABELS = {
   tool_errors: {label: 'Tool errors', icon: 'ph-warning'},
 };
 
-// ── Inference Setup ──
-async function loadInferenceStatus() {
+// ── Inference Setup (removed — using provider system) ──
+async function loadInferenceStatus() { /* removed */ }
+/*
+async function _loadInferenceStatus_OLD() {
   try {
     const res = await fetch('/api/inference/status');
     const d = await res.json();
@@ -3008,18 +3214,7 @@ async function saveInfSettings() {
     body:JSON.stringify({ollama_num_ctx: parseInt(numCtx)})});
 }
 
-// infPullEmbed removed — FastEmbed downloads models automatically on first use
-
-async function infConfigure() {
-  const model = document.getElementById('infModelSelect').value;
-  const st = document.getElementById('infModelStatus');
-  try {
-    const res = await fetch('/api/inference/configure', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model})});
-    const d = await res.json();
-    st.innerHTML = d.ok ? `<span style="color:var(--green)">✓ ${d.message}</span>` : `<span style="color:var(--error)">${d.error}</span>`;
-    if (d.ok) setTimeout(() => location.reload(), 1000);
-  } catch(e) { st.textContent = 'Error: ' + e.message; }
-}
+*/
 
 // ── Voice Settings ──
 async function loadSettingsVoice() {
@@ -3047,6 +3242,9 @@ async function loadSettingsVoice() {
     // STT settings
     document.getElementById('voiceSttModel').value = d.stt_model || 'base';
     document.getElementById('voiceSttLang').value = d.stt_language || '';
+    document.getElementById('voiceSttBackend').value = d.stt_backend || 'auto';
+    document.getElementById('voiceSttApiUrl').value = d.stt_api_url || '';
+    document.getElementById('voiceSttApiModel').value = d.stt_api_model || 'whisper-1';
     if (d.stt_openai_key) document.getElementById('voiceSttOpenaiKey').value = '••••••••';
 
     // TTS status
@@ -3064,6 +3262,9 @@ async function loadSettingsVoice() {
 
     // TTS settings
     document.getElementById('voiceTtsApiUrl').value = d.tts_api_url || '';
+    document.getElementById('voiceTtsApiModel').value = d.tts_api_model || 'tts-1';
+    document.getElementById('voiceTtsApiVoice').value = d.tts_api_voice || 'alloy';
+    if (d.tts_api_key) document.getElementById('voiceTtsApiKey').value = '••••••••';
     document.getElementById('voiceTtsRefAudio').value = d.tts_ref_audio || '';
     document.getElementById('voiceTtsRefText').value = d.tts_ref_text || '';
   } catch(e) { console.error('Voice settings load error:', e); }
@@ -3709,6 +3910,8 @@ function connect() {
       _pendingToolCalls = [];
       addMessage('assistant', data.text, data);
       setGenerating(false); loadStatus();
+      // Live mode: auto-play TTS then resume listening
+      if (_liveActive) maybePlayLiveTTS(data);
       // Refresh thread list without reloading history (preserves inline images)
       fetch('/api/threads').then(r=>r.json()).then(t=>{threadsList=t;renderTabs();}).catch(()=>{});
     } else if (data.type === 'thinking_delta') {
@@ -4507,6 +4710,7 @@ function renderTabs() {
 async function switchThread(tid) {
   if (tid === activeThreadId) return;
   setGenerating(false);  // unlock input when switching threads
+  _pendingToolCalls = [];  // clear streaming state from previous thread
   await fetch(`/api/threads/${tid}/switch`, {method:'POST'});
   activeThreadId = tid;
   renderTabs(); loadHistory(tid);
@@ -4531,6 +4735,8 @@ async function branchFromMessage(msgText) {
 async function createThread() {
   const name = prompt('Thread name:', `Thread ${threadsList.length+1}`);
   if (!name) return;
+  setGenerating(false);
+  _pendingToolCalls = [];  // clear streaming state
   const res = await fetch('/api/threads', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})});
   const t = await res.json();
   await fetch(`/api/threads/${t.id}/switch`, {method:'POST'});
@@ -4651,6 +4857,151 @@ function addMessage(role, text, meta, imageSrc) {
 }
 function showStatus(text) { removeStatus(); const d=document.createElement('div'); d.className='msg status'; d.id='statusMsg'; d.innerHTML=`<i class="ph ph-spinner"></i> ${escapeHtml(text)}`; chat.appendChild(d); chat.scrollTop=chat.scrollHeight; }
 function removeStatus() { document.getElementById('statusMsg')?.remove(); }
+
+// ── Vision mode (camera) ──
+let _visionActive = false;
+let _visionStream = null;
+let _facingMode = 'environment'; // 'environment' (back) or 'user' (front)
+let _lastCanvasW = 0, _lastCanvasH = 0; // cache to avoid canvas realloc
+
+function _camConstraints(mode) {
+  return { video: { facingMode: mode, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false };
+}
+
+async function toggleVision() {
+  if (_visionActive) {
+    _stopVision();
+  } else {
+    await _startVision();
+  }
+}
+
+async function _startVision() {
+  const overlay = document.getElementById('visionOverlay');
+  const video = document.getElementById('visionVideo');
+  const btn = document.getElementById('videoBtn');
+  const statusEl = document.getElementById('visionStatus');
+
+  // iOS Safari + most mobile browsers require HTTPS for getUserMedia.
+  // Only localhost / 127.0.0.1 are exempt.
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const isLocalhost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+    const isSecure = location.protocol === 'https:';
+    let hint = 'Camera API not available.';
+    if (!isSecure && !isLocalhost) {
+      hint = 'Camera requires HTTPS. Open via https:// or localhost.';
+    }
+    alert(hint);
+    return;
+  }
+
+  try {
+    // iOS Safari prefers simple constraints on first request.
+    // facingMode as a string (not {exact:...}) so it falls back gracefully.
+    _visionStream = await navigator.mediaDevices.getUserMedia(_camConstraints(_facingMode));
+    video.srcObject = _visionStream;
+    // iOS Safari needs an explicit play() call after setting srcObject
+    try { await video.play(); } catch (e) {}
+    overlay.style.display = 'block';
+    btn.classList.add('active');
+    _visionActive = true;
+    statusEl.textContent = 'LIVE';
+    // Show camera switch button on devices with multiple cameras
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(d => d.kind === 'videoinput');
+      document.getElementById('switchCamBtn').style.display = cameras.length > 1 ? 'flex' : 'none';
+    } catch (e) {}
+  } catch (e) {
+    console.error('Camera access failed:', e);
+    let msg = 'Camera access denied';
+    if (e.name === 'NotAllowedError') msg = 'Camera permission denied. Check browser settings.';
+    else if (e.name === 'NotFoundError') msg = 'No camera found on this device.';
+    else if (e.name === 'NotReadableError') msg = 'Camera is in use by another app.';
+    else if (e.name === 'OverconstrainedError') msg = 'Camera constraints not supported.';
+    else msg = `Camera error: ${e.message || e.name || e}`;
+    // Show inline status briefly + alert for mobile where the overlay isn't visible yet
+    if (statusEl) { statusEl.textContent = msg; overlay.style.display = 'block'; }
+    setTimeout(() => { overlay.style.display = 'none'; if (statusEl) statusEl.textContent = ''; }, 4000);
+  }
+}
+
+function _stopVision() {
+  const overlay = document.getElementById('visionOverlay');
+  const btn = document.getElementById('videoBtn');
+  if (_visionStream) {
+    _visionStream.getTracks().forEach(t => t.stop());
+    _visionStream = null;
+  }
+  const video = document.getElementById('visionVideo');
+  if (video) video.srcObject = null;
+  overlay.style.display = 'none';
+  btn.classList.remove('active');
+  _visionActive = false;
+}
+
+async function switchCamera() {
+  if (!_visionActive || !navigator.mediaDevices) return;
+  const newMode = _facingMode === 'environment' ? 'user' : 'environment';
+  if (_visionStream) _visionStream.getTracks().forEach(t => t.stop());
+  _visionStream = null;
+  const video = document.getElementById('visionVideo');
+  try {
+    _visionStream = await navigator.mediaDevices.getUserMedia(_camConstraints(newMode));
+    video.srcObject = _visionStream;
+    try { await video.play(); } catch (e) {}
+    _facingMode = newMode;
+  } catch (e) {
+    console.error('Camera switch failed:', e);
+    try {
+      _visionStream = await navigator.mediaDevices.getUserMedia(_camConstraints(_facingMode));
+      video.srcObject = _visionStream;
+      try { await video.play(); } catch (e2) {}
+    } catch (e2) {
+      _stopVision();
+    }
+  }
+}
+
+// Hide video button entirely if camera API unavailable (old browsers, HTTP on mobile)
+(function checkCameraSupport() {
+  const btn = document.getElementById('videoBtn');
+  if (!btn) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    btn.style.display = 'none';
+  }
+})()
+
+function captureVisionFrame() {
+  /**
+   * Grab the current video frame as a base64 JPEG.
+   * Returns null if vision is off or video isn't ready.
+   */
+  if (!_visionActive) return null;
+  const video = document.getElementById('visionVideo');
+  const canvas = document.getElementById('visionCanvas');
+  if (!video || !canvas || !video.videoWidth) return null;
+
+  // Scale down to ~49K pixels (256×192 equivalent) regardless of aspect ratio
+  let w = video.videoWidth, h = video.videoHeight;
+  const maxArea = 49152;
+  if (w * h > maxArea) {
+    const scale = Math.sqrt(maxArea / (w * h));
+    w = Math.round(w * scale);
+    h = Math.round(h * scale);
+  }
+  // Only reassign dimensions when they change — resetting canvas.width/height
+  // forces a backing-store reallocation in the browser on every call.
+  if (_lastCanvasW !== w || _lastCanvasH !== h) {
+    canvas.width = w; canvas.height = h;
+    _lastCanvasW = w; _lastCanvasH = h;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+  // Strip the data:image/jpeg;base64, prefix
+  return dataUrl.split(',')[1] || null;
+}
 
 // ── Image handling ──
 let pendingImage = null;
@@ -4877,17 +5228,341 @@ async function sendAudioToSTT() {
   }
 }
 
+// ── Mobile "more actions" menu ──
+function toggleMoreMenu(e) {
+  e?.stopPropagation();
+  const menu = document.getElementById('moreMenu');
+  const btn = document.getElementById('moreBtn');
+  const open = menu.classList.toggle('open');
+  btn.classList.toggle('active', open);
+  if (open) {
+    // Sync active states on menu items
+    document.getElementById('moreMic').classList.toggle('active', document.getElementById('micBtn').classList.contains('recording'));
+    document.getElementById('moreVideo').classList.toggle('active', !!_visionActive);
+    document.getElementById('moreLive').classList.toggle('active', !!_liveActive);
+  }
+}
+function closeMoreMenu() {
+  document.getElementById('moreMenu').classList.remove('open');
+  document.getElementById('moreBtn').classList.remove('active');
+}
+// Close when clicking outside
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('moreMenu');
+  const btn = document.getElementById('moreBtn');
+  if (menu?.classList.contains('open') && !menu.contains(e.target) && !btn.contains(e.target)) {
+    closeMoreMenu();
+  }
+});
+
+// ── Live Voice Mode (hands-free conversation) ──
+// State machine: idle → listening → thinking → speaking → listening → ...
+let _liveActive = false;
+let _liveState = 'idle';  // idle | listening | thinking | speaking
+let _liveStream = null;
+let _liveRecorder = null;
+let _liveChunks = [];
+let _liveAudioCtx = null;
+let _liveAnalyser = null;
+let _liveVolumeRaf = null;
+let _liveSilenceStart = 0;
+let _liveHasSpeech = false;
+let _liveSpeechStart = 0;
+let _liveCurrentTTS = null;  // <audio> element of currently playing TTS (for barge-in)
+const LIVE_SILENCE_THRESHOLD = 0.008;  // volume below this = silence (0..1) — low because browser mic has noise suppression
+const LIVE_SILENCE_MS = 1200;          // stop after N ms of silence
+const LIVE_MIN_SPEECH_MS = 400;        // ignore clips shorter than this
+const LIVE_MAX_SPEECH_MS = 60000;      // hard cap — 60s
+const LIVE_DEBUG = true;               // log volume/state to console
+
+async function toggleLiveMode() {
+  if (_liveActive) {
+    // If currently listening and has speech — send what we have
+    if (_liveState === 'listening' && _liveHasSpeech && _liveRecorder && _liveRecorder.state === 'recording') {
+      console.log('[live] manual stop → send current recording');
+      _liveRecorder.stop();
+      return;
+    }
+    stopLiveMode();
+  } else {
+    await startLiveMode();
+  }
+}
+
+async function startLiveMode() {
+  if (!sttAvailable) {
+    addMessage('status', 'STT not configured. Install faster-whisper in Settings → Voice.');
+    setTimeout(removeStatus, 4000);
+    return;
+  }
+  // Force TTS on — it's essential for live mode
+  if (!ttsAvailable) {
+    addMessage('status', 'TTS not configured. Set TTS URL in Settings → Voice.');
+    setTimeout(removeStatus, 4000);
+    return;
+  }
+  try {
+    // Request raw audio: disable noise suppression so VAD can hear speech clearly
+    _liveStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        noiseSuppression: false,
+        echoCancellation: true,
+        autoGainControl: true,
+      }
+    });
+  } catch (err) {
+    addMessage('status', `Mic error: ${err.message}`);
+    setTimeout(removeStatus, 4000);
+    return;
+  }
+  _liveActive = true;
+  document.getElementById('liveBtn').classList.add('active');
+  showLiveStatus('listening');
+  // Auto-enable vision if available
+  if (!_visionActive && navigator.mediaDevices) {
+    try { await toggleVision(); } catch {}
+  }
+  startLiveListening();
+}
+
+function stopLiveMode() {
+  _liveActive = false;
+  _liveState = 'idle';
+  stopLiveListening();
+  stopLiveTTS();
+  if (_liveStream) {
+    _liveStream.getTracks().forEach(t => t.stop());
+    _liveStream = null;
+  }
+  document.getElementById('liveBtn').classList.remove('active', 'listening', 'thinking', 'speaking');
+  removeLiveStatus();
+}
+
+function setLiveState(s) {
+  _liveState = s;
+  const btn = document.getElementById('liveBtn');
+  btn.classList.remove('listening', 'thinking', 'speaking');
+  if (s !== 'idle') btn.classList.add(s);
+  showLiveStatus(s);
+}
+
+function showLiveStatus(state) {
+  let el = document.getElementById('liveStatus');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'liveStatus';
+    el.className = 'live-status';
+    document.body.appendChild(el);
+  }
+  el.className = `live-status ${state}`;
+  const labels = { listening: '👂 Listening', thinking: '🧠 Thinking', speaking: '🔊 Speaking' };
+  const vol = state === 'listening'
+    ? '<span class="live-volume"><span class="live-volume-bar" id="liveVolBar"></span></span><span id="liveRmsText" style="font-size:10px;margin-left:6px;opacity:0.7"></span>'
+    : '';
+  el.innerHTML = `<span class="dot"></span><span>${labels[state] || state}</span>${vol}`;
+}
+
+function removeLiveStatus() {
+  document.getElementById('liveStatus')?.remove();
+}
+
+function startLiveListening() {
+  if (!_liveActive || !_liveStream) return;
+  if (LIVE_DEBUG) console.log('[live] startLiveListening');
+  setLiveState('listening');
+  _liveChunks = [];
+  _liveHasSpeech = false;
+  _liveSilenceStart = 0;
+  _liveSpeechStart = 0;
+  _liveMaxRms = 0;
+  _liveVolLogCounter = 0;
+  _liveListenStart = performance.now();
+
+  // Set up volume analyser for VAD
+  if (!_liveAudioCtx || _liveAudioCtx.state === 'closed') {
+    _liveAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  // Resume context if it was suspended (browsers often suspend without user gesture)
+  if (_liveAudioCtx.state === 'suspended') {
+    _liveAudioCtx.resume().catch(e => console.warn('AudioContext resume failed', e));
+  }
+  const source = _liveAudioCtx.createMediaStreamSource(_liveStream);
+  _liveAnalyser = _liveAudioCtx.createAnalyser();
+  _liveAnalyser.fftSize = 512;
+  _liveAnalyser.smoothingTimeConstant = 0.3;
+  source.connect(_liveAnalyser);
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+  _liveRecorder = new MediaRecorder(_liveStream, mimeType ? { mimeType } : {});
+  _liveRecorder.ondataavailable = (e) => { if (e.data.size > 0) _liveChunks.push(e.data); };
+  _liveRecorder.onstop = () => handleLiveRecordingStopped();
+  _liveRecorder.start();
+  monitorLiveVolume();
+}
+
+function stopLiveListening() {
+  cancelAnimationFrame(_liveVolumeRaf);
+  _liveVolumeRaf = null;
+  if (_liveRecorder && _liveRecorder.state === 'recording') {
+    try { _liveRecorder.stop(); } catch {}
+  }
+  if (_liveAnalyser) {
+    try { _liveAnalyser.disconnect(); } catch {}
+  }
+}
+
+let _liveVolLogCounter = 0;
+let _liveMaxRms = 0;
+let _liveListenStart = 0;
+function monitorLiveVolume() {
+  if (!_liveActive || _liveState !== 'listening' || !_liveAnalyser) return;
+  const buf = new Float32Array(_liveAnalyser.fftSize);
+  _liveAnalyser.getFloatTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  const rms = Math.sqrt(sum / buf.length);
+  if (rms > _liveMaxRms) _liveMaxRms = rms;
+  const bar = document.getElementById('liveVolBar');
+  if (bar) bar.style.width = `${Math.min(100, rms * 500)}%`;
+  const rmsText = document.getElementById('liveRmsText');
+  if (rmsText) rmsText.textContent = `${rms.toFixed(4)} / ${LIVE_SILENCE_THRESHOLD}`;
+
+  // Debug: log every ~500ms
+  if (LIVE_DEBUG && (++_liveVolLogCounter % 30 === 0)) {
+    console.log(`[live] rms=${rms.toFixed(4)} max=${_liveMaxRms.toFixed(4)} threshold=${LIVE_SILENCE_THRESHOLD} hasSpeech=${_liveHasSpeech}`);
+  }
+
+  const now = performance.now();
+  if (rms > LIVE_SILENCE_THRESHOLD) {
+    // Speech detected
+    if (!_liveHasSpeech) {
+      _liveHasSpeech = true;
+      _liveSpeechStart = now;
+      if (LIVE_DEBUG) console.log(`[live] SPEECH START rms=${rms.toFixed(4)}`);
+    }
+    _liveSilenceStart = 0;
+  } else if (_liveHasSpeech) {
+    // We had speech, now silence
+    if (_liveSilenceStart === 0) _liveSilenceStart = now;
+    const silenceDur = now - _liveSilenceStart;
+    const speechDur = now - _liveSpeechStart;
+    if (silenceDur >= LIVE_SILENCE_MS && speechDur >= LIVE_MIN_SPEECH_MS) {
+      // Silence after speech → finish recording
+      if (LIVE_DEBUG) console.log(`[live] SPEECH END speech=${speechDur.toFixed(0)}ms silence=${silenceDur.toFixed(0)}ms`);
+      if (_liveRecorder && _liveRecorder.state === 'recording') _liveRecorder.stop();
+      return;
+    }
+  }
+  // Hard cap on recording length
+  if (_liveHasSpeech && (now - _liveSpeechStart) > LIVE_MAX_SPEECH_MS) {
+    if (LIVE_DEBUG) console.log('[live] max speech duration reached');
+    if (_liveRecorder && _liveRecorder.state === 'recording') _liveRecorder.stop();
+    return;
+  }
+  // Timeout: if no speech detected in 15 sec, restart the listener cycle
+  if (!_liveHasSpeech && _liveListenStart && (now - _liveListenStart) > 15000) {
+    if (LIVE_DEBUG) console.log(`[live] no speech in 15s (max rms was ${_liveMaxRms.toFixed(4)}), restarting listener`);
+    if (_liveRecorder && _liveRecorder.state === 'recording') _liveRecorder.stop();
+    return;
+  }
+  _liveVolumeRaf = requestAnimationFrame(monitorLiveVolume);
+}
+
+async function handleLiveRecordingStopped() {
+  if (!_liveActive) return;
+  if (!_liveHasSpeech || _liveChunks.length === 0) {
+    // No speech captured — go back to listening
+    setTimeout(() => { if (_liveActive) startLiveListening(); }, 100);
+    return;
+  }
+  setLiveState('thinking');
+  // Transcribe
+  const blob = new Blob(_liveChunks, { type: _liveRecorder.mimeType || 'audio/webm' });
+  const ext = (_liveRecorder.mimeType || '').includes('webm') ? 'webm' : 'ogg';
+  const formData = new FormData();
+  formData.append('file', blob, `live.${ext}`);
+  let text = '';
+  try {
+    const resp = await fetch('/api/transcribe', { method: 'POST', body: formData });
+    const data = await resp.json();
+    text = (data.text || '').trim();
+  } catch (err) {
+    console.error('live STT failed', err);
+  }
+  if (!text || text.length < 2) {
+    // Nothing meaningful transcribed — back to listening
+    if (_liveActive) startLiveListening();
+    return;
+  }
+  // Send via existing pipeline (captures camera frame automatically)
+  input.value = text;
+  send();
+  // Reply arrival + TTS playback handled in maybePlayLiveTTS() hooked into the WS reply handler
+}
+
+function maybePlayLiveTTS(meta) {
+  // Called from WS reply handler when an assistant message arrives with audio_url
+  if (!_liveActive) return false;
+  setLiveState('speaking');
+  if (!meta || !meta.audio_url) {
+    // No TTS audio — just go back to listening
+    if (_liveActive) startLiveListening();
+    return false;
+  }
+  stopLiveTTS();
+  const audio = new Audio(meta.audio_url);
+  _liveCurrentTTS = audio;
+  audio.onended = () => {
+    _liveCurrentTTS = null;
+    if (_liveActive) startLiveListening();
+  };
+  audio.onerror = () => {
+    _liveCurrentTTS = null;
+    if (_liveActive) startLiveListening();
+  };
+  audio.play().catch(err => {
+    console.error('TTS playback failed', err);
+    _liveCurrentTTS = null;
+    if (_liveActive) startLiveListening();
+  });
+  return true;
+}
+
+function stopLiveTTS() {
+  if (_liveCurrentTTS) {
+    try { _liveCurrentTTS.pause(); _liveCurrentTTS.currentTime = 0; } catch {}
+    _liveCurrentTTS = null;
+  }
+}
+
 // ── Send ──
+let _generating = false;
 function send() {
+  // Hard guard: prevent double-send when previous request is still generating.
+  // This protects against websocket reconnects, thread switches, or Enter-key spam
+  // that could otherwise unlock the send button mid-generation.
+  if (_generating) return;
+
+  // Auto-capture camera frame when vision mode is active.
+  // This happens BEFORE the pendingImage check so the user's explicitly
+  // attached image (drag-drop) takes priority over the camera frame.
+  if (_visionActive && !pendingImage) {
+    const frame = captureVisionFrame();
+    if (frame) pendingImage = frame;
+  }
+
   const text = input.value.trim();
   if (!text && !pendingImage && !pendingDocument) return;
   if (!ws || ws.readyState !== 1) return;
   const msgText = text || (pendingImage ? 'What\'s in this image?' : (pendingDocument ? `Read file: ${pendingDocument.filename}` : ''));
   const displayMsg = pendingDocument ? `${msgText}\n\n[${pendingDocument.filename}]` : msgText;
-  addMessage('user', displayMsg, null, pendingImage ? `data:image/png;base64,${pendingImage}` : null);
+  addMessage('user', displayMsg, null, pendingImage ? `data:image/jpeg;base64,${pendingImage}` : null);
   const payload = { text: msgText, thread_id: activeThreadId };
   if (pendingImage) payload.image_b64 = pendingImage;
   if (pendingDocument) payload.document = pendingDocument;
+  if (_liveActive) payload.live = true;  // Force TTS on server side
   ws.send(JSON.stringify(payload));
   input.value = ''; input.style.height = 'auto';
   clearImage();
@@ -4897,6 +5572,7 @@ function send() {
   setGenerating(true);
 }
 function setGenerating(on) {
+  _generating = on;
   sendBtn.disabled = on;
   input.disabled = on;
   document.getElementById('stop').style.display = on ? 'inline-block' : 'none';

@@ -234,7 +234,7 @@ def to_prompt(soul: dict) -> str:
     lines.append("""
 Rules:
 1. ACT, DON'T ASK. When user requests an action, IMMEDIATELY call a tool. Pick sensible defaults and execute.
-2. ALWAYS use tools. Never say "I would..." — DO IT. No tool call = IT DIDN'T HAPPEN.
+2. ALWAYS use tools. NEVER say "I'll try" or "Let me search" without ACTUALLY calling a tool in the SAME response. No tool call = IT DIDN'T HAPPEN.
 3. If unsure, TRY first with a tool, then report. Wrong guess > asking.
 4. Keep responses short. No headers (# ##), no tables, no "Need anything else?".
 5. For HTTP: use http_request tool, NEVER curl/wget in shell.
@@ -243,7 +243,8 @@ Rules:
 8. Memory: search before saving (avoid duplicates). Tags: user, project, fact, task, decision, idea.
 9. When user says "remember"/"запомни" → ALWAYS call memory_save.
 10. Past experiences appear as [EXP] in context — repeat successes, avoid failed approaches.
-11. TOOL SEARCH: You only have core tools loaded. For more (browser, notes, schedule, secret, mcp, skill, rag, profile, soul, timer, model) call tool_search("keyword") first — it activates the tools you need.""")
+11. WEB SEARCH: For ANY web/internet task, call browser_open("https://duckduckgo.com/?q=your+query") then browser_snapshot(). NEVER use Google (blocks bots). NEVER use http_request for web pages — use browser_open.
+12. MORE TOOLS: For notes, schedule, secret, mcp, skill, rag, profile, soul, timer, model — call tool_search("keyword") first.""")
 
     # ── DYNAMIC SUFFIX (changes per session → KV cache miss from here) ──
     lines.append("\n--- dynamic context ---")

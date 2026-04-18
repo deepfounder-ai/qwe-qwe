@@ -386,6 +386,96 @@ def test_active_skills_dir_wiring():
         assert (active_dir / "domain_tool.py").exists()
 
 
+def test_preset_skills_auto_enable_on_activate():
+    """Preset's custom skills must be auto-added to active_skills on activate,
+    and removed on deactivate — without touching the user's manual changes."""
+    import presets
+    import skills as _skills
+    import db
+    _reset_db()
+
+    manifest = json.loads(json.dumps(MINIMAL_MANIFEST))
+    manifest["id"] = "skill-preset"
+    manifest["skills"] = {
+        "custom": [
+            {"path": "skills/domain_a.py", "name": "domain_a", "description": "A"},
+            {"path": "skills/domain_b.py", "name": "domain_b", "description": "B"},
+        ]
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _write_fixture(Path(tmp), manifest=manifest)
+        (src / "skills").mkdir()
+        for name in ("domain_a", "domain_b"):
+            (src / "skills" / f"{name}.py").write_text(
+                f'DESCRIPTION = "{name}"\nTOOLS = []\ndef execute(n, a): return ""\n',
+                encoding="utf-8",
+            )
+        presets.install(presets.load_directory(src))
+
+        # Baseline: user has some custom active set (adds "timer" manually)
+        baseline = _skills.get_active() | {"timer"}
+        _skills.set_active(baseline)
+
+        presets.activate("skill-preset")
+
+        # Preset skills now active
+        active = _skills.get_active()
+        assert "domain_a" in active, f"domain_a not enabled: {active}"
+        assert "domain_b" in active, f"domain_b not enabled: {active}"
+        # User's manual additions preserved
+        assert "timer" in active
+
+        # Delta tracked in KV
+        raw = db.kv_get("preset_added_skills")
+        assert raw
+        added = set(json.loads(raw))
+        assert added == {"domain_a", "domain_b"}
+
+        presets.deactivate()
+
+        # Preset skills removed, user's manual set restored exactly
+        active_after = _skills.get_active()
+        assert "domain_a" not in active_after
+        assert "domain_b" not in active_after
+        assert "timer" in active_after
+        # Delta KV cleared
+        assert not db.kv_get("preset_added_skills")
+
+
+def test_preset_skill_auto_enable_preserves_manual_disable():
+    """If the user disables a preset skill during the session, deactivate
+    must not re-enable it (subtraction is a no-op for already-removed names).
+    """
+    import presets
+    import skills as _skills
+    _reset_db()
+
+    manifest = json.loads(json.dumps(MINIMAL_MANIFEST))
+    manifest["id"] = "manual-disable"
+    # Filename stem MUST match the manifest name (see SPEC.md).
+    manifest["skills"] = {
+        "custom": [{"path": "skills/domain_x.py", "name": "domain_x"}]
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _write_fixture(Path(tmp), manifest=manifest)
+        (src / "skills").mkdir()
+        (src / "skills" / "domain_x.py").write_text(
+            'DESCRIPTION = "x"\nTOOLS = []\ndef execute(n, a): return ""\n',
+            encoding="utf-8",
+        )
+        presets.install(presets.load_directory(src))
+        presets.activate("manual-disable")
+        assert "domain_x" in _skills.get_active()
+
+        # User manually disables the preset-supplied skill
+        _skills.disable("domain_x")
+        assert "domain_x" not in _skills.get_active()
+
+        # Deactivate — domain_x should stay off (it's already off)
+        presets.deactivate()
+        assert "domain_x" not in _skills.get_active()
+
+
 # ── Security-focused tests (added in v0.12.1) ─────────────────────────
 
 def test_id_regex_rejects_traversal():
@@ -900,6 +990,8 @@ if __name__ == "__main__":
         test_single_active_constraint,
         test_system_prompt_suffix_wiring,
         test_active_skills_dir_wiring,
+        test_preset_skills_auto_enable_on_activate,
+        test_preset_skill_auto_enable_preserves_manual_disable,
         # security-focused v0.12.1 tests
         test_id_regex_rejects_traversal,
         test_uninstall_missing_id_is_noop,

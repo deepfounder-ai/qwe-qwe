@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.12.2"
+VERSION = "0.13.0"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -136,7 +136,7 @@ MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
 MAX_EXPERIENCE_RESULTS = 2 # top-K past experience cases injected per turn
 MAX_TOOL_ROUNDS = 10       # max consecutive tool calls per turn
 COMPACTION_THRESHOLD = 20  # auto-compact after N messages in DB
-THINKING_ENABLED = False   # send enable_thinking to model (toggle via /thinking or settings)
+THINKING_ENABLED = True    # send enable_thinking to model (toggle via /thinking or settings)
 
 # ── Runtime settings (DB-backed) ──
 # These are read from kv store at runtime, with config.py values as defaults.
@@ -164,14 +164,23 @@ EDITABLE_SETTINGS = {
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
+    # ── Tool Router (small instruct model for tool selection) ──
+    "router_url":           ("setting:router_url",            str, "",     "Router model API URL (e.g. http://localhost:8081/v1). Empty = disabled", "", ""),
+    "router_model":         ("setting:router_model",          str, "",     "Router model name (empty = auto-detect from endpoint)", "", ""),
     # ── Voice: STT ──
-    "stt_model":            ("setting:stt_model",             str, "base", "Whisper model size (tiny/base/small/medium)", "", ""),
+    "stt_backend":          ("setting:stt_backend",           str, "auto", "STT backend: auto (API if key else local), local, api", "", ""),
+    "stt_model":            ("setting:stt_model",             str, "base", "Whisper model size (tiny/base/small/medium) — local only", "", ""),
     "stt_language":         ("setting:stt_language",           str, "",     "STT language (empty=auto, en, ru, etc.)", "", ""),
-    "stt_openai_key":       ("setting:stt_openai_key",        str, "",     "OpenAI API key for cloud STT fallback", "", ""),
+    "stt_api_url":          ("setting:stt_api_url",           str, "",     "STT API URL (OpenAI-compatible). Empty = api.openai.com. Examples: Groq https://api.groq.com/openai/v1", "", ""),
+    "stt_api_model":        ("setting:stt_api_model",         str, "whisper-1", "STT API model name (whisper-1, whisper-large-v3-turbo, etc.)", "", ""),
+    "stt_openai_key":       ("setting:stt_openai_key",        str, "",     "API key for STT (OpenAI / Groq / any OpenAI-compatible)", "", ""),
     # ── Voice: TTS (s2.cpp HTTP API) ──
     "tts_enabled":          ("setting:tts_enabled",           int, 0,     "Enable TTS voice responses (0=off, 1=on)", 0, 1),
-    "tts_api_url":          ("setting:tts_api_url",           str, "http://localhost:3030", "s2.cpp TTS server URL", "", ""),
-    "tts_ref_audio":        ("setting:tts_ref_audio",         str, "",     "Reference audio for voice cloning (5-30s WAV)", "", ""),
+    "tts_api_url":          ("setting:tts_api_url",           str, "http://localhost:3030", "TTS server URL (s2.cpp /generate, custom /tts, or OpenAI-compatible /v1/audio/speech)", "", ""),
+    "tts_api_key":          ("setting:tts_api_key",           str, "",     "TTS API key (for OpenAI / ElevenLabs / any cloud API)", "", ""),
+    "tts_api_model":        ("setting:tts_api_model",         str, "tts-1", "TTS API model (tts-1, tts-1-hd, or provider-specific)", "", ""),
+    "tts_api_voice":        ("setting:tts_api_voice",         str, "alloy", "TTS API voice (alloy, echo, fable, onyx, nova, shimmer)", "", ""),
+    "tts_ref_audio":        ("setting:tts_ref_audio",         str, "",     "Reference audio for voice cloning (5-30s WAV) — local backends only", "", ""),
     "tts_ref_text":         ("setting:tts_ref_text",          str, "",     "Transcript of reference audio", "", ""),
 }
 

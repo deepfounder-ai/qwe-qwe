@@ -77,15 +77,16 @@ def _emit_tool_call(name: str, args_preview: str, result_preview: str = ""):
             pass
 
 
-def _resize_image_b64(b64: str, max_side: int = 512, quality: int = 80) -> str:
-    """Resize image to fit within max_side px and re-encode as JPEG."""
+def _resize_image_b64(b64: str, max_area: int = 49152, quality: int = 80) -> str:
+    """Resize image to fit within *max_area* pixels and re-encode as JPEG."""
     try:
         from PIL import Image
+        import math
         raw = base64.b64decode(b64)
         img = Image.open(io.BytesIO(raw))
         w, h = img.size
-        if max(w, h) > max_side:
-            ratio = max_side / max(w, h)
+        if w * h > max_area:
+            ratio = math.sqrt(max_area / (w * h))
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
@@ -726,21 +727,27 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                 lines.append(f"- [entity] {e['text']} ({rel_names})")
                 seen_texts.add(e["text"])
 
-        # Global search (fill remaining slots — all tags)
+        # Global search (fill remaining slots).
+        # Session isolation: only cross-thread SYNTHESIZED knowledge (fact/knowledge/user/project/decision/idea) —
+        # NOT raw messages from other threads.
         max_memory = config.get("max_memory_results")
         remaining = max_memory - (len(lines) - 1)
         if remaining > 0:
-            global_results = memory.search_by_vector(
-                vector, limit=remaining + 2,
-                query_text=user_input,
-                score_threshold=MEMORY_SCORE_MIN,
-            )
-            for r in global_results:
+            _CROSS_THREAD_TAGS = ("fact", "knowledge", "user", "project", "decision", "idea")
+            for _tag in _CROSS_THREAD_TAGS:
                 if len(lines) - 1 >= max_memory:
                     break
-                if r["text"] not in seen_texts:
-                    lines.append(f"- [{r['tag']}] {r['text']}")
-                    seen_texts.add(r["text"])
+                tag_results = memory.search_by_vector(
+                    vector, limit=2, tag=_tag,
+                    query_text=user_input,
+                    score_threshold=MEMORY_SCORE_MIN,
+                )
+                for r in tag_results:
+                    if len(lines) - 1 >= max_memory:
+                        break
+                    if r["text"] not in seen_texts:
+                        lines.append(f"- [{r['tag']}] {r['text']}")
+                        seen_texts.add(r["text"])
 
         # Experience cases (higher threshold — only proven patterns)
         if config.get("experience_learning"):
@@ -832,15 +839,21 @@ def _build_messages(user_input: str, thread_id: str | None = None,
     elif source == "web":
         system_text += "\nYou are chatting via the web UI."
 
-    # Thinking mode — inject prompt instruction for models that don't natively support it
-    thinking_on = db.kv_get("thinking_enabled")
-    if thinking_on == "true":
+    # Thinking mode — inject prompt instruction for all models (default enabled)
+    _thinking_raw = db.kv_get("thinking_enabled")
+    thinking_on = _thinking_raw != "false"  # default True when unset
+    _model_lower = providers.get_model().lower()
+    _is_qwen = "qwen" in _model_lower or "qw" in _model_lower
+    if thinking_on:
         system_text += (
             "\n\nIMPORTANT: Before answering, think through the problem step by step. "
             "Write your reasoning inside <think>...</think> tags. "
             "After thinking, write your final answer outside the tags. "
             "Example:\n<think>\nLet me analyze this...\n</think>\nHere is my answer."
         )
+    elif _is_qwen:
+        # Qwen3: disable thinking mode to prevent empty responses and improve tool calling
+        system_text += "\n\n/no_think"
 
     # Progressive context injection: skip memory for trivial queries
     # (saves ~200ms embedding + Qdrant latency + context tokens)
@@ -869,11 +882,14 @@ def _build_messages(user_input: str, thread_id: str | None = None,
     while history and history[-1]["role"] == "user":
         history.pop()
 
-    msgs.extend(history)
+    # Strip meta / extra fields — LLM APIs reject unknown properties
+    _ALLOWED_MSG_KEYS = {"role", "content", "tool_calls", "tool_call_id", "name"}
+    for m in history:
+        msgs.append({k: v for k, v in m.items() if k in _ALLOWED_MSG_KEYS})
 
     # New user message — multimodal if image provided
     if image_b64:
-        image_b64 = _resize_image_b64(image_b64, max_side=512)
+        image_b64 = _resize_image_b64(image_b64)
         user_content = [
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
             {"type": "text", "text": user_input or "What's in this image?"},
@@ -1221,14 +1237,17 @@ def _run_inner(user_input: str, thread_id: str | None,
             emitter.on("tool_start", _on_start)
             emitter.on("tool_end", _on_end)
 
+        _tools = tools.get_all_tools(compact=True)
+        # Lower temperature when tools are present — improves tool-calling reliability
+        _temp = min(soul.get_temperature(), 0.3) if _tools else soul.get_temperature()
         loop_result = run_loop(
             client=client,
             model=_model,
             messages=messages,
-            tools=tools.get_all_tools(compact=True),
+            tools=_tools,
             emitter=emitter,
             budget=BudgetLimits.from_config(),
-            temperature=soul.get_temperature(),
+            temperature=_temp,
             presence_penalty=config.get("presence_penalty"),
             max_tokens=2048,
             tool_executor=tools.execute,
@@ -1684,15 +1703,19 @@ def _run_inner(user_input: str, thread_id: str | None,
         result.thinking = reasoning_content.strip() or _extract_thinking(full_content) or ""
         raw_reply = _strip_thinking(full_content)
 
-        # Retry: if model hedges instead of acting (no tool calls on round 0)
-        # Only nudge for substantial requests (long user input = likely needs tools)
+        # Retry: if model hedges instead of acting (no tool calls)
         # Nudge messages are TEMPORARY — removed after retry so they don't poison history
-        if (rounds == 0 and not tool_calls_data
-                and len(user_input.strip()) > 40
-                and len(raw_reply) < 3000 and len(raw_reply) > 20):
+        _hedge_phrases = ("попробу", "let me", "i'll try", "i will", "давай", "поищу", "посмотрю", "let me search", "let me check")
+        _reply_looks_like_hedge = any(p in raw_reply.lower() for p in _hedge_phrases)
+        _reply_is_empty = len(raw_reply.strip()) == 0 and len(full_content) > 0  # thought but no reply
+        if (not tool_calls_data
+                and (_reply_is_empty
+                     or (len(raw_reply) > 20 and len(raw_reply) < 3000
+                         and (rounds == 0 and len(user_input.strip()) > 40 or _reply_looks_like_hedge)))):
             # Add temporary nudge (will be removed after this round)
-            messages.append({"role": "assistant", "content": raw_reply})
-            messages.append({"role": "user", "content": "[system] Use the tools to complete the task."})
+            nudge_text = raw_reply if raw_reply.strip() else "I need to think about this..."
+            messages.append({"role": "assistant", "content": nudge_text})
+            messages.append({"role": "user", "content": "[system] Don't just say what you'll do — actually call the tool NOW. Reply with actual content."})
             _console.print(f"  [dim]🔄 nudging to use tools...[/]")
             _emit_status("🔄 nudging to act...")
             rounds += 1

@@ -8,7 +8,7 @@ import config
 class BudgetLimits:
     """Configurable budget limits. 0 = unlimited."""
     max_turns: int = 30
-    max_tool_calls: int = 200
+    max_tool_calls: int = 25
     max_input_tokens: int = 0
     max_output_tokens: int = 0
 

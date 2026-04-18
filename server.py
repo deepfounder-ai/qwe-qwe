@@ -315,6 +315,25 @@ class StagedUpload:
                     # resource leak after this returns.
 
 
+def _safe_print(text: str) -> None:
+    """Print with fallback for terminals that can't render unicode (e.g. cp1251)."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", errors="ignore").decode("ascii"))
+
+
+def _get_lan_ip() -> str | None:
+    """Discover this machine's LAN IP via a UDP connect to 8.8.8.8."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return None
+
+
 async def _stage_upload(request: Request, subdir: str, default_name: str = "file"
                         ) -> StagedUpload | JSONResponse:
     """Validate a multipart upload, sanitize the filename, stage it under
@@ -522,19 +541,33 @@ async def voice_status():
     import stt, tts
     # Check faster-whisper
     has_whisper = stt._check_faster_whisper()
-    # Check ffmpeg
+    # Check audio decoder (ffmpeg CLI or bundled PyAV)
     import shutil
-    has_ffmpeg = shutil.which("ffmpeg") is not None
+    has_ffmpeg_cli = shutil.which("ffmpeg") is not None
+    try:
+        import av  # noqa: F401
+        has_pyav = True
+    except ImportError:
+        has_pyav = False
+    has_ffmpeg = has_ffmpeg_cli or has_pyav  # either works
     return {
         "stt": stt.is_available(),
         "tts": tts.is_available(),
         "has_whisper": has_whisper,
         "has_ffmpeg": has_ffmpeg,
+        "has_pyav": has_pyav,
+        "has_ffmpeg_cli": has_ffmpeg_cli,
         "stt_model": config.get("stt_model"),
         "stt_language": config.get("stt_language"),
+        "stt_backend": config.get("stt_backend"),
+        "stt_api_url": config.get("stt_api_url"),
+        "stt_api_model": config.get("stt_api_model"),
         "stt_openai_key": bool(config.get("stt_openai_key")),
         "tts_enabled": str(config.get("tts_enabled")) == "1",
         "tts_api_url": config.get("tts_api_url"),
+        "tts_api_model": config.get("tts_api_model"),
+        "tts_api_voice": config.get("tts_api_voice"),
+        "tts_api_key": bool(config.get("tts_api_key")),
         "tts_ref_audio": config.get("tts_ref_audio"),
         "tts_ref_text": config.get("tts_ref_text"),
     }
@@ -920,14 +953,7 @@ async def network_status():
     """Get network access status."""
     lan_val = db.kv_get("network:lan_access")
     lan = lan_val != "0"
-    import socket
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-    except Exception:
-        ip = "unknown"
-    return {"lan_access": lan, "ip": ip, "port": _current_port}
+    return {"lan_access": lan, "ip": _get_lan_ip() or "unknown", "port": _current_port}
 
 
 @app.post("/api/network")
@@ -992,7 +1018,10 @@ async def abort_generation():
 
 @app.get("/api/thinking")
 async def get_thinking():
-    return {"enabled": db.kv_get("thinking_enabled") == "true"}
+    val = db.kv_get("thinking_enabled")
+    # Default to enabled if not set
+    enabled = val != "false" if val is not None else True
+    return {"enabled": enabled}
 
 
 @app.post("/api/thinking")
@@ -1005,6 +1034,27 @@ async def set_thinking(data: dict):
 @app.get("/api/streaming")
 async def get_streaming():
     return {"enabled": db.kv_get("streaming_enabled") != "false"}  # on by default
+
+
+@app.get("/api/router/status")
+async def router_status():
+    """Check if tool router model is reachable."""
+    import config as _cfg
+    url = _cfg.get("router_url")
+    if not url:
+        return {"online": False, "model": None, "error": "not configured"}
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{url}/models")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            models = data.get("data") or data.get("models") or []
+            if models:
+                name = models[0].get("id") or models[0].get("name")
+                return {"online": True, "model": name}
+        return {"online": False, "model": None, "error": "no models found"}
+    except Exception as e:
+        return {"online": False, "model": None, "error": str(e)[:100]}
 
 
 @app.post("/api/streaming")
@@ -1792,11 +1842,13 @@ async def websocket_chat(ws: WebSocket):
                 thread_id = msg.get("thread_id")  # optional — None uses active
                 image_b64 = msg.get("image_b64")  # optional base64 image
                 document = msg.get("document")    # optional {file_b64, filename}
+                live_mode = bool(msg.get("live"))  # per-request flag: force TTS reply
             except json.JSONDecodeError:
                 user_input = data.strip()
                 thread_id = None
                 image_b64 = None
                 document = None
+                live_mode = False
 
             if not user_input and not image_b64 and not document:
                 continue
@@ -1938,12 +1990,12 @@ async def websocket_chat(ws: WebSocket):
                 result = await agent_task
                 await drain_task  # ensure all queued messages are sent
 
-                # TTS: synthesize voice for reply if voice mode is on
+                # TTS: synthesize voice for reply if voice mode is on OR live mode (per-request flag)
                 audio_url = None
                 voice_mode = db.kv_get("voice_mode:web") == "1"
                 try:
                     import tts
-                    if voice_mode and tts.is_available() and result["reply"]:
+                    if (voice_mode or live_mode) and tts.is_available() and result["reply"]:
                         audio_data = await loop.run_in_executor(
                             None, functools.partial(tts.synthesize, result["reply"], format="mp3")
                         )
@@ -2120,111 +2172,6 @@ def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
 
 # ── Inference setup endpoints ──
 
-@app.get("/api/inference/status")
-async def inference_status():
-    """Detect hardware and check Ollama status."""
-    import inference_setup
-    gpu = inference_setup.detect_gpu()
-    recommended = inference_setup.recommend_model(gpu)
-    ollama_installed = inference_setup._check_ollama_installed()
-    ollama_running = inference_setup._check_ollama_running() if ollama_installed else False
-
-    # List available models from Ollama if running
-    available_models = []
-    if ollama_running:
-        try:
-            import requests as _req
-            r = _req.get("http://localhost:11434/api/tags", timeout=3)
-            if r.ok:
-                available_models = [m["name"] for m in r.json().get("models", [])]
-        except Exception:
-            pass
-
-    models = [
-        {"tag": "qwen3.5:0.8b", "size": "0.8B", "ram": "~1GB", "desc": "Minimal, very fast"},
-        {"tag": "qwen3.5:2b", "size": "2B", "ram": "~2.7GB", "desc": "Light, basic tasks"},
-        {"tag": "qwen3.5:4b", "size": "4B", "ram": "~3.4GB", "desc": "Good balance"},
-        {"tag": "qwen3.5:9b", "size": "9B", "ram": "~6.6GB", "desc": "Best quality/speed ratio"},
-        {"tag": "qwen3.5:27b", "size": "27B", "ram": "~17GB", "desc": "High quality, 24GB+"},
-        {"tag": "qwen3.5:35b", "size": "35B", "ram": "~24GB", "desc": "Maximum, 48GB+"},
-    ]
-
-    return {
-        "gpu": gpu,
-        "recommended": recommended,
-        "ollama_installed": ollama_installed,
-        "ollama_running": ollama_running,
-        "available_models": available_models,
-        "models": models,
-    }
-
-
-_pull_status: dict = {}  # model -> {status, progress, detail}
-
-
-@app.post("/api/inference/pull")
-async def inference_pull(request: Request):
-    """Pull a model via Ollama with progress tracking."""
-    data = await request.json()
-    model = data.get("model", "")
-    if not model:
-        return JSONResponse({"error": "model required"}, status_code=400)
-
-    import inference_setup
-    if not inference_setup._check_ollama_installed():
-        return JSONResponse({"error": "Ollama not installed. Run: qwe-qwe --setup-inference"}, status_code=400)
-    if not inference_setup._check_ollama_running():
-        inference_setup.start_ollama()
-
-    _pull_status[model] = {"status": "pulling", "progress": 0, "detail": "Starting..."}
-
-    import threading
-    def _do_pull():
-        import requests as _req
-        try:
-            resp = _req.post("http://localhost:11434/api/pull",
-                             json={"name": model}, stream=True, timeout=600)
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                    total = d.get("total", 0)
-                    completed = d.get("completed", 0)
-                    pct = int(completed / total * 100) if total else 0
-                    _pull_status[model] = {
-                        "status": "pulling", "progress": pct,
-                        "detail": f"{d.get('status', '')} {pct}%"
-                    }
-                except Exception:
-                    pass
-            _pull_status[model] = {"status": "done", "progress": 100, "detail": "Complete"}
-        except Exception as e:
-            _pull_status[model] = {"status": "error", "progress": 0, "detail": str(e)[:100]}
-
-    threading.Thread(target=_do_pull, daemon=True).start()
-    return {"ok": True, "message": f"Pulling {model}..."}
-
-
-@app.get("/api/inference/pull-status")
-async def inference_pull_status(model: str = ""):
-    """Get pull progress for a model."""
-    return _pull_status.get(model, {"status": "idle", "progress": 0, "detail": ""})
-
-
-@app.post("/api/inference/configure")
-async def inference_configure(request: Request):
-    """Configure qwe-qwe to use Ollama with selected model."""
-    data = await request.json()
-    model = data.get("model", "")
-    if not model:
-        return JSONResponse({"error": "model required"}, status_code=400)
-
-    import inference_setup
-    inference_setup.configure_provider(model)
-    return {"ok": True, "message": f"Configured: ollama / {model}"}
-
-
 # ── MCP Server Management ──
 
 @app.get("/api/mcp/servers")
@@ -2368,8 +2315,81 @@ async def telegram_reset():
 
 _current_port = 7860
 
-def start(host: str = "0.0.0.0", port: int = 7860):
-    """Start the web server."""
+def _ensure_ssl_cert() -> tuple[str, str]:
+    """Generate a self-signed SSL certificate if one doesn't exist.
+
+    Returns (certfile, keyfile) paths inside DATA_DIR. The cert is valid
+    for 365 days and covers localhost + the machine's LAN IPs so mobile
+    browsers can connect over HTTPS and access getUserMedia (camera).
+    """
+    cert_path = config.DATA_DIR / "ssl" / "cert.pem"
+    key_path = config.DATA_DIR / "ssl" / "key.pem"
+    if cert_path.exists() and key_path.exists():
+        return str(cert_path), str(key_path)
+
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from datetime import datetime, timedelta
+        import ipaddress, socket
+
+        # Generate RSA key
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        # Collect SANs: localhost + LAN IPs
+        sans = [
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            x509.IPAddress(ipaddress.IPv6Address("::1")),
+        ]
+        lan_ip = _get_lan_ip()
+        if lan_ip:
+            try:
+                sans.append(x509.IPAddress(ipaddress.IPv4Address(lan_ip)))
+            except Exception:
+                pass
+
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "qwe-qwe"),
+        ])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime(2024, 1, 1))
+            .not_valid_after(datetime(2124, 1, 1))
+            .add_extension(
+                x509.SubjectAlternativeName(sans),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+
+        key_path.write_bytes(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
+        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        _log.info(f"generated self-signed SSL cert: {cert_path}")
+    except Exception as e:
+        _log.error(f"SSL cert generation failed: {e}")
+        raise
+    return str(cert_path), str(key_path)
+
+
+def start(host: str = "0.0.0.0", port: int = 7860, ssl: bool = False):
+    """Start the web server.
+
+    Args:
+        ssl: When True, serve over HTTPS with a self-signed certificate.
+             Required for camera access from mobile devices over LAN.
+    """
     global _current_port
     _current_port = port
     import uvicorn
@@ -2386,22 +2406,33 @@ def start(host: str = "0.0.0.0", port: int = 7860):
     if telegram_bot.is_enabled() and telegram_bot.get_token():
         telegram_bot.start(on_message=_telegram_handler)
 
-    _log.info(f"starting web server on {actual_host}:{port} (LAN: {'on' if lan else 'off'})")
-    if actual_host == "0.0.0.0":
-        import socket
+    # SSL setup for camera on mobile (getUserMedia requires HTTPS)
+    ssl_kwargs = {}
+    proto = "http"
+    if ssl:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
-            print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}")
-            print(f"  📱 LAN access → http://{ip}:{port}\n")
-        except Exception:
-            print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}\n")
+            certfile, keyfile = _ensure_ssl_cert()
+            ssl_kwargs = {"ssl_certfile": certfile, "ssl_keyfile": keyfile}
+            proto = "https"
+        except Exception as e:
+            _log.warning(f"SSL disabled: {e}")
+
+    _log.info(f"starting web server on {actual_host}:{port} (LAN: {'on' if lan else 'off'}, SSL: {'on' if ssl_kwargs else 'off'})")
+    if actual_host == "0.0.0.0":
+        ip = _get_lan_ip()
+        _safe_print(f"\n  ⚡ qwe-qwe web UI → {proto}://localhost:{port}")
+        if ip:
+            _safe_print(f"  📱 LAN access → {proto}://{ip}:{port}")
+        if ssl_kwargs:
+            _safe_print(f"  🔒 Self-signed cert — accept the browser warning on first connect")
+        elif ip:
+            _safe_print(f"  📷 For camera on mobile: restart with --ssl")
+        print()
     else:
-        print(f"\n  ⚡ qwe-qwe web UI → http://localhost:{port}")
+        _safe_print(f"\n  ⚡ qwe-qwe web UI → {proto}://localhost:{port}")
         print(f"  🔒 Local only (enable LAN in Settings → System)\n")
 
-    uvicorn.run(app, host=actual_host, port=port, log_level="warning")
+    uvicorn.run(app, host=actual_host, port=port, log_level="warning", **ssl_kwargs)
 
 
 if __name__ == "__main__":

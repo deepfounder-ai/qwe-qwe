@@ -705,6 +705,18 @@ def validate(info: PresetInfo) -> list[str]:
         name = entry.get("name") or ""
         if name and not re.match(r"^[a-z_][a-z0-9_]*$", name):
             errors.append(f"skills.custom name invalid: {name!r}")
+        # Filename stem MUST match the manifest `name` — skills discovery
+        # uses the file stem as the canonical skill name (see SPEC.md),
+        # so `skills/x.py` with `name: domain_x` would never be findable
+        # by the name the manifest advertises. Catch it at install time.
+        if pth and name:
+            from pathlib import Path as _Path
+            stem = _Path(pth).stem
+            if stem != name:
+                errors.append(
+                    f"skills.custom {pth!r}: filename stem {stem!r} must match "
+                    f"manifest name {name!r} (rename the file or the name field)"
+                )
 
     for entry in (manifest.get("knowledge") or []):
         pth = entry.get("path") or ""
@@ -996,6 +1008,66 @@ def _apply_soul_from_manifest(manifest: dict) -> None:
             _log.debug(f"apply custom trait {ct}: {e}")
 
 
+def _enable_preset_skills(manifest: dict) -> list[str]:
+    """Add the preset's custom skills to the user's active_skills set.
+
+    Returns the list of skill names that were ACTUALLY added (i.e. not
+    already active). That delta is persisted under the ``preset_added_skills``
+    KV key so ``deactivate()`` can undo exactly those additions without
+    touching any skill the user enabled or disabled manually during the
+    preset session.
+    """
+    skills_block = manifest.get("skills") or {}
+    preset_names = [
+        s.get("name") for s in (skills_block.get("custom") or [])
+        if s.get("name")
+    ]
+    if not preset_names:
+        db.kv_delete("preset_added_skills")
+        return []
+
+    try:
+        import skills as _skills
+    except Exception as e:
+        _log.warning(f"cannot auto-enable preset skills, skills module unavailable: {e}")
+        return []
+
+    current = _skills.get_active()
+    added = [n for n in preset_names if n not in current]
+    if not added:
+        db.kv_delete("preset_added_skills")
+        return []
+
+    _skills.set_active(current | set(added))
+    db.kv_set("preset_added_skills", json.dumps(added, ensure_ascii=False))
+    return added
+
+
+def _disable_preset_skills() -> None:
+    """Undo whatever ``_enable_preset_skills`` added.
+
+    Reads the ``preset_added_skills`` delta and removes only those names
+    from ``active_skills``. A skill the user manually enabled during the
+    preset session stays enabled; a preset-supplied skill the user manually
+    disabled stays disabled (the subtraction is a no-op for it).
+    """
+    raw = db.kv_get("preset_added_skills")
+    if not raw:
+        return
+    try:
+        added = set(json.loads(raw))
+    except Exception:
+        added = set()
+    if added:
+        try:
+            import skills as _skills
+            current = _skills.get_active()
+            _skills.set_active(current - added)
+        except Exception as e:
+            _log.warning(f"skills restore failed: {e}")
+    db.kv_delete("preset_added_skills")
+
+
 def activate(preset_id: str) -> dict:
     """Back up current soul, apply preset soul/skills/prompt/knowledge.
 
@@ -1017,22 +1089,38 @@ def activate(preset_id: str) -> dict:
     snapshot = _snapshot_current_soul()
     db.kv_set("soul_backup", json.dumps(snapshot, ensure_ascii=False))
 
-    # Apply preset soul — on failure, restore from snapshot so we never
-    # leave the agent with a half-applied personality.
+    # Apply preset in order:
+    #   1. soul traits           (visible in Settings → Soul)
+    #   2. knowledge indexing    (RAG tag=preset:<id>)
+    #   3. mark preset active    (so skills._all_skill_paths() starts seeing
+    #                             ~/.qwe-qwe/presets/<id>/skills/)
+    #   4. auto-enable skills    (must be AFTER step 3, otherwise
+    #                             skills.get_active() self-heals them out
+    #                             because they're not yet discoverable)
+    #
+    # If any step raises, we undo what we've done so far and bubble up.
     try:
         _apply_soul_from_manifest(info["manifest"])
-        # Index knowledge files via RAG under preset:<id> tag
         _index_knowledge(preset_id, info["manifest"])
+        db.kv_set("active_preset", preset_id)
+        _enable_preset_skills(info["manifest"])
     except Exception as e:
         _log.error(f"activate {preset_id} failed mid-application: {e}; rolling back")
+        # Rollback in reverse order
+        try:
+            _disable_preset_skills()
+        except Exception:
+            pass
+        try:
+            db.kv_set("active_preset", "")
+        except Exception:
+            pass
         try:
             _restore_soul(snapshot)
         finally:
-            db.execute("DELETE FROM kv WHERE key = ?", ("soul_backup",))
+            db.kv_delete("soul_backup")
         raise
 
-    # Mark active (last — so failures above never leave a dangling active marker)
-    db.kv_set("active_preset", preset_id)
     _log.info(f"activated preset: {preset_id}")
     return {"id": preset_id, "name": info["name"]}
 
@@ -1049,9 +1137,11 @@ def deactivate() -> None:
             _restore_soul(snapshot)
         except Exception as e:
             _log.warning(f"deactivate: soul restore failed: {e}")
+    # Undo skill additions from the preset
+    _disable_preset_skills()
     # Clear markers
     db.kv_set("active_preset", "")
-    db.execute("DELETE FROM kv WHERE key = ?", ("soul_backup",))
+    db.kv_delete("soul_backup")
     _log.info(f"deactivated preset: {current}")
 
 

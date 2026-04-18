@@ -18,6 +18,289 @@ from agent_budget import BudgetLimits, BudgetStats, check_budget, warning_check
 _log = logger.get("loop")
 
 
+# ── Layer 1: Intent Router via small LLM ──
+
+_ROUTER_SYSTEM = '''You are a tool routing function. Output EXACTLY one JSON object.
+
+RULES:
+- Output ONLY valid JSON. NEVER add text, explanations, or extra fields.
+- ANY request about current/recent info (news, weather, prices, events, sports, stocks) → browser_open
+- You DO have access to tools. NEVER say you cannot do something. Just route to the right tool.
+- If user asks to remember/save → memory_save
+- If user asks to find saved info → memory_search
+- If user wants to run a command or find files → shell
+- If user sends a URL → browser_open with that URL
+- General knowledge (math, facts, greetings) → none
+
+For browser_open, translate query to English, use DuckDuckGo:
+{"tool": "browser_open", "args": {"url": "https://duckduckgo.com/?q=QUERY"}}
+
+/no_think'''
+
+_ROUTER_FEW_SHOT = [
+    {"role": "user", "content": "weather in London"},
+    {"role": "assistant", "content": '{"tool":"browser_open","args":{"url":"https://duckduckgo.com/?q=weather+London"}}'},
+    {"role": "user", "content": "find all .py files"},
+    {"role": "assistant", "content": '{"tool":"shell","args":{"command":"find . -name \\"*.py\\""}}'},
+    {"role": "user", "content": "remember my birthday is May 5"},
+    {"role": "assistant", "content": '{"tool":"memory_save","args":{"text":"User birthday is May 5"}}'},
+    {"role": "user", "content": "news about Hungary"},
+    {"role": "assistant", "content": '{"tool":"browser_open","args":{"url":"https://duckduckgo.com/?q=Hungary+latest+news"}}'},
+    {"role": "user", "content": "dollar exchange rate today"},
+    {"role": "assistant", "content": '{"tool":"browser_open","args":{"url":"https://duckduckgo.com/?q=USD+exchange+rate+today"}}'},
+    # Ambiguous / short queries should always route to none to avoid hallucinations
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": '{"tool":"none"}'},
+    {"role": "user", "content": "try again"},
+    {"role": "assistant", "content": '{"tool":"none"}'},
+    {"role": "user", "content": "ok"},
+    {"role": "assistant", "content": '{"tool":"none"}'},
+    {"role": "user", "content": "thanks"},
+    {"role": "assistant", "content": '{"tool":"none"}'},
+]
+
+# Router model cache
+_ROUTER_MODEL_CACHE: str | None = None
+
+
+def _get_router_config() -> tuple[str, str] | None:
+    """Get router URL and model from config. Returns (url, model) or None if disabled."""
+    global _ROUTER_MODEL_CACHE
+    import config
+    url = config.get("router_url")
+    if not url:
+        return None
+
+    model = config.get("router_model")
+    if model:
+        return (url, model)
+
+    # Auto-detect model from endpoint
+    if _ROUTER_MODEL_CACHE:
+        return (url, _ROUTER_MODEL_CACHE)
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{url}/models")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            models = data.get("data") or data.get("models") or []
+            if models:
+                _ROUTER_MODEL_CACHE = models[0].get("id") or models[0].get("name")
+                return (url, _ROUTER_MODEL_CACHE)
+    except Exception:
+        pass
+    return None
+
+
+_AMBIGUOUS_PHRASES = (
+    "еще раз", "ещё раз", "try again", "again", "повтори",
+    "ok", "okay", "fine", "ок", "хорошо", "ладно",
+    "thanks", "спасибо", "thank you",
+    "да", "нет", "yes", "no",
+    "продолжи", "continue", "дальше", "next",
+)
+
+
+def _is_ambiguous_input(text: str) -> bool:
+    """True if input is too context-dependent to route without history."""
+    t = text.strip().lower().rstrip("!?.,")
+    if len(t) < 4:
+        return True
+    # Exact match short phrases
+    if t in _AMBIGUOUS_PHRASES:
+        return True
+    # Starts with ambiguous phrase AND short overall
+    if len(t) < 30:
+        for phrase in _AMBIGUOUS_PHRASES:
+            if t.startswith(phrase):
+                return True
+    return False
+
+
+def _detect_intent(user_input: str, tool_names: set[str]) -> tuple[str, dict] | None:
+    """Layer 1: Route user intent to a tool using a small LLM.
+    Falls back to URL regex if router model is unavailable.
+    Returns (tool_name, args_dict) or None.
+    """
+    text = user_input.strip()
+    if not text or len(text) < 3:
+        return None
+
+    # Fast path: URL in message → browser_open (no model needed)
+    url_match = re.search(r"https?://\S+", text)
+    if url_match and "browser_open" in tool_names:
+        return ("browser_open", {"url": url_match.group()})
+
+    # Ambiguous inputs need conversation context — let main LLM handle those
+    if _is_ambiguous_input(text):
+        _log.debug(f"router: skipping ambiguous input {text[:50]!r}")
+        return None
+
+    # Try small LLM router
+    router_cfg = _get_router_config()
+    if not router_cfg:
+        return None  # router not configured, skip
+
+    router_url, router_model = router_cfg
+    try:
+        import urllib.request
+        msgs = [{"role": "system", "content": _ROUTER_SYSTEM}] + _ROUTER_FEW_SHOT + [{"role": "user", "content": text}]
+        payload = json.dumps({
+            "model": router_model,
+            "messages": msgs,
+            "temperature": 0.0,
+            "max_tokens": 200,
+            "response_format": {"type": "json_object"},
+        }).encode("utf-8")
+        req = urllib.request.Request(f"{router_url}/chat/completions", data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+
+        content = result["choices"][0]["message"]["content"].strip()
+        if not content:
+            return None
+
+        # Parse JSON — handle truncated responses
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # Try to repair truncated JSON
+            if '{"tool"' in content:
+                # Find last complete key-value and close
+                content = content.rstrip()
+                if not content.endswith("}"):
+                    # Truncated URL — close it
+                    if '"url":' in content or '"command":' in content or '"text":' in content:
+                        content = content.rstrip('"') + '"}}'
+                    else:
+                        content += "}"
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    return None
+            else:
+                return None
+
+        tool = parsed.get("tool", "none")
+        if tool == "none" or tool not in tool_names:
+            return None
+
+        args = parsed.get("args", {})
+
+        # Sanity check: for browser searches, the URL must reference the user's query.
+        # Prevents router from hallucinating results copied from few-shot examples.
+        if tool == "browser_open" and isinstance(args, dict):
+            url = str(args.get("url", "")).lower()
+            # Extract query term from duckduckgo URL
+            q_match = re.search(r'[?&]q=([^&]+)', url)
+            if q_match:
+                query = q_match.group(1).replace("+", " ").replace("%20", " ")
+                # Check if any meaningful word from query appears in user input
+                user_words = set(re.findall(r'\w+', text.lower()))
+                query_words = set(re.findall(r'\w+', query))
+                # Ignore common short/stop words
+                stop = {"the", "a", "an", "today", "latest", "news", "about", "what", "is", "in"}
+                query_words -= stop
+                if query_words and not (query_words & user_words):
+                    _log.warning(f"router hallucinated: input={text[:40]!r} query={query!r} — rejecting")
+                    return None
+
+        _log.info(f"router: {tool}({json.dumps(args, ensure_ascii=False)[:80]})")
+        return (tool, args)
+
+    except Exception as e:
+        _log.debug(f"router failed: {e}")
+        return None
+
+
+# ── Layer 2: Text-to-Tool Extraction ──
+
+def _extract_tool_from_text(text: str, tool_names: set[str]) -> tuple[str, dict] | None:
+    """Layer 2: Extract tool call from model text output when it fails to use native function calling.
+    Returns (tool_name, args_dict) or None.
+    """
+    if not text or not tool_names:
+        return None
+
+    # Pattern 1: Qwen leaked <tool_call> syntax
+    m = re.search(r'<tool_call>\s*\{[^}]*?"name"\s*:\s*"(\w+)"[^}]*?"arguments"\s*:\s*(\{[^}]*\})', text, re.DOTALL)
+    if m and m.group(1) in tool_names:
+        try:
+            args = json.loads(m.group(2))
+            return (m.group(1), args)
+        except json.JSONDecodeError:
+            pass
+
+    # Pattern 2: function_name({"key": "value"}) in text
+    for name in tool_names:
+        pat = re.search(rf'{re.escape(name)}\s*\(\s*(\{{[^)]*\}})\s*\)', text)
+        if pat:
+            try:
+                args = json.loads(pat.group(1))
+                return (name, args)
+            except json.JSONDecodeError:
+                pass
+
+    # Pattern 3: function_name(key="value") in text
+    for name in tool_names:
+        pat = re.search(rf'{re.escape(name)}\s*\(\s*(\w+)\s*=\s*["\']([^"\']+)["\']', text)
+        if pat:
+            return (name, {pat.group(1): pat.group(2)})
+
+    # Pattern 4: "use tool_name" + URL nearby
+    for name in tool_names:
+        if name in text:
+            url = re.search(r'https?://\S+', text)
+            if url and "browser" in name:
+                return (name, {"url": url.group()})
+
+    return None
+
+
+def _get_tool_names(tools: list[dict]) -> set[str]:
+    """Extract tool names from tools list."""
+    return {t["function"]["name"] for t in tools if "function" in t}
+
+
+def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats) -> str:
+    """Execute a tool call that was detected from text/intent (not native function calling).
+    Injects proper messages into the conversation and returns the tool result.
+    """
+    import uuid
+    call_id = f"synth_{uuid.uuid4().hex[:8]}"
+
+    # Inject assistant message with synthetic tool call
+    messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": tool_name, "arguments": json.dumps(args)},
+        }],
+    })
+
+    # Execute
+    emitter.tool_start(tool_name, str(args)[:80])
+    stats.add_tool_call()
+
+    tool_start = time.time()
+    try:
+        result = tool_executor(tool_name, args)
+    except Exception as e:
+        result = f"Error: {e}"
+        stats.add_error()
+    tool_ms = int((time.time() - tool_start) * 1000)
+
+    result_short = result.replace("\n", " ")[:150]
+    emitter.tool_end(tool_name, result_short, tool_ms)
+
+    # Inject tool result
+    messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+    return result
+
+
 def run_loop(
     client,
     model: str,
@@ -65,6 +348,39 @@ def run_loop(
     thinking_content = ""
     extra = extra_kwargs or {}
     _budget_warned = False
+    _recent_tool_sigs: list[str] = []  # loop detection: last N tool call signatures
+    _tool_name_counts: dict[str, int] = {}  # Layer 4: per-tool frequency
+    _tool_search_count = 0  # Layer 3: tool_search call counter
+    _nudge_count = 0  # Layer 5: anti-hedge nudge counter
+    _nudge_cleanup = False  # Layer 5: cleanup nudge messages on next iteration
+    _force_finish = False  # Layer 4: force finish after loop detection
+    _tool_names = _get_tool_names(tools) if tools else set()
+
+    # Layer 1: Intent router — detect obvious intents before first LLM call
+    if tools and tool_executor:
+        _user_input = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                _user_input = m.get("content", "") if isinstance(m.get("content"), str) else ""
+                break
+        if _user_input:
+            _log.info(f"router: checking intent for: {_user_input[:60]}")
+            intent = _detect_intent(_user_input, _tool_names)
+            _log.info(f"router: result = {intent}")
+            if intent:
+                _log.info(f"intent detected: {intent[0]}({str(intent[1])[:60]})")
+                # Auto-activate browser tools if needed
+                import tools as _tools_mod
+                _tools_mod._active_extra_tools.update({"browser_open", "browser_snapshot", "browser_screenshot",
+                                                        "browser_click", "browser_fill", "browser_eval", "browser_close"})
+                _synthesize_tool_call(intent[0], intent[1], tool_executor, messages, emitter, stats)
+                all_tool_calls.append(intent[0])
+
+    # Aggregated generation time across all turns — time from FIRST content
+    # token of each turn's stream to the LAST chunk. Excludes time-to-first-token
+    # (prompt processing) so tok/s reflects actual generation speed.
+    total_gen_ms = 0
+    total_output_tokens = 0
 
     while True:
         # ── Budget check ──
@@ -72,6 +388,11 @@ def run_loop(
         if decision.exceeded:
             _log.warning(f"budget exceeded: {decision.reason}")
             emitter.status(f"Budget: {decision.reason}")
+            break
+
+        # Layer 4: force finish — after loop detection, let model produce one more reply then stop
+        if _force_finish and stats.turns > 1 and final_content:
+            _log.info("force finish: breaking after loop detection")
             break
 
         # Budget warning to model (inject once)
@@ -87,6 +408,7 @@ def run_loop(
 
         # ── Call LLM ──
         stream_start = time.time()
+        first_token_ts: float | None = None  # moment the first content/reasoning/tool chunk arrives
         full_content = ""
         reasoning_content = ""
         tool_calls_data: dict[int, dict] = {}
@@ -153,6 +475,18 @@ def run_loop(
 
             finish_reason = chunk.choices[0].finish_reason
 
+            # Mark time-to-first-token on the first chunk carrying any real
+            # output (content / reasoning / tool_calls). `first_token_ts`
+            # then anchors generation-speed measurement, stripping out the
+            # prompt-processing latency that precedes the first token.
+            if first_token_ts is None and (
+                delta.content
+                or getattr(delta, "reasoning_content", None)
+                or getattr(delta, "reasoning", None)
+                or delta.tool_calls
+            ):
+                first_token_ts = time.time()
+
             # Reasoning content (Qwen/DeepSeek native thinking)
             rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if rc:
@@ -199,17 +533,37 @@ def run_loop(
                         if tc_delta.function.arguments:
                             tool_calls_data[idx]["arguments"] += tc_delta.function.arguments
 
-        stream_ms = int((time.time() - stream_start) * 1000)
+        stream_end = time.time()
+        stream_ms = int((stream_end - stream_start) * 1000)
+        if first_token_ts is not None:
+            gen_ms = int((stream_end - first_token_ts) * 1000)
+            ttft_ms = int((first_token_ts - stream_start) * 1000)
+        else:
+            gen_ms = 0
+            ttft_ms = stream_ms
 
         # Track tokens
+        turn_output_tokens = 0
         if usage:
+            turn_output_tokens = getattr(usage, 'completion_tokens', 0)
             stats.add_tokens(
                 input_tok=getattr(usage, 'prompt_tokens', 0),
-                output_tok=getattr(usage, 'completion_tokens', 0),
+                output_tok=turn_output_tokens,
             )
+        else:
+            # No usage from provider — estimate from content length
+            turn_output_tokens = max(1, len(full_content) // 4)
 
-        _log.info(f"turn {stats.turns}: finish={finish_reason}, content={len(full_content)}, "
-                   f"tools={len(tool_calls_data)}, stream_ms={stream_ms}")
+        # Aggregate across turns so tool-call flows get a sensible average.
+        if gen_ms > 0 and turn_output_tokens > 0:
+            total_gen_ms += gen_ms
+            total_output_tokens += turn_output_tokens
+
+        _log.info(
+            f"turn {stats.turns}: finish={finish_reason}, content={len(full_content)}, "
+            f"tools={len(tool_calls_data)}, ttft_ms={ttft_ms}, gen_ms={gen_ms}, "
+            f"stream_ms={stream_ms}, out_tok={turn_output_tokens}"
+        )
 
         # ── Process tool calls ──
         if tool_calls_data:
@@ -226,6 +580,17 @@ def run_loop(
             messages.append(assistant_msg)
 
             for tc in tool_calls_data.values():
+                # Layer 3: tool_search short-circuit
+                if tc["name"] == "tool_search":
+                    _tool_search_count += 1
+                    if _tool_search_count > 1:
+                        tool_result = (
+                            "STOP: tools already activated. Do NOT call tool_search again. "
+                            "Call the actual tool directly (e.g., browser_open, browser_snapshot)."
+                        )
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        continue
+
                 # Parse arguments
                 args = _parse_tool_args(tc["arguments"], json_repair_fn)
                 if args is None:
@@ -242,6 +607,15 @@ def run_loop(
                             stats.add_error()
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
                             continue
+
+                    # Layer 4: per-tool frequency limit
+                    _tool_name_counts[tc["name"]] = _tool_name_counts.get(tc["name"], 0) + 1
+                    if _tool_name_counts[tc["name"]] > 5:
+                        tool_result = f"LIMIT: {tc['name']} called too many times. Use the results you already have."
+                        _force_finish = True
+                        _log.warning(f"tool frequency limit: {tc['name']} called {_tool_name_counts[tc['name']]} times")
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        continue
 
                     # Execute tool
                     emitter.tool_start(tc["name"], str(args)[:80])
@@ -266,12 +640,60 @@ def run_loop(
                     "content": tool_result,
                 })
 
+            # Layer 4: Loop detection — 2 identical calls = force finish
+            _turn_sig = "|".join(f"{tc['name']}:{tc['arguments'][:60]}" for tc in tool_calls_data.values())
+            _recent_tool_sigs.append(_turn_sig)
+            if len(_recent_tool_sigs) > 5:
+                _recent_tool_sigs.pop(0)
+            if len(_recent_tool_sigs) >= 2 and len(set(_recent_tool_sigs[-2:])) == 1:
+                _log.warning(f"loop detected: {_turn_sig[:80]}")
+                _force_finish = True
+                messages.append({"role": "user", "content":
+                    "[system] STOP. You are in a loop. Give your final answer NOW based on what you already have. Do NOT call any more tools."})
+
             continue  # Next turn
 
         # ── No tool calls — check finish reason ──
+        # Clean up nudge messages from previous round (Layer 5)
+        if _nudge_cleanup:
+            if len(messages) >= 2 and messages[-1].get("role") == "user" and "[system]" in str(messages[-1].get("content", "")):
+                messages.pop()  # remove nudge
+                if messages and messages[-1].get("role") == "assistant":
+                    messages.pop()  # remove hedge
+            _nudge_cleanup = False
+
         # Strip thinking tags from content
         raw_reply = _strip_thinking(full_content)
         thinking_content = reasoning_content or _extract_thinking(full_content)
+
+        # Layer 2: Try to extract tool call from text (model described it but didn't call it)
+        if not _force_finish and tools and raw_reply:
+            extracted = _extract_tool_from_text(full_content, _tool_names)
+            if extracted:
+                _log.info(f"extracted tool from text: {extracted[0]}({str(extracted[1])[:60]})")
+                # Don't add the hedge text as final reply — execute the tool instead
+                _synthesize_tool_call(extracted[0], extracted[1], tool_executor, messages, emitter, stats)
+                all_tool_calls.append(extracted[0])
+                continue  # Let LLM summarize the result
+
+        # Layer 5: Anti-hedge — detect empty reply or hedge phrases
+        _reply_is_empty = len(raw_reply.strip()) == 0 and (len(full_content) > 0 or len(reasoning_content) > 0)
+        _hedge_phrases = ("let me", "i'll try", "i will", "давай", "поищу", "посмотрю",
+                          "попробу", "let me search", "let me check", "i can help",
+                          "based on my knowledge", "i would")
+        _is_hedge = any(p in raw_reply.lower() for p in _hedge_phrases) if raw_reply else False
+
+        if not _force_finish and _nudge_count < 2 and (_reply_is_empty or _is_hedge):
+            _log.info(f"anti-hedge triggered: empty={_reply_is_empty}, hedge={_is_hedge}, nudge#{_nudge_count+1}")
+            nudge_text = raw_reply if raw_reply.strip() else "Let me think about this..."
+            messages.append({"role": "assistant", "content": nudge_text})
+            messages.append({"role": "user", "content":
+                "[system] STOP describing what you'll do. Actually CALL the tool right now. "
+                "If you need web info, call browser_open(url). Reply with actual content, not plans."})
+            _nudge_count += 1
+            _nudge_cleanup = True
+            emitter.status("nudging to act...")
+            continue
 
         # Continuation: model was truncated
         if finish_reason in ("length", "max_tokens"):
@@ -287,10 +709,13 @@ def run_loop(
         break
 
     # ── Build result ──
-    tok_per_sec = 0
-    if usage and stream_ms > 0:
-        output_tokens = getattr(usage, 'completion_tokens', 0)
-        tok_per_sec = round(output_tokens / (stream_ms / 1000), 1)
+    # tok/s is measured from first-token-to-last-chunk across ALL turns,
+    # which is the number users compare against llama.cpp / Ollama output.
+    # Including TTFT (time-to-first-token) made this value 2-5× too low
+    # on local models with large prompts.
+    tok_per_sec = 0.0
+    if total_gen_ms > 0 and total_output_tokens > 0:
+        tok_per_sec = round(total_output_tokens / (total_gen_ms / 1000), 1)
 
     return {
         "reply": final_content.strip(),
@@ -329,19 +754,13 @@ def _parse_tool_args(raw: str, repair_fn=None) -> dict | None:
 def _strip_thinking(text: str) -> str:
     """Remove thinking blocks from model output."""
     text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
-    # Gemma <|channel>thought
-    if text.strip().startswith("<|channel>thought"):
-        lines = text.split("\n")
-        reply_lines = []
-        in_reply = False
-        for line in lines:
-            if line.strip().startswith("<|channel>"):
-                continue
-            if not in_reply and len(line.strip()) > 30 and any(c in line for c in "абвгдежзийклмнопрстуфхцчшщьыъэюяАБВ"):
-                in_reply = True
-            if in_reply:
-                reply_lines.append(line)
-        text = "\n".join(reply_lines) if reply_lines else re.sub(r"<\|channel\>thought\b\s*", "", text, flags=re.DOTALL)
+    # Gemma <|channel>thought — extract reply after thought block
+    if "<|channel>" in text:
+        # Split by channel markers, take the last non-thought segment
+        segments = re.split(r"<\|channel\>\w*\s*", text)
+        # Filter out empty segments and take the last substantial one as reply
+        reply_parts = [s.strip() for s in segments if s.strip() and len(s.strip()) > 5]
+        text = reply_parts[-1] if reply_parts else ""
     text = re.sub(r"<\|[^>]+\>", "", text)
     return text.strip()
 

@@ -1869,6 +1869,7 @@ def main_entry():
     parser.add_argument("--setup-inference", action="store_true", help="Setup inference backend (Ollama)")
     parser.add_argument("--host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=7860, help="Web server port (default: 7860)")
+    parser.add_argument("--ssl", action="store_true", help="Serve over HTTPS (self-signed cert, needed for camera on mobile)")
     parser.add_argument("--export-config", action="store_true", help="Export settings to JSON (stdout)")
     parser.add_argument("--import-config", type=str, metavar="FILE", help="Import settings from JSON file")
     args = parser.parse_args()
@@ -1893,7 +1894,7 @@ def main_entry():
         doctor()
     elif args.web:
         import server
-        server.start(host=args.host, port=args.port)
+        server.start(host=args.host, port=args.port, ssl=args.ssl)
     else:
         main()
 

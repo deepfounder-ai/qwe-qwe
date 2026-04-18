@@ -309,11 +309,24 @@ def _is_local(name: str) -> bool:
     return name in _LOCAL_PROVIDERS
 
 
-def ping(name: str) -> bool:
-    """Check if a provider's API is reachable (GET /models with short timeout)."""
+_ping_cache: dict[str, tuple[float, bool]] = {}  # name → (expires_at, online)
+_PING_TTL = 30  # seconds
+
+
+def ping(name: str, timeout: float = 1.0, use_cache: bool = True) -> bool:
+    """Check if a provider's API is reachable (GET /models with short timeout).
+    Caches result for 30s to avoid hammering local servers."""
+    import time as _t
+    now = _t.time()
+    if use_cache and name in _ping_cache:
+        expires, online = _ping_cache[name]
+        if expires > now:
+            return online
+
     p = get_provider(name)
     url = p.get("url", "")
     if not url:
+        _ping_cache[name] = (now + _PING_TTL, False)
         return False
     try:
         import urllib.request
@@ -321,10 +334,20 @@ def ping(name: str) -> bool:
         key = p.get("key", "")
         if key:
             req.add_header("Authorization", f"Bearer {key}")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return resp.status == 200
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            online = resp.status == 200
     except Exception:
-        return False
+        online = False
+    _ping_cache[name] = (now + _PING_TTL, online)
+    return online
+
+
+def _invalidate_ping_cache(name: str | None = None):
+    """Clear ping cache for one provider or all."""
+    if name is None:
+        _ping_cache.clear()
+    else:
+        _ping_cache.pop(name, None)
 
 
 def switch(name: str) -> str:
@@ -421,14 +444,30 @@ def list_providers() -> list[str]:
 
 
 def list_all() -> list[dict]:
-    """List all providers with status and reachability."""
+    """List all providers with status. Pings local providers in parallel (1s timeout each, cached 30s)."""
+    from concurrent.futures import ThreadPoolExecutor
     active = get_active_name()
+    names = list_providers()
+
+    # Collect local names needing a ping
+    local_names = [n for n in names if _is_local(n)]
+
+    # Run pings in parallel
+    online_map: dict[str, bool] = {}
+    if local_names:
+        with ThreadPoolExecutor(max_workers=len(local_names)) as ex:
+            futures = {n: ex.submit(ping, n, 1.0, True) for n in local_names}
+            for n, f in futures.items():
+                try:
+                    online_map[n] = f.result(timeout=2)
+                except Exception:
+                    online_map[n] = False
+
     result = []
-    for name in list_providers():
+    for name in names:
         p = get_provider(name)
         is_local = _is_local(name)
-        # For local providers, check reachability; for cloud, check key
-        online = ping(name) if is_local else bool(p.get("key"))
+        online = online_map.get(name, False) if is_local else bool(p.get("key"))
         result.append({
             "name": name,
             "display": p.get("name", name),

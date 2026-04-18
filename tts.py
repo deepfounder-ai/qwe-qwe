@@ -44,6 +44,9 @@ def synthesize(text: str, format: str = "wav") -> bytes | None:
     try:
         import config
         api_url = (config.get("tts_api_url") or "").strip()
+        api_key = (config.get("tts_api_key") or "").strip()
+        api_model = (config.get("tts_api_model") or "tts-1").strip()
+        api_voice = (config.get("tts_api_voice") or "alloy").strip()
         ref_audio = config.get("tts_ref_audio") or ""
         ref_text = config.get("tts_ref_text") or ""
     except Exception as e:
@@ -55,9 +58,15 @@ def synthesize(text: str, format: str = "wav") -> bytes | None:
 
     try:
         # Detect API style from URL path
-        if "/v1/" in api_url:
-            # OpenAI-compatible endpoint — JSON body
-            audio = _synthesize_openai(api_url, text, ref_audio, ref_text)
+        if "audio/speech" in api_url or (api_key and "/v1" in api_url and "tts" not in api_url):
+            # OpenAI-compatible /v1/audio/speech (JSON, cloud TTS)
+            audio = _synthesize_openai_speech(api_url, text, api_key, api_model, api_voice)
+        elif "/v1/tts" in api_url:
+            # Fish Speech /v1/tts (JSON body)
+            audio = _synthesize_fish(api_url, text, ref_audio, ref_text)
+        elif "/tts" in api_url or api_url.rstrip("/").endswith(":8000"):
+            # Generic /tts endpoint — multipart with `text` + `prompt_audio`
+            audio = _synthesize_prompt_audio(api_url, text, ref_audio)
         else:
             # s2.cpp raw endpoint — multipart form-data
             audio = _synthesize_s2cpp(api_url, text, ref_audio, ref_text)
@@ -76,7 +85,28 @@ def synthesize(text: str, format: str = "wav") -> bytes | None:
         return None
 
 
-def _synthesize_openai(url: str, text: str, ref_audio: str, ref_text: str) -> bytes | None:
+def _synthesize_openai_speech(url: str, text: str, api_key: str,
+                              model: str = "tts-1", voice: str = "alloy") -> bytes | None:
+    """OpenAI-compatible /v1/audio/speech endpoint (JSON body, audio stream)."""
+    # Normalize URL: accept both base URL and full path
+    url = url.rstrip("/")
+    if not url.endswith("/audio/speech"):
+        if url.endswith("/v1"):
+            url += "/audio/speech"
+        elif "/v1" not in url:
+            url += "/v1/audio/speech"
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    body = {"model": model, "input": text, "voice": voice, "response_format": "mp3"}
+    resp = requests.post(url, json=body, headers=headers, timeout=_TIMEOUT, stream=True)
+    resp.raise_for_status()
+    return b"".join(resp.iter_content(chunk_size=8192))
+
+
+def _synthesize_fish(url: str, text: str, ref_audio: str, ref_text: str) -> bytes | None:
     """Fish Speech /v1/tts endpoint (JSON body, binary audio response)."""
     body: dict = {
         "text": text,
@@ -87,6 +117,34 @@ def _synthesize_openai(url: str, text: str, ref_audio: str, ref_text: str) -> by
     resp = requests.post(url, json=body, timeout=_TIMEOUT, stream=True)
     resp.raise_for_status()
     return b"".join(resp.iter_content(chunk_size=8192))
+
+
+# Backward-compat alias
+_synthesize_openai = _synthesize_fish
+
+
+def _synthesize_prompt_audio(url: str, text: str, ref_audio: str) -> bytes | None:
+    """Generic /tts endpoint: multipart form with `text` and `prompt_audio` (voice cloning).
+
+    Matches the common pattern:
+      curl -F "text=..." -F "prompt_audio=@ref.wav" -F "seed=42" http://host:8000/tts
+    """
+    url = url.rstrip("/")
+    if not url.endswith("/tts"):
+        url += "/tts"
+
+    form: dict = {"text": (None, text), "seed": (None, "42")}
+
+    if ref_audio and Path(ref_audio).is_file():
+        try:
+            audio_data = Path(ref_audio).read_bytes()
+            form["prompt_audio"] = (Path(ref_audio).name, audio_data, "audio/wav")
+        except Exception as e:
+            _log.warning("Failed to load ref audio: %s", e)
+
+    resp = requests.post(url, files=form, timeout=_TIMEOUT)
+    resp.raise_for_status()
+    return resp.content
 
 
 def _synthesize_s2cpp(url: str, text: str, ref_audio: str, ref_text: str) -> bytes | None:
