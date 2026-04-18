@@ -263,6 +263,53 @@ def _get_tool_names(tools: list[dict]) -> set[str]:
     return {t["function"]["name"] for t in tools if "function" in t}
 
 
+# ── Context Management: tool result clearing + size caps ──
+
+_TOOL_RESULT_MAX_CHARS = 4000  # cap individual tool results
+_KEEP_RECENT_TOOL_RESULTS = 3  # keep last N tool results intact
+
+
+def _clear_old_tool_results(messages: list[dict]):
+    """Replace old tool results with one-line summaries (keep last N intact).
+    This prevents context overflow during long multi-step tasks.
+    Claude Code calls this Tier 1 clearing — runs before every API call.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if len(tool_indices) <= _KEEP_RECENT_TOOL_RESULTS:
+        return  # nothing to clear
+
+    # Clear all but the last N
+    to_clear = tool_indices[:-_KEEP_RECENT_TOOL_RESULTS]
+    for idx in to_clear:
+        m = messages[idx]
+        content = m.get("content", "")
+        if content.startswith("[cleared"):
+            continue  # already cleared
+        # Create one-line summary
+        first_line = content.split("\n")[0][:120].strip()
+        m["content"] = f"[cleared — {first_line}]"
+
+
+def _cap_tool_result(result: str) -> str:
+    """Cap tool result to prevent one large output from eating the entire context."""
+    if len(result) <= _TOOL_RESULT_MAX_CHARS:
+        return result
+    return result[:_TOOL_RESULT_MAX_CHARS] + f"\n... [truncated at {_TOOL_RESULT_MAX_CHARS} chars, {len(result)} total]"
+
+
+def _should_plan(user_input: str) -> bool:
+    """Detect if user request is complex enough to warrant a planning step."""
+    if len(user_input) < 80:
+        return False
+    _plan_triggers = (
+        "implement", "create", "build", "refactor", "write", "develop", "make",
+        "реализуй", "создай", "напиши", "разработай", "сделай", "построй",
+        "step by step", "пошагово", "план", "plan",
+    )
+    text_lower = user_input.lower()
+    return any(t in text_lower for t in _plan_triggers)
+
+
 def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats) -> str:
     """Execute a tool call that was detected from text/intent (not native function calling).
     Injects proper messages into the conversation and returns the tool result.
@@ -382,6 +429,19 @@ def run_loop(
     total_gen_ms = 0
     total_output_tokens = 0
 
+    # Fix 2: Planning prompt — inject for complex tasks on first round
+    if tools and tool_executor:
+        _ui = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                _ui = m.get("content", "") if isinstance(m.get("content"), str) else ""
+                break
+        if _ui and _should_plan(_ui):
+            _log.info("complex task detected, injecting planning prompt")
+            messages.append({"role": "user", "content":
+                "[system] This is a complex task. Before executing, outline a numbered plan (3-7 steps). "
+                "Then immediately start executing step 1. Check off steps as you complete them."})
+
     while True:
         # ── Budget check ──
         decision = check_budget(budget, stats)
@@ -394,6 +454,10 @@ def run_loop(
         if _force_finish and stats.turns > 1 and final_content:
             _log.info("force finish: breaking after loop detection")
             break
+
+        # Fix 1: Clear old tool results to prevent context overflow (Tier 1 clearing)
+        if stats.turns > 0:
+            _clear_old_tool_results(messages)
 
         # Budget warning to model (inject once)
         if not _budget_warned:
@@ -630,6 +694,9 @@ def run_loop(
                         stats.add_error()
                     tool_ms = int((time.time() - tool_start) * 1000)
 
+                    # Fix 4: Cap tool results to prevent context overflow
+                    tool_result = _cap_tool_result(tool_result)
+
                     result_short = tool_result.replace("\n", " ")[:150]
                     emitter.tool_end(tc["name"], result_short, tool_ms)
 
@@ -650,6 +717,13 @@ def run_loop(
                 _force_finish = True
                 messages.append({"role": "user", "content":
                     "[system] STOP. You are in a loop. Give your final answer NOW based on what you already have. Do NOT call any more tools."})
+
+            # Fix 3: Progress checkpoints — every 5 tool calls, force re-orientation
+            if stats.tool_calls > 0 and stats.tool_calls % 5 == 0 and not _force_finish:
+                _log.info(f"progress checkpoint at {stats.tool_calls} tool calls")
+                messages.append({"role": "user", "content":
+                    f"[system] Progress checkpoint ({stats.tool_calls} tool calls). "
+                    f"Briefly: what have you accomplished so far? What remains? Continue with the next step."})
 
             continue  # Next turn
 

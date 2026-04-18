@@ -1050,26 +1050,34 @@ def _maybe_compact(thread_id: str | None = None):
                 model=providers.get_model(),
                 messages=[
                     {"role": "system", "content": (
-                        "Compress this conversation into key facts for future reference. "
-                        "Extract ONLY:\n"
-                        "- Decisions made and why\n"
-                        "- Technical facts: names, paths, configs, versions\n"
-                        "- Task outcomes: what worked, what failed\n"
-                        "- User preferences discovered\n"
-                        "Skip greetings, small talk, tool output details.\n"
-                        "Format: bullet points, max 150 words.\n"
+                        "Compress this conversation into a structured summary for context recovery. "
+                        "Use EXACTLY these sections (skip empty ones):\n\n"
+                        "## Current State\nWhat is the current state of the task/project?\n\n"
+                        "## Goals & Intent\nWhat is the user trying to accomplish?\n\n"
+                        "## Recent Changes\nWhat was modified, created, or deleted?\n\n"
+                        "## Key Decisions\nImportant choices made and why.\n\n"
+                        "## Active Work\nWhat was in progress when the conversation was cut?\n\n"
+                        "## Key Files\nFile paths, configs, URLs that matter.\n\n"
+                        "## Learnings\nWhat worked, what failed, errors encountered.\n\n"
+                        "## User Preferences\nDiscovered preferences, names, settings.\n\n"
+                        "## Next Steps\nWhat should happen next?\n\n"
+                        "Be concise — max 300 words total. "
                         "If nothing worth saving — reply SKIP."
                     )},
                     {"role": "user", "content": convo[:8000]},  # cap input
                 ],
                 temperature=0.3,
-                max_tokens=512,
+                max_tokens=1024,
             )
             summary = _strip_thinking(resp.choices[0].message.content or "")
 
             if summary and not summary.strip().upper().startswith("SKIP"):
                 memory.save(summary, tag="compaction", thread_id=thread_id)
                 _log.info(f"compaction: saved summary ({len(summary)} chars)")
+                # Also inject summary as first user message so model sees it in-context
+                db.save_message("user",
+                    f"[Context from earlier conversation — auto-compacted]\n{summary}",
+                    thread_id=thread_id)
                 _notify_compaction("summary", {
                     "thread_id": thread_id,
                     "summary": summary[:300],
