@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -164,9 +164,6 @@ EDITABLE_SETTINGS = {
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
-    # ── Tool Router (small instruct model for tool selection) ──
-    "router_url":           ("setting:router_url",            str, "",     "Router model API URL (e.g. http://localhost:8081/v1). Empty = disabled", "", ""),
-    "router_model":         ("setting:router_model",          str, "",     "Router model name (empty = auto-detect from endpoint)", "", ""),
     # ── Voice: STT ──
     "stt_backend":          ("setting:stt_backend",           str, "auto", "STT backend: auto (API if key else local), local, api", "", ""),
     "stt_model":            ("setting:stt_model",             str, "base", "Whisper model size (tiny/base/small/medium) — local only", "", ""),

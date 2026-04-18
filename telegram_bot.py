@@ -1778,6 +1778,25 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
                     send_message(chat_id, enriched, token, reply_to=message_id,
                                  topic_id=topic_id, reply_markup=keyboard)
 
+                # Send files attached by send_file tool
+                import tools as _tools_mod
+                for f in _tools_mod.get_pending_files():
+                    try:
+                        fpath = f["path"]
+                        tg_url = f"https://api.telegram.org/bot{token}/sendDocument"
+                        tg_data = {"chat_id": chat_id, "caption": f.get("caption", f["name"])}
+                        if topic_id:
+                            tg_data["message_thread_id"] = topic_id
+                        with open(fpath, "rb") as fp:
+                            tg_files = {"document": (f["name"], fp, "application/octet-stream")}
+                            r = requests.post(tg_url, data=tg_data, files=tg_files, timeout=60)
+                        if r.json().get("ok"):
+                            _log.info(f"sent file to telegram: {f['name']}")
+                        else:
+                            _log.warning(f"sendDocument failed: {r.json().get('description', '')}")
+                    except Exception as e:
+                        _log.warning(f"failed to send file {f.get('name')}: {e}")
+
                 # TTS: send voice reply if voice mode or incoming was voice
                 voice_mode = db.kv_get(f"voice_mode:{chat_id}") == "1"
                 if is_voice or voice_mode:

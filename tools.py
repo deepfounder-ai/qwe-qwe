@@ -59,6 +59,11 @@ def _get_write_whitelist() -> list[str]:
     return _WRITE_WHITELIST
 
 
+def _get_path_arg(args: dict) -> str | None:
+    """Extract path from tool args — models use various field names."""
+    return args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+
+
 def _resolve_path(raw: str, for_write: bool = False) -> Path:
     """Resolve a file path for agent operations.
 
@@ -133,7 +138,11 @@ _CORE_TOOL_NAMES = {
     "http_request", "spawn_task",
     "tool_search",  # meta-tool to discover more tools
     "browser_open", "browser_snapshot",  # web browsing — most requested tools
+    "send_file",  # attach file to chat message
 }
+
+# Pending files to attach to the response (populated by send_file tool)
+_pending_files: list[dict] = []  # [{path, name, url, size}]
 
 # Session-level: tools activated by tool_search (persists within agent turn)
 _active_extra_tools: set[str] = set()
@@ -146,7 +155,13 @@ def _reset_active_tools():
     """Reset extra tools between turns."""
     global _spicy_duck_on
     _active_extra_tools.clear()
+    _pending_files.clear()
     _spicy_duck_on = None  # re-check on next get_all_tools()
+
+
+def get_pending_files() -> list[dict]:
+    """Get files queued by send_file tool for attachment to response."""
+    return list(_pending_files)
 
 
 # ── Tool definitions — SHORT descriptions, small models need clarity ──
@@ -237,6 +252,21 @@ TOOLS = [
                     "content": {"type": "string", "description": "File content"},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_file",
+            "description": "Attach a file to the chat message so user can download it. Use after write_file to share the result. Do NOT use for directories or large numbers of files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file to send"},
+                    "caption": {"type": "string", "description": "Short description of the file (optional)"},
+                },
+                "required": ["path"],
             },
         },
     },
@@ -701,7 +731,7 @@ def execute(name: str, args: dict) -> str:
             return f"Saved (id: {pid[:8]})"
 
         elif name == "read_file":
-            _raw = args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+            _raw = _get_path_arg(args)
             if not _raw:
                 return "Error: missing required argument 'path'"
             p = _resolve_path(_raw)
@@ -720,7 +750,7 @@ def execute(name: str, args: dict) -> str:
             return text
 
         elif name == "write_file":
-            _raw = args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+            _raw = _get_path_arg(args)
             if not _raw:
                 return "Error: missing required argument 'path'"
             p = _resolve_path(_raw, for_write=True)
@@ -728,6 +758,35 @@ def execute(name: str, args: dict) -> str:
             content = args.get("content", "")
             p.write_text(content, encoding="utf-8")
             return f"Written {len(content)} chars to {p}"
+
+        elif name == "send_file":
+            _raw = _get_path_arg(args)
+            if not _raw:
+                return "Error: missing required argument 'path'"
+            p = _resolve_path(_raw)
+            if not p.exists():
+                return f"Error: file not found: {_raw}"
+            if p.is_dir():
+                return "Error: send_file works with single files, not directories"
+            size = p.stat().st_size
+            if size > 50 * 1024 * 1024:
+                return f"Error: file too large ({size // 1024 // 1024} MB). Max 50 MB."
+            # Copy to uploads for serving via HTTP
+            import uuid as _uuid
+            file_id = _uuid.uuid4().hex[:8]
+            dest = Path(config.UPLOADS_DIR) / f"{file_id}_{p.name}"
+            import shutil
+            shutil.copy2(str(p), str(dest))
+            url = f"/uploads/{dest.name}"
+            caption = args.get("caption", p.name)
+            _pending_files.append({
+                "path": str(p),
+                "name": p.name,
+                "url": url,
+                "size": size,
+                "caption": caption,
+            })
+            return f"File attached: {p.name} ({size / 1024:.1f} KB). User will see download link."
 
         elif name == "shell":
             cmd = args["command"]
@@ -900,7 +959,7 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "rag_index":
             import rag
-            raw_path = args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
+            raw_path = _get_path_arg(args)
             if not raw_path:
                 return "Error: missing required argument 'path'"
             path = Path(raw_path).expanduser()

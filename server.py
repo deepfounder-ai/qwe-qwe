@@ -1036,27 +1036,6 @@ async def get_streaming():
     return {"enabled": db.kv_get("streaming_enabled") != "false"}  # on by default
 
 
-@app.get("/api/router/status")
-async def router_status():
-    """Check if tool router model is reachable."""
-    import config as _cfg
-    url = _cfg.get("router_url")
-    if not url:
-        return {"online": False, "model": None, "error": "not configured"}
-    try:
-        import urllib.request
-        req = urllib.request.Request(f"{url}/models")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-            models = data.get("data") or data.get("models") or []
-            if models:
-                name = models[0].get("id") or models[0].get("name")
-                return {"online": True, "model": name}
-        return {"online": False, "model": None, "error": "no models found"}
-    except Exception as e:
-        return {"online": False, "model": None, "error": str(e)[:100]}
-
-
 @app.post("/api/streaming")
 async def set_streaming(data: dict):
     val = bool(data.get("enabled", True))
@@ -2023,6 +2002,10 @@ async def websocket_chat(ws: WebSocket):
                 }
                 if audio_url:
                     reply_payload["audio_url"] = audio_url
+                # Attach files queued by send_file tool
+                pending = tools.get_pending_files()
+                if pending:
+                    reply_payload["files"] = pending
                 if not await _ws_send_safe(ws, reply_payload):
                     break
 
@@ -2393,6 +2376,20 @@ def start(host: str = "0.0.0.0", port: int = 7860, ssl: bool = False):
     global _current_port
     _current_port = port
     import uvicorn
+
+    # Suppress noisy Windows asyncio ConnectionResetError on MCP subprocess cleanup
+    import sys
+    if sys.platform == "win32":
+        import asyncio
+        def _quiet_exception_handler(loop, context):
+            exc = context.get("exception")
+            if isinstance(exc, ConnectionResetError):
+                return  # silently ignore — normal on Windows when killing old MCP processes
+            loop.default_exception_handler(context)
+        try:
+            asyncio.get_event_loop().set_exception_handler(_quiet_exception_handler)
+        except RuntimeError:
+            pass
 
     # Check LAN access setting (default: on for backward compat)
     lan_val = db.kv_get("network:lan_access")

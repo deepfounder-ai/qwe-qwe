@@ -40,7 +40,7 @@ Advanced:
 - browser_close(): close browser, free resources
 
 Workflow for web search:
-1. browser_open("https://duckduckgo.com/?q=your+query") — NEVER Google (blocks bots)
+1. browser_open("https://search.brave.com/search?q=your+query") — NEVER Google (blocks bots)
 2. browser_snapshot() to read results
 3. browser_open(result_url) then browser_snapshot() to read article
 
@@ -154,7 +154,7 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
-    # ── NEW: Navigation ──
+    # ──Navigation ──
     {
         "type": "function",
         "function": {
@@ -179,7 +179,7 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
-    # ── NEW: Accessibility tree ──
+    # ──Accessibility tree ──
     {
         "type": "function",
         "function": {
@@ -193,7 +193,7 @@ TOOLS = [
             },
         },
     },
-    # ── NEW: Console logs ──
+    # ──Console logs ──
     {
         "type": "function",
         "function": {
@@ -208,7 +208,7 @@ TOOLS = [
             },
         },
     },
-    # ── NEW: Element interactions ──
+    # ──Element interactions ──
     {
         "type": "function",
         "function": {
@@ -294,7 +294,7 @@ TOOLS = [
             },
         },
     },
-    # ── NEW: Tabs ──
+    # ──Tabs ──
     {
         "type": "function",
         "function": {
@@ -442,7 +442,7 @@ def execute(name: str, args: dict) -> str:
         if name == "google_search":
             query = args.get("query", args.get("q", ""))
             if query:
-                args = {"url": f"https://duckduckgo.com/?q={query.replace(' ', '+')}"}
+                args = {"url": f"https://search.brave.com/search?q={query.replace(' ', '+')}"}
                 name = "browser_open"
         elif name in ("open_url", "navigate", "browse"):
             name = "browser_open"
@@ -462,16 +462,8 @@ def execute(name: str, args: dict) -> str:
             url = args.get("url", "")
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
-            # Auto-redirect Google searches to DuckDuckGo (Google blocks headless browsers)
-            import re as _re
-            _google_search = _re.match(r"https?://(?:www\.)?google\.com/search\?.*q=([^&]+)", url)
-            _google_news = _re.match(r"https?://news\.google\.com/search\?.*q=([^&]+)", url)
-            if _google_search:
-                url = f"https://duckduckgo.com/?q={_google_search.group(1)}"
-            elif _google_news:
-                url = f"https://duckduckgo.com/?q={_google_news.group(1)}+news"
-            elif "google.com/search" in url or "news.google.com" in url:
-                url = "https://duckduckgo.com/"
+            # No URL rewriting — model should follow system prompt instructions
+            # about which search engine to use (currently Brave Search)
             _page.goto(url, wait_until="domcontentloaded", timeout=15000)
             # Wait a bit for dynamic content
             _page.wait_for_timeout(1000)
@@ -481,7 +473,33 @@ def execute(name: str, args: dict) -> str:
                 text = _page.inner_text("body")[:2000]
             except Exception:
                 text = "(could not extract text)"
-            return f"Title: {title}\nURL: {_page.url}\n\n{text}"
+
+            # For search engine results: extract links with URLs so model can navigate
+            links_section = ""
+            if any(se in _page.url for se in ("duckduckgo.com", "bing.com", "google.com", "search.brave.com")):
+                try:
+                    links = _page.evaluate('''() => {
+                        const results = [];
+                        document.querySelectorAll('a[href]').forEach(a => {
+                            const href = a.href;
+                            const text = (a.innerText || '').trim().substring(0, 80);
+                            if (text.length > 10 && href.startsWith('http') &&
+                                !href.includes('duckduckgo.com') && !href.includes('bing.com') &&
+                                !href.includes('google.com') && !href.includes('brave.com') &&
+                                !href.includes('javascript:'))
+                                results.push({title: text, url: href});
+                        });
+                        return results.slice(0, 10);
+                    }''')
+                    if links:
+                        links_section = "\n\n--- Search Results (clickable URLs) ---\n"
+                        for i, lnk in enumerate(links, 1):
+                            links_section += f"{i}. [{lnk['title']}]({lnk['url']})\n"
+                        links_section += "\nTo open a result: browser_open(url)"
+                except Exception:
+                    pass
+
+            return f"Title: {title}\nURL: {_page.url}\n\n{text}{links_section}"
 
         elif name == "browser_screenshot":
             import config

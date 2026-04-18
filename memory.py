@@ -44,8 +44,11 @@ EMBED_DIM = 384  # multilingual-MiniLM output dimension
 def _get_dense_model():
     global _dense_model
     if _dense_model is None:
+        import warnings
         from fastembed import TextEmbedding
-        _dense_model = TextEmbedding(model_name=DENSE_MODEL_NAME)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            _dense_model = TextEmbedding(model_name=DENSE_MODEL_NAME)
         _log.info(f"loaded dense model: {DENSE_MODEL_NAME}")
     return _dense_model
 
@@ -159,25 +162,28 @@ def _ensure_payload_indexes(qc: QdrantClient, collection: str):
             "source_type": PayloadSchemaType.KEYWORD,
             "document_tags": PayloadSchemaType.KEYWORD,
         }
-        for field, schema_type in indexes.items():
-            if field not in existing:
-                qc.create_payload_index(collection, field, schema_type)
-                _log.info(f"created payload index: {field} ({schema_type})")
-        # Full-text index on "text" field for keyword search
-        if "text" not in existing:
-            try:
-                qc.create_payload_index(
-                    collection, "text",
-                    TextIndexParams(
-                        type="text",
-                        tokenizer=TokenizerType.WORD,
-                        min_token_len=2,
-                        lowercase=True,
-                    ),
-                )
-                _log.info("created full-text index on 'text'")
-            except Exception as e:
-                _log.debug(f"full-text index creation skipped: {e}")
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for field, schema_type in indexes.items():
+                if field not in existing:
+                    qc.create_payload_index(collection, field, schema_type)
+                    _log.info(f"created payload index: {field} ({schema_type})")
+            # Full-text index on "text" field for keyword search
+            if "text" not in existing:
+                try:
+                    qc.create_payload_index(
+                        collection, "text",
+                        TextIndexParams(
+                            type="text",
+                            tokenizer=TokenizerType.WORD,
+                            min_token_len=2,
+                            lowercase=True,
+                        ),
+                    )
+                    _log.info("created full-text index on 'text'")
+                except Exception as e:
+                    _log.debug(f"full-text index creation skipped: {e}")
     except Exception as e:
         _log.debug(f"payload index creation skipped: {e}")
 
