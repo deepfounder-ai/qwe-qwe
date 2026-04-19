@@ -7,8 +7,8 @@ import config
 @dataclass
 class BudgetLimits:
     """Configurable budget limits. 0 = unlimited."""
-    max_turns: int = 30
-    max_tool_calls: int = 25
+    max_turns: int = 0   # 0 = unlimited — rely on loop detection instead
+    max_tool_calls: int = 0  # 0 = unlimited — per-tool frequency limit handles loops
     max_input_tokens: int = 0
     max_output_tokens: int = 0
 

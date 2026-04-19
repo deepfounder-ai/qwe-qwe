@@ -184,6 +184,7 @@ def run_loop(
 
     stats = BudgetStats()
     all_tool_calls: list[str] = []
+    all_tool_details: list[dict] = []  # {name, args, result} for history
     final_content = ""
     thinking_content = ""
     extra = extra_kwargs or {}
@@ -210,6 +211,10 @@ def run_loop(
         if decision.exceeded:
             _log.warning(f"budget exceeded: {decision.reason}")
             emitter.status(f"Budget: {decision.reason}")
+            # Generate summary so model remembers what it did
+            if not final_content and all_tool_calls:
+                tools_summary = ", ".join(dict.fromkeys(all_tool_calls))  # unique, ordered
+                final_content = f"[Task completed with {len(all_tool_calls)} tool calls: {tools_summary}. Budget limit reached.]"
             break
 
         # Abort check — user pressed Stop
@@ -454,7 +459,8 @@ def run_loop(
                         continue
 
                     # Execute tool
-                    emitter.tool_start(tc["name"], str(args)[:80])
+                    args_preview = str(args)[:200]
+                    emitter.tool_start(tc["name"], args_preview)
                     stats.add_tool_call()
                     all_tool_calls.append(tc["name"])
 
@@ -469,8 +475,9 @@ def run_loop(
                     # Fix 4: Cap tool results to prevent context overflow
                     tool_result = _cap_tool_result(tool_result)
 
-                    result_short = tool_result.replace("\n", " ")[:150]
+                    result_short = tool_result.replace("\n", " ")[:200]
                     emitter.tool_end(tc["name"], result_short, tool_ms)
+                    all_tool_details.append({"name": tc["name"], "args": args_preview, "result": result_short})
 
                 # Append tool result to messages
                 messages.append({
@@ -551,6 +558,7 @@ def run_loop(
         "reply": final_content.strip(),
         "thinking": thinking_content.strip(),
         "tool_calls": all_tool_calls,
+        "tool_details": all_tool_details,
         "stats": stats,
         "tok_per_sec": tok_per_sec,
         "prompt_tokens": getattr(usage, 'prompt_tokens', 0) if usage else 0,

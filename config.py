@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.14.1"
+VERSION = "0.14.2"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -134,7 +134,7 @@ TZ_OFFSET = 0  # overridden at runtime from DB
 MAX_HISTORY_MESSAGES = 10  # last N messages in context (smart compaction handles the rest)
 MAX_MEMORY_RESULTS = 3     # top-K auto-retrieved from Qdrant per turn
 MAX_EXPERIENCE_RESULTS = 2 # top-K past experience cases injected per turn
-MAX_TOOL_ROUNDS = 10       # max consecutive tool calls per turn
+MAX_TOOL_ROUNDS = 0        # 0 = unlimited — loop detection handles infinite loops
 COMPACTION_THRESHOLD = 20  # auto-compact after N messages in DB
 THINKING_ENABLED = True    # send enable_thinking to model (toggle via /thinking or settings)
 

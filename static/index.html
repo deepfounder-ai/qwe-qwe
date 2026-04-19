@@ -3918,36 +3918,25 @@ function _humanToolDesc(name, args) {
 
 function _buildToolGroupsHtml(calls, isLive) {
   if (!calls.length) return '';
-  // Group by tool type
-  const groups = {};
-  for (const c of calls) {
-    const key = c.name;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(c);
-  }
-  let html = '';
-  for (const [toolName, items] of Object.entries(groups)) {
-    const meta = _getToolMeta(toolName);
-    const count = items.length;
-    const label = count === 1 ? meta.label : `${count} ${meta.label}s`;
-    const open = isLive ? ' open' : '';
-    html += `<details class="tool-group"${open}>`;
-    html += `<summary><i class="ph ph-${meta.icon}"></i> ${escapeHtml(label)}</summary>`;
-    html += `<div class="tool-group-body">`;
-    for (const item of items) {
-      const desc = _humanToolDesc(item.name, item.args);
-      const shortDesc = desc.length > 100 ? desc.slice(0, 97) + '...' : desc;
-      html += `<div class="tool-entry">`;
-      html += `<div class="tool-entry-name">${escapeHtml(item.name)}</div>`;
-      html += `<div class="tool-entry-desc">${escapeHtml(shortDesc)}</div>`;
-      if (item.result) {
-        const shortResult = item.result.length > 120 ? item.result.slice(0, 117) + '...' : item.result;
-        html += `<div class="tool-entry-result">${escapeHtml(shortResult)}</div>`;
-      }
-      html += `</div>`;
+  const open = isLive ? ' open' : '';
+  const label = calls.length === 1 ? '1 tool call' : `${calls.length} tool calls`;
+  let html = `<details class="tool-group"${open}>`;
+  html += `<summary><i class="ph ph-wrench"></i> ${label}</summary>`;
+  html += `<div class="tool-group-body">`;
+  for (const item of calls) {
+    const meta = _getToolMeta(item.name);
+    const argsText = (typeof item.args === 'string') ? item.args : JSON.stringify(item.args || '');
+    html += `<div class="tool-entry">`;
+    html += `<div class="tool-entry-name"><i class="ph ph-${meta.icon}" style="margin-right:4px;opacity:0.6"></i>${escapeHtml(item.name)}</div>`;
+    if (argsText && argsText !== '""' && argsText !== '{}') {
+      html += `<div class="tool-entry-desc">${escapeHtml(argsText.length > 200 ? argsText.slice(0, 197) + '...' : argsText)}</div>`;
     }
-    html += `</div></details>`;
+    if (item.result) {
+      html += `<div class="tool-entry-result">${escapeHtml(item.result.length > 200 ? item.result.slice(0, 197) + '...' : item.result)}</div>`;
+    }
+    html += `</div>`;
   }
+  html += `</div></details>`;
   return html;
 }
 
@@ -3974,6 +3963,8 @@ function connect() {
       document.getElementById('activityLog')?.remove();
       // Pass accumulated tool calls to message renderer
       data._toolCalls = _pendingToolCalls.slice();
+      // Save full tool call details in meta for history reload
+      if (data._toolCalls.length) data.tool_details = data._toolCalls;
       _pendingToolCalls = [];
       addMessage('assistant', data.text, data);
       setGenerating(false); loadStatus();
@@ -4985,11 +4976,14 @@ function addMessage(role, text, meta, imageSrc) {
     toolsDiv.innerHTML = _buildToolGroupsHtml(meta._toolCalls, false);
     div.appendChild(toolsDiv);
   }
-  // Also render from saved meta.tools (history reload)
+  // Also render from saved meta (history reload)
   if (role === 'assistant' && meta && meta.tools && meta.tools.length && !(meta._toolCalls && meta._toolCalls.length)) {
     const toolsDiv = document.createElement('div');
     toolsDiv.className = 'msg-tools';
-    const calls = meta.tools.map(t => ({name: t, args: ''}));
+    // Use detailed tool_details if available (has args + result), fallback to names only
+    const calls = (meta.tool_details && meta.tool_details.length)
+      ? meta.tool_details
+      : meta.tools.map(t => ({name: t, args: ''}));
     toolsDiv.innerHTML = _buildToolGroupsHtml(calls, false);
     div.appendChild(toolsDiv);
   }
@@ -5848,7 +5842,7 @@ function _getRandomTip() { return _TIPS[Math.floor(Math.random() * _TIPS.length)
 
 async function loadHistory(tid) {
   const t = tid||activeThreadId||'default';
-  const res = await fetch(`/api/history?limit=30&thread_id=${t}`);
+  const res = await fetch(`/api/history?limit=100&thread_id=${t}`);
   const msgs = await res.json();
   chat.innerHTML = '<div class="chat-spacer"></div>';
   if (!msgs.length) { chat.innerHTML=`<div class="empty"><div class="empty-logo"><img src="${_currentLogo}" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-lightbulb"></i> ${_getRandomTip()}</div></div>`; return; }

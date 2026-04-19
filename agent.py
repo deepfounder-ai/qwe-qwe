@@ -1274,6 +1274,7 @@ def _run_inner(user_input: str, thread_id: str | None,
         turn_ms = int((time.time() - turn_start) * 1000)
         msg_meta = {
             "tools": result.tool_calls_made,
+            "tool_details": loop_result.get("tool_details", []),
             "duration_ms": turn_ms,
             "context_hits": result.auto_context_hits,
             "thinking": result.thinking or "",
