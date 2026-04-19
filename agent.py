@@ -1261,6 +1261,7 @@ def _run_inner(user_input: str, thread_id: str | None,
             tool_executor=tools.execute,
             json_repair_fn=_repair_tool_json,
             extra_kwargs={"extra_body": {"options": {"num_ctx": config.get("ollama_num_ctx")}}} if providers.get_active_name() == "ollama" else {},
+            abort_event=_abort_event,
         )
 
         result.reply = _clean_response(loop_result["reply"])

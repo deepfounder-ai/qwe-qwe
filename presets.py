@@ -882,8 +882,31 @@ def uninstall(preset_id: str) -> None:
         _log.error(f"uninstall refused: {d} escapes PRESETS_DIR")
         return
 
-    # Clear indexed knowledge before the dir disappears.
+    # Clear ALL indexed knowledge associated with this preset:
+    # 1. RAG chunks tagged preset:<id>
+    # 2. RAG chunks by file_path (knowledge/ dir files)
+    # 3. Entities/wiki synthesized from this preset's knowledge
     try:
+        import memory
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+
+        # Delete by document_tags (preset:<id> tag set during indexing)
+        tag = f"preset:{preset_id}"
+        try:
+            qc = memory._get_qdrant()
+            qc.delete(
+                config.QDRANT_COLLECTION,
+                points_selector=FilterSelector(
+                    filter=Filter(must=[
+                        FieldCondition(key="document_tags", match=MatchValue(value=tag)),
+                    ])
+                ),
+            )
+            _log.info(f"uninstall: deleted chunks with tag {tag}")
+        except Exception as e:
+            _log.debug(f"uninstall: tag-based delete failed: {e}")
+
+        # Also delete by file_path (belt-and-suspenders)
         import rag
         k_dir = d / "knowledge"
         if k_dir.exists():

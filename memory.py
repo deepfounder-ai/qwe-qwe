@@ -853,6 +853,28 @@ def cleanup(max_age_days: int = 7, tag: str = "session"):
         pass
 
 
+def clear_graph():
+    """Delete all entity and wiki memories (clears the knowledge graph)."""
+    qc = _get_qdrant()
+    deleted = 0
+    try:
+        from qdrant_client.models import FilterSelector
+        for tag in ("entity", "wiki"):
+            result = qc.delete(
+                config.QDRANT_COLLECTION,
+                points_selector=FilterSelector(
+                    filter=Filter(must=[
+                        FieldCondition(key="tag", match=MatchValue(value=tag)),
+                    ])
+                ),
+            )
+            _log.info(f"cleared graph: tag={tag}")
+            deleted += 1
+    except Exception as e:
+        _log.warning(f"clear_graph failed: {e}")
+    return deleted
+
+
 def count() -> int:
     """Count total memories."""
     try:

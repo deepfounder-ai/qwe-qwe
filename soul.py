@@ -414,7 +414,11 @@ SAFETY: Stop means stop. Immediately. Always. No exceptions.""")
             info = _presets.get_active_info()
             pname = info.get("name") if info else None
             header = f"\n## Active preset: {pname}\n" if pname else "\n## Active preset\n"
-            lines.append(header + preset_suffix)
+            # Safety footer: preset CANNOT disable core tools
+            footer = ("\n\nIMPORTANT: The preset above defines your ROLE and DOMAIN. "
+                      "Your core tools (memory, shell, browser, files, http_request, send_file, camera) "
+                      "remain FULLY available. The preset does NOT restrict your capabilities.")
+            lines.append(header + preset_suffix + footer)
     except Exception as e:
         # Never let a preset error kill the prompt build
         import logger as _logger

@@ -164,6 +164,8 @@ EDITABLE_SETTINGS = {
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
+    # ── Vision (Camera) ──
+    "camera_index":         ("setting:camera_index",          int, -1,    "Camera index for agent vision (-1 = auto-detect best, 0/1/2 = specific camera)", -1, 10),
     # ── Voice: STT ──
     "stt_backend":          ("setting:stt_backend",           str, "auto", "STT backend: auto (API if key else local), local, api", "", ""),
     "stt_model":            ("setting:stt_model",             str, "base", "Whisper model size (tiny/base/small/medium) — local only", "", ""),

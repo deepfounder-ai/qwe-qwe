@@ -1336,7 +1336,19 @@ def doctor():
     """Run diagnostics on all qwe-qwe components."""
     import time as _time
 
-    console.print("\n  [bold yellow]⚡ qwe-qwe doctor[/]\n")
+    # Use a safe console that strips unicode on cp1251 terminals
+    from rich.console import Console as _C
+    console = _C(highlight=False)
+    _orig_print = console.print
+    def _safe_print(*a, **kw):
+        try:
+            _orig_print(*a, **kw)
+        except UnicodeEncodeError:
+            text = " ".join(str(x) for x in a)
+            print(text.encode("ascii", "replace").decode("ascii"))
+    console.print = _safe_print
+
+    console.print("\n  [bold yellow]qwe-qwe doctor[/]\n")
     passed = 0
     failed = 0
     warnings = 0
@@ -1525,14 +1537,21 @@ def doctor():
     def _check_stt():
         try:
             import stt
-            if not stt._check_faster_whisper():
-                return "⚠ faster-whisper not installed (pip install faster-whisper)"
-            import shutil
-            if not shutil.which("ffmpeg"):
-                return "⚠ ffmpeg not found"
-            return f"✓ faster-whisper + ffmpeg (model: {config.get('stt_model')})"
-        except Exception:
-            return "⚠ stt module not available"
+            backend = config.get("stt_backend")
+            has_whisper = stt._check_faster_whisper()
+            has_decoder = stt._has_audio_decoder()
+            api_key = bool(config.get("stt_openai_key"))
+            parts = []
+            if has_whisper: parts.append(f"whisper ({config.get('stt_model')})")
+            if has_decoder:
+                import shutil
+                parts.append("ffmpeg" if shutil.which("ffmpeg") else "PyAV")
+            if api_key: parts.append("API")
+            if not parts:
+                return "⚠ no STT backend available"
+            return f"✓ {' + '.join(parts)} [backend={backend}]"
+        except Exception as e:
+            return f"⚠ {e}"
     check("STT", _check_stt)
 
     def _check_tts():
@@ -1590,6 +1609,25 @@ def doctor():
         except ImportError:
             return "⚠ playwright not installed (browser skill unavailable)"
     check("Browser", _check_browser)
+
+    def _check_camera():
+        cam_idx = config.get("camera_index")
+        try:
+            import cv2
+            idx = cam_idx if cam_idx >= 0 else 0
+            cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                cap.release()
+                if ret:
+                    h, w = frame.shape[:2]
+                    return f"✓ camera {cam_idx if cam_idx >= 0 else 'auto'}: {w}x{h}"
+                return "⚠ camera opened but read failed"
+            cap.release()
+            return "⚠ no camera available"
+        except ImportError:
+            return "⚠ opencv not installed (pip install opencv-python-headless)"
+    check("Camera", _check_camera)
 
     # ── 13. Knowledge Graph ──
     console.print("  [dim]── Knowledge ──[/]")

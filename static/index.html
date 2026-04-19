@@ -592,6 +592,8 @@ body {
 .msg-file i { font-size: 20px; color: var(--accent); }
 .msg-file-name { font-size: 13px; font-weight: 500; }
 .msg-file-size { font-size: 11px; color: var(--text-dim); }
+.msg-capture { margin: 8px 0; }
+.msg-capture img { max-width: 320px; max-height: 240px; border-radius: var(--radius-md); border: 1px solid var(--border); }
 .drag-over {
   outline: 2px dashed var(--accent) !important;
   outline-offset: -8px;
@@ -1489,10 +1491,25 @@ summary:focus-visible, [role="button"]:focus-visible,
     <!-- Graph tab -->
     <div id="knGraphTab" style="display:none">
       <div id="knGraphEmpty" class="cron-empty" style="display:none">No entities yet. Save knowledge and run synthesis to build the graph.</div>
-      <div id="knGraphContainer" style="width:100%;height:500px;border:1px solid var(--border);border-radius:8px;background:var(--surface);overflow:hidden;position:relative">
-        <svg id="knGraphSvg" width="100%" height="100%"></svg>
+      <!-- Toolbar: filters + search -->
+      <div id="knGraphToolbar" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+        <span style="font-size:11px;color:var(--text-dim);margin-right:4px;">Filter:</span>
+        <div id="knGraphFilters"></div>
+        <input class="s-input" id="knGraphSearch" placeholder="Search node..." style="width:140px;font-size:12px;padding:4px 10px;margin-left:auto;border-radius:16px;"
+          oninput="_graphHighlight(this.value)">
+        <button class="s-btn" style="font-size:10px;color:var(--error);" onclick="clearGraph()" title="Delete all entities and wiki from graph"><i class="ph ph-trash"></i> Clear</button>
       </div>
-      <div id="knGraphInfo" style="margin-top:12px;font-size:12px;color:var(--text-dim);font-family:var(--mono)"></div>
+      <div style="display:flex;gap:12px;">
+        <!-- Graph canvas -->
+        <div id="knGraphContainer" style="flex:1;height:550px;border:1px solid var(--border);border-radius:8px;background:#0a0a0c;overflow:hidden;position:relative">
+          <svg id="knGraphSvg" width="100%" height="100%"></svg>
+        </div>
+        <!-- Info panel -->
+        <div id="knGraphPanel" style="width:260px;min-width:260px;border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:14px;font-size:12px;display:none;overflow-y:auto;max-height:550px;">
+          <div id="knGraphPanelContent"></div>
+        </div>
+      </div>
+      <div id="knGraphInfo" style="margin-top:8px;font-size:11px;color:var(--text-dim);font-family:var(--mono);display:flex;gap:12px;align-items:center;"></div>
     </div>
   </div>
 </div>
@@ -1550,6 +1567,7 @@ summary:focus-visible, [role="button"]:focus-visible,
       <div class="settings-nav-item" onclick="showSection('profile')"><span class="nav-icon"><i class="ph ph-user-circle"></i></span><span>Profile</span></div>
       <div class="settings-nav-item" onclick="showSection('heartbeat')"><span class="nav-icon"><i class="ph ph-heartbeat"></i></span><span>Heartbeat</span></div>
       <div class="settings-nav-item" onclick="showSection('voice')"><span class="nav-icon"><i class="ph ph-microphone"></i></span><span>Voice</span></div>
+      <div class="settings-nav-item" onclick="showSection('vision')"><span class="nav-icon"><i class="ph ph-eye"></i></span><span>Vision</span></div>
       <div class="settings-nav-item" onclick="showSection('mcp')"><span class="nav-icon"><i class="ph ph-plugs-connected"></i></span><span>MCP</span></div>
       <div class="settings-nav-item" onclick="showSection('stats')"><span class="nav-icon"><i class="ph ph-chart-bar"></i></span><span>Stats</span></div>
       <div class="settings-nav-item" onclick="showSection('system')"><span class="nav-icon"><i class="ph ph-wrench"></i></span><span>System</span></div>
@@ -1835,6 +1853,20 @@ summary:focus-visible, [role="button"]:focus-visible,
             <button class="s-btn primary" onclick="testTTS()"><i class="ph ph-speaker-high"></i> Play</button>
           </div>
           <div id="voiceTestResult" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <!-- Vision -->
+      <div class="settings-section" id="sec-vision">
+        <h2>Vision</h2>
+        <p class="desc">Configure camera access for the agent. The agent can capture frames on demand via <code>camera_capture</code> tool.</p>
+        <div class="s-card">
+          <div class="s-card-title"><i class="ph ph-video-camera"></i> Cameras</div>
+          <div id="visionCamList"><span style="color:var(--text-dim)">Click scan to detect cameras</span></div>
+          <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+            <button class="s-btn" onclick="scanCameras()"><i class="ph ph-magnifying-glass"></i> Scan cameras</button>
+            <span id="visionCamStatus" style="font-size:12px;color:var(--text-dim);"></span>
+          </div>
         </div>
       </div>
 
@@ -2335,6 +2367,7 @@ function showSection(name) {
   event.currentTarget.classList.add('active');
   // Load data for lazy sections
   if (name === 'mcp') loadMcpServers();
+  if (name === 'vision') scanCameras();
 }
 
 // ── Load all settings data ──
@@ -3246,6 +3279,64 @@ async function loadSettingsVoice() {
   } catch(e) { console.error('Voice settings load error:', e); }
 }
 
+// ── Vision Settings ──
+async function scanCameras() {
+  const list = document.getElementById('visionCamList');
+  const status = document.getElementById('visionCamStatus');
+  list.innerHTML = '<span style="color:var(--text-dim)"><i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> Scanning cameras... (may take a few seconds)</span>';
+  try {
+    const res = await fetch('/api/vision/cameras');
+    const data = await res.json();
+    const cameras = data.cameras || [];
+    const selected = data.selected;
+    if (!cameras.length) {
+      list.innerHTML = '<span style="color:var(--text-dim)">No cameras detected. Connect a webcam and scan again.</span>';
+      status.textContent = '';
+      return;
+    }
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:12px;">';
+    cameras.forEach(cam => {
+      const isSelected = (cam.index === selected) || (selected === -1 && cam.usable);
+      const border = isSelected ? 'border-color:var(--accent);box-shadow:0 0 0 2px rgba(245,166,35,0.3);' : '';
+      const preview = cam.preview
+        ? `<img src="data:image/jpeg;base64,${cam.preview}" style="width:160px;height:120px;object-fit:cover;border-radius:6px;display:block;">`
+        : `<div style="width:160px;height:120px;background:#111;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:11px;">No preview</div>`;
+      const badge = cam.usable
+        ? '<span style="color:var(--green);font-size:10px;"><i class="ph ph-check-circle"></i> OK</span>'
+        : '<span style="color:var(--error);font-size:10px;"><i class="ph ph-x-circle"></i> Blocked</span>';
+      html += `<div style="background:var(--surface2);border:2px solid var(--border);border-radius:var(--radius-lg);padding:8px;text-align:center;cursor:pointer;transition:all 0.2s;${border}" onclick="selectCamera(${cam.index})">
+        ${preview}
+        <div style="margin-top:6px;font-size:12px;font-weight:600;">Camera ${cam.index}</div>
+        <div style="font-size:10px;color:var(--text-dim);">${cam.resolution} ${badge}</div>
+        <button class="s-btn${isSelected ? ' primary' : ''}" style="margin-top:6px;font-size:10px;width:100%;" onclick="event.stopPropagation();selectCamera(${cam.index})">
+          ${cam.index === selected ? '✓ Selected' : 'Select'}
+        </button>
+      </div>`;
+    });
+    // Auto option
+    html += `<div style="background:var(--surface2);border:2px solid var(--border);border-radius:var(--radius-lg);padding:8px;text-align:center;cursor:pointer;display:flex;flex-direction:column;justify-content:center;min-width:160px;${selected === -1 ? 'border-color:var(--accent);box-shadow:0 0 0 2px rgba(245,166,35,0.3);' : ''}" onclick="selectCamera(-1)">
+      <div style="font-size:24px;margin:20px 0;"><i class="ph ph-magic-wand"></i></div>
+      <div style="font-size:12px;font-weight:600;">Auto</div>
+      <div style="font-size:10px;color:var(--text-dim);">Best available</div>
+      <button class="s-btn${selected === -1 ? ' primary' : ''}" style="margin-top:6px;font-size:10px;width:100%;" onclick="event.stopPropagation();selectCamera(-1)">
+        ${selected === -1 ? '✓ Auto' : 'Auto'}
+      </button>
+    </div>`;
+    html += '</div>';
+    list.innerHTML = html;
+    status.textContent = `${cameras.length} camera(s) found`;
+  } catch(e) {
+    list.innerHTML = `<span style="color:var(--error)">Error: ${e.message}</span>`;
+  }
+}
+
+async function selectCamera(index) {
+  await saveAgentSetting('camera_index', index, null, 'int');
+  // Reset persistent camera so next capture uses new index
+  try { await fetch('/api/vision/reset', {method:'POST'}); } catch {}
+  scanCameras();
+}
+
 async function installWhisper() {
   const st = document.getElementById('voiceWhisperInstallStatus');
   st.innerHTML = '<i class="ph ph-spinner" style="animation:spin 1s linear infinite"></i> Installing faster-whisper... (may take a minute)';
@@ -3939,6 +4030,12 @@ function connect() {
         _clearLiveContent();
       }
       showStatus(data.text);
+    } else if (data.type === 'get_frame') {
+      // Server requests a camera frame (agent tool: camera_capture)
+      const frame = captureVisionFrame();
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({type: 'frame_response', request_id: data.request_id, image_b64: frame || null}));
+      }
     } else if (data.type === 'update_progress') {
       _onUpdateProgress(data.step, data.status, data.detail);
     } else if (data.type === 'update_done') {
@@ -3990,8 +4087,12 @@ function showKnowledgeTab(tab) {
   if (tab === 'graph') knLoadGraph();
 }
 
-// ── Knowledge Graph (D3.js force-directed) ──
+// ── Knowledge Graph ──
 let _graphSim = null;
+let _graphData = null;
+let _graphActiveTypes = null;  // null = all visible
+let _graphNodeEls = [];
+let _graphLinkEls = [];
 
 async function knLoadGraph() {
   const container = document.getElementById('knGraphContainer');
@@ -4000,18 +4101,106 @@ async function knLoadGraph() {
   try {
     const res = await fetch('/api/knowledge/graph');
     const data = await res.json();
+    _graphData = data;
     if (!data.nodes || data.nodes.length === 0) {
       empty.style.display = '';
-      container.style.display = 'none';
-      info.textContent = '';
+      container.parentElement.querySelector('[style*="flex"]').style.display = 'none';
+      info.innerHTML = '';
+      document.getElementById('knGraphToolbar').style.display = 'none';
       return;
     }
     empty.style.display = 'none';
-    container.style.display = '';
-    info.textContent = `${data.nodes.length} entities, ${data.links.length} relations`;
+    document.getElementById('knGraphToolbar').style.display = 'flex';
+
+    // Build type filter buttons
+    const types = {};
+    data.nodes.forEach(n => { types[n.type] = (types[n.type]||0) + 1; });
+    const typeColors = {technology:'#f5a623',person:'#3498db',project:'#27ae60',concept:'#9b59b6',place:'#e74c3c',event:'#e67e22'};
+    const filtersEl = document.getElementById('knGraphFilters');
+    filtersEl.innerHTML = Object.entries(types).sort((a,b)=>b[1]-a[1]).map(([t,c]) =>
+      `<button class="s-btn" style="font-size:10px;padding:2px 8px;border-left:3px solid ${typeColors[t]||'#666'};"
+        data-type="${t}" onclick="_graphToggleType('${t}',this)">${t} (${c})</button>`
+    ).join('');
+
+    _graphActiveTypes = null;
     _renderGraph(data, container);
+
+    // Stats
+    info.innerHTML = `<span>${data.nodes.length} entities</span><span>${data.links.length} relations</span>` +
+      Object.entries(types).sort((a,b)=>b[1]-a[1]).map(([t,c]) =>
+        `<span style="color:${typeColors[t]||'#666'};">● ${t}: ${c}</span>`).join('');
   } catch(e) {
-    info.textContent = 'Error loading graph: ' + e.message;
+    info.innerHTML = 'Error: ' + e.message;
+  }
+}
+
+function _graphToggleType(type, btn) {
+  if (!_graphActiveTypes) _graphActiveTypes = new Set(_graphData.nodes.map(n=>n.type));
+  if (_graphActiveTypes.has(type)) { _graphActiveTypes.delete(type); btn.style.opacity='0.3'; }
+  else { _graphActiveTypes.add(type); btn.style.opacity='1'; }
+  // Show/hide nodes
+  _graphNodeEls.forEach(ne => {
+    const vis = !_graphActiveTypes || _graphActiveTypes.has(ne.data.type);
+    ne.el.style.display = vis ? '' : 'none';
+    ne.textEl.style.display = vis ? '' : 'none';
+  });
+  _graphLinkEls.forEach(le => {
+    const sVis = !_graphActiveTypes || _graphActiveTypes.has((_graphData.nodes.find(n=>n.id===le.data.source)||{}).type);
+    const tVis = !_graphActiveTypes || _graphActiveTypes.has((_graphData.nodes.find(n=>n.id===le.data.target)||{}).type);
+    le.el.style.display = (sVis && tVis) ? '' : 'none';
+    le.label.style.display = (sVis && tVis) ? '' : 'none';
+  });
+}
+
+function _graphHighlight(query) {
+  const q = query.toLowerCase().trim();
+  _graphNodeEls.forEach(ne => {
+    const match = !q || ne.data.id.toLowerCase().includes(q);
+    ne.el.style.opacity = match ? '1' : '0.15';
+    ne.textEl.style.opacity = match ? '1' : '0.15';
+  });
+}
+
+function _graphShowPanel(node) {
+  const panel = document.getElementById('knGraphPanel');
+  const content = document.getElementById('knGraphPanelContent');
+  panel.style.display = '';
+  const typeColors = {technology:'#f5a623',person:'#3498db',project:'#27ae60',concept:'#9b59b6',place:'#e74c3c',event:'#e67e22'};
+  const color = typeColors[node.type] || '#666';
+  // Find relations
+  const rels = (_graphData.links || []).filter(l => l.source === node.id || l.target === node.id);
+  const relHtml = rels.map(r => {
+    const other = r.source === node.id ? r.target : r.source;
+    const dir = r.source === node.id ? '→' : '←';
+    return `<div style="font-size:11px;padding:2px 0;"><span style="color:var(--text-dim);">${dir}</span> <b>${r.rel}</b> <span style="color:var(--accent);cursor:pointer;" onclick="_graphFocusNode('${other}')">${other}</span></div>`;
+  }).join('') || '<span style="color:var(--text-dim)">No relations</span>';
+  content.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <div style="width:12px;height:12px;border-radius:50%;background:${color};flex-shrink:0;"></div>
+      <div style="font-size:14px;font-weight:700;">${node.id}</div>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">${node.type} · ${node.weight || 1} observations</div>
+    <div style="font-size:12px;margin-bottom:12px;line-height:1.5;">${node.description || '<i style="color:var(--text-dim)">No description</i>'}</div>
+    <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--text-dim);">Relations (${rels.length})</div>
+    ${relHtml}
+    <button class="s-btn" style="margin-top:12px;font-size:10px;width:100%;" onclick="document.getElementById('knGraphPanel').style.display='none'">Close</button>
+  `;
+}
+
+async function clearGraph() {
+  if (!confirm('Delete ALL entities and wiki from the knowledge graph? This cannot be undone.')) return;
+  try {
+    await fetch('/api/knowledge/graph/clear', {method:'POST'});
+    knLoadGraph();
+  } catch(e) { alert('Failed: ' + e.message); }
+}
+
+function _graphFocusNode(name) {
+  const ne = _graphNodeEls.find(n => n.data.id === name);
+  if (ne) {
+    _graphShowPanel(ne.data);
+    ne.el.setAttribute('stroke', '#f5a623'); ne.el.setAttribute('stroke-width', '4');
+    setTimeout(() => { ne.el.setAttribute('stroke', '#222'); ne.el.setAttribute('stroke-width', '2'); }, 2000);
   }
 }
 
@@ -4037,7 +4226,8 @@ function _renderGraph(data, container) {
   svg.appendChild(g);
 
   // Links
-  const linkEls = [];
+  _graphLinkEls = [];
+  const linkEls = _graphLinkEls;
   data.links.forEach(l => {
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     line.setAttribute('stroke', '#333');
@@ -4059,43 +4249,58 @@ function _renderGraph(data, container) {
 
   // Nodes
   const nodeEls = [];
+  // Count connections for sizing
+  const connCount = {};
+  data.links.forEach(l => { connCount[l.source] = (connCount[l.source]||0)+1; connCount[l.target] = (connCount[l.target]||0)+1; });
   data.nodes.forEach(n => {
-    const r = Math.max(8, Math.min(24, 6 + (n.weight || 1) * 3));
+    const conns = connCount[n.id] || 0;
+    const r = Math.max(10, Math.min(30, 8 + conns * 2.5 + (n.weight || 1) * 2));
     const color = typeColors[n.type] || '#666';
 
     const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     circle.setAttribute('r', r);
     circle.setAttribute('fill', color);
+    circle.setAttribute('fill-opacity', '0.85');
     circle.setAttribute('stroke', '#222');
     circle.setAttribute('stroke-width', '2');
     circle.setAttribute('cursor', 'pointer');
     g.appendChild(circle);
 
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    text.textContent = n.id;
+    text.textContent = n.id.length > 18 ? n.id.substring(0, 16) + '...' : n.id;
     text.setAttribute('fill', '#e0e0e0');
-    text.setAttribute('font-size', '11');
+    text.setAttribute('font-size', r > 15 ? '11' : '9');
     text.setAttribute('font-weight', '600');
     text.setAttribute('text-anchor', 'middle');
     text.setAttribute('dy', r + 14);
     text.setAttribute('pointer-events', 'none');
     g.appendChild(text);
 
-    // Hover tooltip
+    // Hover: highlight connections
     circle.onmouseenter = () => {
-      document.getElementById('knGraphInfo').textContent =
-        `${n.id} (${n.type}) — ${n.description || 'no description'} — ${n.weight || 1} observations`;
       circle.setAttribute('stroke', '#f5a623');
-      circle.setAttribute('stroke-width', '3');
+      circle.setAttribute('stroke-width', '4');
+      circle.setAttribute('fill-opacity', '1');
+      // Highlight connected links
+      linkEls.forEach(le => {
+        if (le.data.source === n.id || le.data.target === n.id) {
+          le.el.setAttribute('stroke', '#f5a623'); le.el.setAttribute('stroke-width', '2.5');
+        }
+      });
     };
     circle.onmouseleave = () => {
-      document.getElementById('knGraphInfo').textContent =
-        `${data.nodes.length} entities, ${data.links.length} relations`;
       circle.setAttribute('stroke', '#222');
       circle.setAttribute('stroke-width', '2');
+      circle.setAttribute('fill-opacity', '0.85');
+      linkEls.forEach(le => {
+        le.el.setAttribute('stroke', '#333'); le.el.setAttribute('stroke-width', '1.5');
+      });
     };
+    // Click: show info panel
+    circle.onclick = (e) => { e.stopPropagation(); _graphShowPanel(n); };
 
     nodeEls.push({el: circle, textEl: text, data: n, r});
+    _graphNodeEls = nodeEls;
     n._x = width/2 + (Math.random() - 0.5) * 200;
     n._y = height/2 + (Math.random() - 0.5) * 200;
     n._vx = 0; n._vy = 0;
@@ -4828,17 +5033,21 @@ function addMessage(role, text, meta, imageSrc) {
       audioDiv.innerHTML = `<audio controls preload="none" src="${escapeHtml(meta.audio_url)}"></audio>`;
       div.appendChild(audioDiv);
     }
-    // File attachments from send_file tool
+    // File attachments from send_file / camera_capture
     if (meta.files && meta.files.length) {
       const filesDiv = document.createElement('div');
       filesDiv.className = 'msg-files';
       for (const f of meta.files) {
-        const sizeStr = f.size > 1024*1024 ? `${(f.size/1024/1024).toFixed(1)} MB` : `${(f.size/1024).toFixed(1)} KB`;
-        filesDiv.innerHTML += `<a class="msg-file" href="${escapeHtml(f.url)}" download="${escapeHtml(f.name)}" title="${escapeHtml(f.caption || f.name)}">
-          <i class="ph ph-file-arrow-down"></i>
-          <span class="msg-file-name">${escapeHtml(f.name)}</span>
-          <span class="msg-file-size">${sizeStr}</span>
-        </a>`;
+        if (f.is_image) {
+          filesDiv.innerHTML += `<div class="msg-capture"><img src="${escapeHtml(f.url)}" alt="${escapeHtml(f.caption || 'capture')}" loading="lazy"></div>`;
+        } else {
+          const sizeStr = f.size > 1024*1024 ? `${(f.size/1024/1024).toFixed(1)} MB` : `${(f.size/1024).toFixed(1)} KB`;
+          filesDiv.innerHTML += `<a class="msg-file" href="${escapeHtml(f.url)}" download="${escapeHtml(f.name)}" title="${escapeHtml(f.caption || f.name)}">
+            <i class="ph ph-file-arrow-down"></i>
+            <span class="msg-file-name">${escapeHtml(f.name)}</span>
+            <span class="msg-file-size">${sizeStr}</span>
+          </a>`;
+        }
       }
       div.appendChild(filesDiv);
     }
@@ -5579,12 +5788,70 @@ input.addEventListener('input', () => { input.style.height='auto'; input.style.h
 
 
 // ── History ──
+const _TIPS = [
+  // Getting started
+  "Try: \"What can you do?\"",
+  "Say \"remember this\" to save anything to memory",
+  "Ask me to search the web — I'll use Brave Search",
+  "Drag & drop files to chat — I can read them",
+  "Click 📹 to enable camera — I can see what you show me",
+  // Voice & camera
+  "Try Live mode 📻 for hands-free voice conversation",
+  "Say \"look at my desk\" — I'll check the camera",
+  "Enable voice in Settings → Voice for speech input",
+  "I can listen, see, and speak — try all three at once",
+  // Tools & capabilities
+  "I can browse the web — just ask me to find something",
+  "I can write and run code — try \"write a Python script\"",
+  "I can create files and send them to you in chat",
+  "Ask \"what tools do you have?\" to see my capabilities",
+  "I can search my memory — ask about past conversations",
+  // Web browsing
+  "Try: \"Find latest news about AI\"",
+  "I can open websites, read pages, and fill forms",
+  "I can take screenshots of web pages",
+  "Ask me to research a topic — I'll browse multiple sources",
+  // Productivity
+  "Try: \"Create a markdown report about...\"",
+  "I can schedule tasks — say \"remind me in 30 minutes\"",
+  "Ask me to summarize a long article or document",
+  "Say \"create a file\" and I'll attach it to chat",
+  // Memory
+  "I remember things between conversations",
+  "Say \"what do you remember about me?\"",
+  "I learn from our past interactions",
+  "My memory is searchable — ask about anything we discussed",
+  // Settings & customization
+  "Customize my personality in Settings → Soul",
+  "Switch models in Settings → Model",
+  "Add MCP servers in Settings → MCP",
+  "Upload files to Knowledge Base for RAG search",
+  // Fun & advanced
+  "Try: \"Write a poem about...\"",
+  "I can run shell commands — ask me to check system info",
+  "Ask me to translate text to any language",
+  "Try a multi-step task: \"Find 3 news articles and make a report\"",
+  "I work with Telegram too — set up your bot in Settings",
+  // Tips
+  "Use threads to organize different conversations",
+  "I support thinking mode — watch me reason step by step",
+  "Long task? I won't stop until it's done",
+  "Camera + voice + tools = your AI assistant",
+  "All your data stays local — nothing sent to cloud",
+  "Press ■ to stop me mid-generation",
+  "I can read PDFs — just drag and drop",
+  "Try: \"What's the weather in Tokyo?\"",
+  "Ask me to compare two things — I'll research both",
+  "I can write code in any language",
+];
+function _getRandomTip() { return _TIPS[Math.floor(Math.random() * _TIPS.length)]; }
+
 async function loadHistory(tid) {
   const t = tid||activeThreadId||'default';
   const res = await fetch(`/api/history?limit=30&thread_id=${t}`);
   const msgs = await res.json();
   chat.innerHTML = '<div class="chat-spacer"></div>';
-  if (!msgs.length) { chat.innerHTML=`<div class="empty"><div class="empty-logo"><img src="${_currentLogo}" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-chat-circle-dots"></i> start chatting</div></div>`; return; }
+  if (!msgs.length) { chat.innerHTML=`<div class="empty"><div class="empty-logo"><img src="${_currentLogo}" alt="qwe-qwe"></div><div class="empty-text"><i class="ph ph-lightbulb"></i> ${_getRandomTip()}</div></div>`; return; }
   msgs.forEach(m => {
     const imageSrc = m.meta?.image_path || null;
     addMessage(m.role, m.content, m.meta || null, imageSrc);
@@ -5608,8 +5875,9 @@ async function checkVersion() {
   try {
     const res = await fetch('/api/version');
     const v = await res.json();
+    if (v.error) return;  // GitHub rate limit or network error — silently skip
     const el = document.getElementById('versionBadge');
-    if (!el) return;
+    if (!el || !v.current) return;
     if (v.update_available) {
       el.className = 'version-badge outdated';
       el.textContent = `v${v.current} → v${v.latest}`;

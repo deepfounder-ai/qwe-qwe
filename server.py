@@ -23,6 +23,7 @@ import os
 import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
+import tools
 
 # Global abort flag
 _abort_event = threading.Event()
@@ -36,6 +37,9 @@ _ws_loop: asyncio.AbstractEventLoop | None = None
 # Module-level state for knowledge indexing
 _knowledge_task: dict | None = None  # {task_id, status, current, total, file, phase, errors}
 _knowledge_lock = threading.Lock()
+
+# Camera frame request/response system — allows agent tools to capture frames on demand
+_pending_frame_requests: dict = {}  # request_id → asyncio.Event + result
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -1031,9 +1035,100 @@ async def set_thinking(data: dict):
     return {"enabled": val}
 
 
+@app.get("/api/vision/cameras")
+async def list_cameras():
+    """Scan available cameras with preview snapshots."""
+    import functools
+    loop = asyncio.get_event_loop()
+
+    def _scan_sync():
+        cameras = []
+        try:
+            import cv2, base64, math
+            for i in range(5):
+                cap = cv2.VideoCapture(i)
+                if not cap.isOpened():
+                    continue
+                # Warm up
+                for _ in range(5):
+                    cap.read()
+                import time; time.sleep(0.2)
+                ret, frame = cap.read()
+                cap.release()
+                if not ret:
+                    continue
+                h, w = frame.shape[:2]
+                brightness = float(frame.mean())
+                # Create thumbnail preview (160x120)
+                preview_b64 = None
+                try:
+                    scale = min(160 / w, 120 / h)
+                    thumb = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                    _, buf = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                    preview_b64 = base64.b64encode(buf).decode()
+                except Exception:
+                    pass
+                cameras.append({
+                    "index": i,
+                    "resolution": f"{w}x{h}",
+                    "brightness": round(brightness, 1),
+                    "usable": brightness > 3,
+                    "preview": preview_b64,
+                })
+        except ImportError:
+            pass
+        return cameras
+
+    cameras = await loop.run_in_executor(None, _scan_sync)
+    current = config.get("camera_index")
+    return {"cameras": cameras, "selected": current}
+
+
+@app.post("/api/vision/reset")
+async def vision_reset():
+    """Reset persistent camera (e.g. after changing camera_index setting)."""
+    tools.camera_release()
+    return {"ok": True}
+
+
 @app.get("/api/streaming")
 async def get_streaming():
     return {"enabled": db.kv_get("streaming_enabled") != "false"}  # on by default
+
+
+async def request_camera_frame(timeout: float = 5.0) -> str | None:
+    """Request a camera frame from the connected WebSocket client.
+    Returns base64 JPEG or None if no client/camera available.
+    Called by agent tools (camera_capture) from background thread.
+    """
+    import uuid as _uuid
+    req_id = _uuid.uuid4().hex[:8]
+    event = asyncio.Event()
+    _pending_frame_requests[req_id] = {"event": event, "image_b64": None}
+
+    # Broadcast frame request to all WS clients
+    await _broadcast({"type": "get_frame", "request_id": req_id})
+
+    # Wait for response (frontend sends frame_response)
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        _pending_frame_requests.pop(req_id, None)
+        return None
+
+    result = _pending_frame_requests.pop(req_id, {}).get("image_b64")
+    return result
+
+
+def request_camera_frame_sync(timeout: float = 5.0) -> str | None:
+    """Synchronous wrapper for request_camera_frame — used by agent tools."""
+    if not _ws_loop or not _ws_clients:
+        return None
+    future = asyncio.run_coroutine_threadsafe(request_camera_frame(timeout), _ws_loop)
+    try:
+        return future.result(timeout=timeout + 1)
+    except Exception:
+        return None
 
 
 @app.post("/api/streaming")
@@ -1600,6 +1695,13 @@ async def knowledge_graph():
     return {"nodes": nodes, "links": links}
 
 
+@app.post("/api/knowledge/graph/clear")
+async def knowledge_graph_clear():
+    """Clear all entities and wiki from the knowledge graph."""
+    mem.clear_graph()
+    return {"ok": True, "message": "Graph cleared — entities and wiki removed"}
+
+
 @app.get("/api/knowledge/list")
 async def knowledge_list():
     """List all indexed files."""
@@ -1817,6 +1919,15 @@ async def websocket_chat(ws: WebSocket):
             data = await ws.receive_text()
             try:
                 msg = json.loads(data)
+
+                # Handle frame responses from camera_capture requests
+                if msg.get("type") == "frame_response":
+                    req_id = msg.get("request_id")
+                    if req_id and req_id in _pending_frame_requests:
+                        _pending_frame_requests[req_id]["image_b64"] = msg.get("image_b64")
+                        _pending_frame_requests[req_id]["event"].set()
+                    continue
+
                 user_input = msg.get("text", "").strip()
                 thread_id = msg.get("thread_id")  # optional — None uses active
                 image_b64 = msg.get("image_b64")  # optional base64 image

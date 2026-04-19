@@ -154,6 +154,7 @@ def run_loop(
     json_repair_fn=None,
     self_check_fn=None,
     extra_kwargs: dict | None = None,
+    abort_event=None,
 ) -> dict:
     """Run the agent loop.
 
@@ -209,6 +210,12 @@ def run_loop(
         if decision.exceeded:
             _log.warning(f"budget exceeded: {decision.reason}")
             emitter.status(f"Budget: {decision.reason}")
+            break
+
+        # Abort check — user pressed Stop
+        if abort_event and abort_event.is_set():
+            _log.info("abort: user requested stop")
+            final_content = "⏹ Stopped."
             break
 
         # Layer 4: force finish — after loop detection, let model produce one more reply then stop
@@ -290,6 +297,10 @@ def run_loop(
         in_think = False
         _think_detected = False
         for chunk in stream:
+            # Abort mid-stream
+            if abort_event and abort_event.is_set():
+                _log.info("abort: stopping stream mid-generation")
+                break
             # Usage from final chunk
             if hasattr(chunk, 'usage') and chunk.usage:
                 usage = chunk.usage

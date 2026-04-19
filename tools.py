@@ -129,6 +129,109 @@ def _check_shell_safety(cmd: str) -> str | None:
     return None
 
 
+# ── Persistent Camera (OpenCV) ──
+
+import threading as _cam_threading
+
+_camera_lock = _cam_threading.Lock()
+_camera_cap = None      # cv2.VideoCapture instance (stays open)
+_camera_last_frame = None  # latest base64 JPEG
+_camera_last_ts = 0.0   # timestamp of last capture
+
+
+def _camera_grab_frame() -> str | None:
+    """Grab a camera frame. Tries: 1) WebSocket (browser), 2) OpenCV (direct).
+    OpenCV camera stays open for fast subsequent captures.
+    Returns base64 JPEG or None.
+    """
+    global _camera_cap, _camera_last_frame, _camera_last_ts
+    import time as _time
+
+    # Try 1: WebSocket (browser camera)
+    try:
+        from server import request_camera_frame_sync
+        frame = request_camera_frame_sync(timeout=3.0)
+        if frame:
+            _log.info(f"camera: frame via WebSocket ({len(frame)} chars)")
+            return frame
+    except (ImportError, Exception):
+        pass
+
+    # Try 2: OpenCV persistent camera
+    with _camera_lock:
+        try:
+            import cv2
+        except ImportError:
+            _log.warning("camera: opencv-python not installed")
+            return None
+
+        # Open camera if not yet open
+        if _camera_cap is None or not _camera_cap.isOpened():
+            cam_setting = config.get("camera_index")
+            if cam_setting >= 0:
+                # Specific camera requested
+                _log.info(f"camera: opening index {cam_setting} (from settings)")
+                _camera_cap = cv2.VideoCapture(cam_setting)
+                if _camera_cap.isOpened():
+                    for _ in range(5): _camera_cap.read()
+                    _time.sleep(0.3)
+                else:
+                    _log.warning(f"camera: index {cam_setting} not available")
+                    _camera_cap = None
+                    return None
+            else:
+                # Auto-detect: try indexes 0-3, pick first with real frames
+                _log.info("camera: auto-detecting...")
+                for cam_idx in range(4):
+                    cap = cv2.VideoCapture(cam_idx)
+                    if not cap.isOpened():
+                        continue
+                    for _ in range(5): cap.read()
+                    _time.sleep(0.3)
+                    ret, test_frame = cap.read()
+                    if ret and test_frame.mean() > 3:
+                        _camera_cap = cap
+                        _log.info(f"camera: auto-selected index {cam_idx} ({test_frame.shape[1]}x{test_frame.shape[0]})")
+                        break
+                    cap.release()
+            if _camera_cap is None or not _camera_cap.isOpened():
+                _log.warning("camera: no working camera found")
+                _camera_cap = None
+                return None
+
+        ret, img = _camera_cap.read()
+        if not ret:
+            _log.warning("camera: read() failed, reopening...")
+            _camera_cap.release()
+            _camera_cap = None
+            return None
+
+        # Resize to ~49K pixels
+        import math
+        h, w = img.shape[:2]
+        max_area = 49152
+        if w * h > max_area:
+            scale = math.sqrt(max_area / (w * h))
+            img = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+        import base64 as _b64
+        _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        frame = _b64.b64encode(buf).decode()
+        _camera_last_frame = frame
+        _camera_last_ts = _time.time()
+        _log.info(f"camera: frame via OpenCV ({len(frame)} chars)")
+        return frame
+
+
+def camera_release():
+    """Release the persistent camera (called on shutdown)."""
+    global _camera_cap
+    with _camera_lock:
+        if _camera_cap:
+            _camera_cap.release()
+            _camera_cap = None
+
+
 # ── Core tools (always loaded) vs Extended (loaded via tool_search) ──
 
 _CORE_TOOL_NAMES = {
@@ -139,6 +242,7 @@ _CORE_TOOL_NAMES = {
     "tool_search",  # meta-tool to discover more tools
     "browser_open", "browser_snapshot",  # web browsing — most requested tools
     "send_file",  # attach file to chat message
+    "camera_capture",  # capture camera frame for vision analysis
 }
 
 # Pending files to attach to the response (populated by send_file tool)
@@ -267,6 +371,19 @@ TOOLS = [
                     "caption": {"type": "string", "description": "Short description of the file (optional)"},
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "camera_capture",
+            "description": "Capture a photo from the user's camera RIGHT NOW and analyze it. Use when user says 'look', 'what do you see', 'check camera', or when you need to see something. Camera must be enabled by user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "What to look for or analyze (e.g. 'describe what you see', 'read the text on the paper', 'identify the schematic')"},
+                },
             },
         },
     },
@@ -787,6 +904,38 @@ def execute(name: str, args: dict) -> str:
                 "caption": caption,
             })
             return f"File attached: {p.name} ({size / 1024:.1f} KB). User will see download link."
+
+        elif name == "camera_capture":
+            frame = _camera_grab_frame()
+            if not frame:
+                return "Error: no camera available. Connect a webcam or enable camera in web UI."
+            # Save frame to uploads so user can see it in chat
+            import uuid as _uuid, base64 as _b64
+            img_id = _uuid.uuid4().hex[:8]
+            img_path = Path(config.UPLOADS_DIR) / f"cam_{img_id}.jpg"
+            img_path.write_bytes(_b64.b64decode(frame))
+            img_url = f"/uploads/cam_{img_id}.jpg"
+            _pending_files.append({
+                "path": str(img_path), "name": f"cam_{img_id}.jpg",
+                "url": img_url, "size": img_path.stat().st_size,
+                "caption": "Camera capture", "is_image": True,
+            })
+
+            # Send frame to LLM for vision analysis — uses current active model
+            prompt = args.get("prompt") or "Describe what you see in detail."
+            import providers
+            try:
+                resp = providers.get_client().chat.completions.create(
+                    model=providers.get_model(),
+                    messages=[{"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}},
+                        {"type": "text", "text": prompt},
+                    ]}],
+                    temperature=0.3, max_tokens=1024, stream=False,
+                )
+                return f"Camera capture:\n{resp.choices[0].message.content or '(no description)'}"
+            except Exception as e:
+                return f"Error analyzing camera frame: {e}"
 
         elif name == "shell":
             cmd = args["command"]
