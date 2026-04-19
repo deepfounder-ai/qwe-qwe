@@ -405,12 +405,14 @@ def _load_schema() -> dict | None:
 def load_directory(preset_dir: Path | str) -> PresetInfo:
     """Load a preset from an unpacked directory."""
     d = Path(preset_dir).expanduser().resolve()
+    _log.info(f"load_directory: {d}")
     if not d.is_dir():
         raise FileNotFoundError(f"not a directory: {d}")
     manifest_path = d / "preset.yaml"
     if not manifest_path.exists():
         raise FileNotFoundError(f"preset.yaml not found in {d}")
     manifest = _load_yaml(manifest_path)
+    _log.info(f"load_directory: manifest loaded, id={manifest.get('id')}, name={manifest.get('name')}")
     return _info_from_manifest(manifest, source_dir=d, source_kind="directory",
                                origin_path=str(d))
 
@@ -427,6 +429,7 @@ def load_archive(archive_path: Path | str) -> PresetInfo:
     dir) OR `cleanup(info)` if validation fails before install.
     """
     ap = Path(archive_path).expanduser().resolve()
+    _log.info(f"load_archive: {ap} ({ap.stat().st_size / 1024:.1f} KB)" if ap.exists() else f"load_archive: {ap}")
     if not ap.is_file():
         raise FileNotFoundError(f"archive not found: {ap}")
     if not zipfile.is_zipfile(ap):
@@ -479,6 +482,7 @@ def load_archive(archive_path: Path | str) -> PresetInfo:
         # status == "verified" — no log needed, happy path
     # policy == "off" → skip all checks
 
+    _log.info(f"load_archive: signature={status}, policy={policy}")
     tmp = Path(tempfile.mkdtemp(prefix="qwe_preset_"))
     tmp_resolved = tmp.resolve()
     try:
@@ -496,18 +500,23 @@ def load_archive(archive_path: Path | str) -> PresetInfo:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info, "r") as src, open(dest, "wb") as out:
                     shutil.copyfileobj(src, out)
-    except Exception:
+    except Exception as e:
+        _log.error(f"load_archive: extraction failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
+    _log.info(f"load_archive: extracted to {tmp}")
     manifest_path = _find_manifest(tmp)
     if not manifest_path:
+        _log.error(f"load_archive: preset.yaml not found in {tmp}")
         shutil.rmtree(tmp, ignore_errors=True)
         raise FileNotFoundError(f"preset.yaml not found inside archive {ap.name}")
 
     try:
         manifest = _load_yaml(manifest_path)
-    except Exception:
+        _log.info(f"load_archive: manifest loaded, id={manifest.get('id')}, name={manifest.get('name')}")
+    except Exception as e:
+        _log.error(f"load_archive: YAML parse failed: {e}")
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     info = _info_from_manifest(manifest, source_dir=manifest_path.parent,
@@ -641,6 +650,7 @@ def load_any(source: str | Path) -> PresetInfo:
 
 def validate(info: PresetInfo) -> list[str]:
     """Return a list of validation errors; empty list means valid."""
+    _log.info(f"validate: {info.id} from {info.source_dir}")
     errors: list[str] = []
     manifest = info.manifest
 
@@ -774,10 +784,12 @@ def install(info: PresetInfo, *, overwrite: bool = False) -> dict:
     """
     # Fail fast on bad id BEFORE touching the filesystem.
     _ensure_id(info.id)
+    _log.info(f"install: starting {info.id} v{info.version} from {info.source_kind}")
 
     try:
         errors = validate(info)
         if errors:
+            _log.error(f"install: validation failed for {info.id}: {errors}")
             raise ValueError(
                 "preset validation failed:\n  - " + "\n  - ".join(errors)
             )
@@ -802,12 +814,15 @@ def install(info: PresetInfo, *, overwrite: bool = False) -> dict:
 
         # Copy source_dir → target — rollback on any failure so we don't
         # leave a half-copied preset for the next install attempt to trip on.
+        _log.info(f"install: copying {info.source_dir} → {target}")
         try:
             shutil.copytree(info.source_dir, target)
-        except Exception:
+        except Exception as e:
+            _log.error(f"install: copy failed: {e}")
             shutil.rmtree(target, ignore_errors=True)
             raise
 
+        _log.info(f"install: registering in DB")
         # Register in DB
         db.execute(
             """INSERT OR REPLACE INTO presets
