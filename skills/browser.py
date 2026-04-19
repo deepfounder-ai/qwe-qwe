@@ -56,7 +56,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "browser_open",
-            "description": "Open a URL in a real headless browser (Playwright/Chromium). Use this for ALL web pages: websites, search results, news, articles, HTML. Do NOT use http_request for web pages. Returns page title and text preview.",
+            "description": "Fetch and read a web page in background (headless, invisible to user). Returns page text. Use for searching, reading articles, scraping. NOT for opening browser for user — use open_url for that.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -152,6 +152,20 @@ TOOLS = [
             "name": "browser_close",
             "description": "Close the browser and free resources.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_set_visible",
+            "description": "Switch browser to VISIBLE mode (user can see the window) or back to headless. Call this BEFORE browser_open when user wants to watch you work in the browser.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "visible": {"type": "boolean", "description": "true = show browser window, false = headless (default)"},
+                },
+                "required": ["visible"],
+            },
         },
     },
     # ──Navigation ──
@@ -380,6 +394,9 @@ def _attach_page_listeners(page):
     page.on("console", _on_console)
 
 
+_headless_mode = True  # False = visible browser window user can see
+
+
 def _ensure_browser():
     """Launch Playwright browser if not running."""
     global _playwright, _browser, _page, _pages, _network_log, _console_log
@@ -393,7 +410,7 @@ def _ensure_browser():
         )
     _playwright = sync_playwright().start()
     _browser = _playwright.chromium.launch(
-        headless=True,
+        headless=_headless_mode,
         args=["--no-sandbox", "--disable-dev-shm-usage"],
     )
     context = _browser.new_context(
@@ -450,6 +467,15 @@ def execute(name: str, args: dict) -> str:
             name = "browser_snapshot"
         elif name in ("take_screenshot", "capture_screenshot"):
             name = "browser_screenshot"
+
+        if name == "browser_set_visible":
+            global _headless_mode
+            visible = args.get("visible", True)
+            new_mode = not visible  # headless is the opposite of visible
+            if new_mode != _headless_mode:
+                _headless_mode = new_mode
+                _close_browser()  # restart with new mode on next call
+            return f"Browser set to {'visible' if visible else 'headless'} mode. Next browser_open will {'show' if visible else 'hide'} the window."
 
         if name == "browser_close":
             _close_browser()

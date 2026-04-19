@@ -172,7 +172,13 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — load timezone before anything else
+    tz_val = db.kv_get("tz_offset") or db.kv_get("timezone")
+    if tz_val:
+        try:
+            config.TZ_OFFSET = int(tz_val)
+        except (ValueError, TypeError):
+            pass
     import scheduler
     scheduler.start()
     # Start MCP servers

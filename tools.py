@@ -240,9 +240,11 @@ _CORE_TOOL_NAMES = {
     "self_config",  # manage own settings
     "http_request", "spawn_task",
     "tool_search",  # meta-tool to discover more tools
-    "browser_open", "browser_snapshot",  # web browsing — most requested tools
+    "browser_open", "browser_snapshot", "browser_set_visible",
+    "browser_click", "browser_fill", "browser_eval",  # web interaction
     "send_file",  # attach file to chat message
     "camera_capture",  # capture camera frame for vision analysis
+    "open_url",  # open URL in user's real desktop browser
 }
 
 # Pending files to attach to the response (populated by send_file tool)
@@ -384,6 +386,20 @@ TOOLS = [
                 "properties": {
                     "prompt": {"type": "string", "description": "What to look for or analyze (e.g. 'describe what you see', 'read the text on the paper', 'identify the schematic')"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": "Open URL in the user's REAL desktop browser (visible to user). Use when user says 'open', 'launch', 'show me in browser'. NOT for reading pages — use browser_open for that.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to open"},
+                },
+                "required": ["url"],
             },
         },
     },
@@ -904,6 +920,22 @@ def execute(name: str, args: dict) -> str:
                 "caption": caption,
             })
             return f"File attached: {p.name} ({size / 1024:.1f} KB). User will see download link."
+
+        elif name == "open_url":
+            url = args.get("url", "")
+            if not url:
+                return "Error: URL required"
+            import subprocess, sys
+            try:
+                if sys.platform == "win32":
+                    subprocess.Popen(["cmd.exe", "/c", "start", "", url], shell=False)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", url])
+                else:
+                    subprocess.Popen(["xdg-open", url])
+                return f"Opened {url} in desktop browser."
+            except Exception as e:
+                return f"Error opening URL: {e}"
 
         elif name == "camera_capture":
             frame = _camera_grab_frame()

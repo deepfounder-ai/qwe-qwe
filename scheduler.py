@@ -295,6 +295,10 @@ def start():
 
 def _loop():
     """Main scheduler loop — checks every 30 seconds."""
+    # Initial delay: let telegram bot and other services connect first.
+    # Without this, tasks with past next_run fire immediately on restart
+    # but telegram isn't ready yet → notifications silently dropped.
+    time.sleep(15)
     while True:
         try:
             _check_and_run()
