@@ -3713,6 +3713,7 @@ async function installPreset(file, opts = {}) {
     await loadPresets();
     setTimeout(() => { status.textContent = ''; }, 5000);
   } catch (e) {
+    console.error('Preset install error:', e);
     status.className = 'kn-upload-status err';
     status.textContent = `✗ ${e.message || e}`;
   }

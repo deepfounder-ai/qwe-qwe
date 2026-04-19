@@ -1503,21 +1503,29 @@ async def presets_install(request: Request):
     """Upload and install a .qwp archive from the user's computer."""
     import presets
 
+    _log.info("preset install: upload started")
     staged = await _stage_upload(request, "presets", default_name="preset.qwp")
     if isinstance(staged, JSONResponse):
+        _log.warning(f"preset install: upload rejected: {staged.body}")
         return staged
+    _log.info(f"preset install: file staged at {staged.path} ({staged.size} bytes, name={staged.name})")
     overwrite = staged.extras.get("overwrite", "") in ("1", "true", "yes")
 
     try:
+        _log.info(f"preset install: loading from {staged.path}")
         info = presets.load_any(str(staged.path))
+        _log.info(f"preset install: loaded {info.id} v{info.version}, validating...")
         errors = presets.validate(info)
         if errors:
+            _log.warning(f"preset install: validation failed: {errors}")
             return JSONResponse(
                 {"error": "validation failed", "details": errors},
                 status_code=400,
             )
+        _log.info(f"preset install: validation passed, installing...")
         result = presets.install(info, overwrite=overwrite)
     except FileExistsError as e:
+        _log.info(f"preset install: already exists: {e}")
         return JSONResponse(
             {"error": str(e), "code": "already_installed"},
             status_code=409,
