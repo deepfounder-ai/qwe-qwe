@@ -1302,7 +1302,7 @@ def _run_inner(user_input: str, thread_id: str | None,
     total_tool_errors = 0
     _injected_instructions: set[str] = set()
 
-    max_tool_rounds = config.get("max_tool_rounds")
+    max_tool_rounds = config.get("max_tool_rounds") or 999
     _log.info(f"entering tool loop: rounds={rounds}, max={max_tool_rounds}, msgs={len(messages)}")
     _nudge_cleanup = False
     while rounds < max_tool_rounds:

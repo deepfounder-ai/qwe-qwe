@@ -449,14 +449,8 @@ def run_loop(
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
                             continue
 
-                    # Layer 4: per-tool frequency limit
+                    # Track per-tool call count (for logging only — no hard limit)
                     _tool_name_counts[tc["name"]] = _tool_name_counts.get(tc["name"], 0) + 1
-                    if _tool_name_counts[tc["name"]] > 5:
-                        tool_result = f"LIMIT: {tc['name']} called too many times. Use the results you already have."
-                        _force_finish = True
-                        _log.warning(f"tool frequency limit: {tc['name']} called {_tool_name_counts[tc['name']]} times")
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
-                        continue
 
                     # Execute tool
                     args_preview = str(args)[:200]

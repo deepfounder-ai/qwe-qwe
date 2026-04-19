@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.14.2"
+VERSION = "0.14.3"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -145,7 +145,7 @@ THINKING_ENABLED = True    # send enable_thinking to model (toggle via /thinking
 EDITABLE_SETTINGS = {
     "max_history_messages": ("setting:max_history_messages", int, 10, "Messages kept in context", 1, None),
     "max_memory_results":   ("setting:max_memory_results",   int, 3,  "Memory results per turn", 0, None),
-    "max_tool_rounds":      ("setting:max_tool_rounds",      int, 10, "Max tool call rounds", 1, None),
+    "max_tool_rounds":      ("setting:max_tool_rounds",      int, 0,  "Max tool call rounds (0 = unlimited, loop detection handles loops)", 0, None),
     "compaction_threshold": ("setting:compaction_threshold",  int, 20, "Auto-compact after N messages", 3, None),
     "context_budget":       ("setting:context_budget",        int, 24000, "Token budget for context", 1000, None),
     "tool_retry_max":       ("setting:tool_retry_max",        int, 3,     "Max retries for broken tool calls", 0, None),
