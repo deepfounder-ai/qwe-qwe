@@ -1740,9 +1740,18 @@ async def knowledge_graph_clear():
 
 @app.get("/api/knowledge/list")
 async def knowledge_list():
-    """List all indexed files."""
+    """List indexed files. When preset active, show only preset's files."""
     import rag
-    return {"files": rag.list_indexed_files()}
+    files = rag.list_indexed_files()
+    try:
+        import presets as _presets
+        active = _presets.get_active()
+        if active:
+            tag = f"preset:{active}"
+            files = [f for f in files if tag in (f.get("tags") or [])]
+    except Exception:
+        pass
+    return {"files": files}
 
 
 @app.post("/api/knowledge/search")
@@ -1809,14 +1818,18 @@ async def toggle_skill(name: str, data: dict):
 async def list_threads(include_archived: bool = False):
     """List all threads with stats. Filters by active preset if one is active."""
     all_threads = threads.list_all(include_archived=include_archived)
-    # Preset isolation: only show preset threads when preset is active
+    # Preset isolation: bidirectional filtering
     try:
         import presets as _presets
         active_preset = _presets.get_active()
         if active_preset:
+            # Preset active → show ONLY this preset's threads
             info = _presets.get_info(active_preset)
-            preset_prefix = f"Preset: {info['name']}" if info else f"Preset: {active_preset}"
-            all_threads = [t for t in all_threads if t["name"].startswith("Preset:") or t["id"] == threads.get_active_id()]
+            prefix = f"Preset: {info['name']}" if info else "Preset:"
+            all_threads = [t for t in all_threads if t["name"].startswith(prefix)]
+        else:
+            # No preset → hide ALL preset threads
+            all_threads = [t for t in all_threads if not t["name"].startswith("Preset:")]
     except Exception:
         pass
     # Bulk-fetch thread stats in one query instead of 4N separate queries
