@@ -931,6 +931,20 @@ def uninstall(preset_id: str) -> None:
     except Exception as e:
         _log.warning(f"uninstall: knowledge cleanup failed: {e}")
 
+    # Remove preset threads
+    try:
+        import threads
+        info = get_info(preset_id)
+        if info:
+            preset_prefix = f"Preset: {info['name']}"
+            for t in threads.list_all(include_archived=True):
+                if t["name"].startswith(preset_prefix):
+                    db.execute("DELETE FROM messages WHERE thread_id = ?", (t["id"],))
+                    db.execute("DELETE FROM threads WHERE id = ?", (t["id"],))
+                    _log.info(f"uninstall: deleted thread '{t['name']}'")
+    except Exception as e:
+        _log.warning(f"uninstall: thread cleanup failed: {e}")
+
     # Remove on-disk contents
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
@@ -1106,6 +1120,38 @@ def _disable_preset_skills() -> None:
     db.kv_delete("preset_added_skills")
 
 
+def ensure_preset_workspace(preset_id: str) -> None:
+    """Ensure workspace + thread are switched to preset's. Idempotent — safe to call on startup."""
+    info = get_info(preset_id)
+    if not info:
+        return
+    # Switch workspace
+    p_dir = preset_dir(preset_id)
+    p_workspace = p_dir / "workspace"
+    p_workspace.mkdir(exist_ok=True)
+    if config.WORKSPACE_DIR != p_workspace:
+        if not db.kv_get("preset_original_workspace"):
+            db.kv_set("preset_original_workspace", str(config.WORKSPACE_DIR))
+        config.WORKSPACE_DIR = p_workspace
+        _log.info(f"workspace → {p_workspace}")
+    # Switch thread
+    import threads
+    preset_thread_name = f"Preset: {info['name']}"
+    active_thread = threads.get_active_id()
+    active_t = threads.get(active_thread)
+    if not active_t or not active_t.get("name", "").startswith("Preset:"):
+        if not db.kv_get("preset_original_thread"):
+            db.kv_set("preset_original_thread", active_thread)
+        all_t = threads.list_all()
+        preset_thread = next((t for t in all_t if t["name"] == preset_thread_name), None)
+        if preset_thread:
+            threads.switch(preset_thread["id"])
+        else:
+            t = threads.create(preset_thread_name)
+            threads.switch(t["id"])
+        _log.info(f"thread → '{preset_thread_name}'")
+
+
 def activate(preset_id: str) -> dict:
     """Back up current soul, apply preset soul/skills/prompt/knowledge.
 
@@ -1143,28 +1189,8 @@ def activate(preset_id: str) -> dict:
         db.kv_set("active_preset", preset_id)
         _enable_preset_skills(info["manifest"])
 
-        # Switch workspace to preset directory
-        p_dir = preset_dir(preset_id)
-        p_workspace = p_dir / "workspace"
-        p_workspace.mkdir(exist_ok=True)
-        db.kv_set("preset_original_workspace", str(config.WORKSPACE_DIR))
-        config.WORKSPACE_DIR = p_workspace
-        _log.info(f"workspace switched to {p_workspace}")
-
-        # Switch to preset-specific thread
-        import threads
-        original_thread = threads.get_active_id()
-        db.kv_set("preset_original_thread", original_thread)
-        preset_thread_name = f"Preset: {info['name']}"
-        # Find existing preset thread or create new
-        all_threads = threads.list_all()
-        preset_thread = next((t for t in all_threads if t["name"] == preset_thread_name), None)
-        if preset_thread:
-            threads.switch(preset_thread["id"])
-        else:
-            tid = threads.create(preset_thread_name)
-            threads.switch(tid)
-        _log.info(f"thread switched to '{preset_thread_name}'")
+        # Switch workspace + thread to preset-specific
+        ensure_preset_workspace(preset_id)
 
     except Exception as e:
         _log.error(f"activate {preset_id} failed mid-application: {e}; rolling back")

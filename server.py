@@ -179,15 +179,12 @@ async def lifespan(app: FastAPI):
             config.TZ_OFFSET = int(tz_val)
         except (ValueError, TypeError):
             pass
-    # Restore preset workspace if a preset was active before restart
+    # Restore preset workspace + thread if a preset was active before restart
     try:
         import presets as _presets
         active_preset = _presets.get_active()
         if active_preset:
-            p_workspace = _presets.preset_dir(active_preset) / "workspace"
-            p_workspace.mkdir(exist_ok=True)
-            config.WORKSPACE_DIR = p_workspace
-            _log.info(f"restored preset workspace: {p_workspace}")
+            _presets.ensure_preset_workspace(active_preset)
     except Exception:
         pass
     import scheduler
@@ -1796,8 +1793,18 @@ async def toggle_skill(name: str, data: dict):
 
 @app.get("/api/threads")
 async def list_threads(include_archived: bool = False):
-    """List all threads with stats."""
+    """List all threads with stats. Filters by active preset if one is active."""
     all_threads = threads.list_all(include_archived=include_archived)
+    # Preset isolation: only show preset threads when preset is active
+    try:
+        import presets as _presets
+        active_preset = _presets.get_active()
+        if active_preset:
+            info = _presets.get_info(active_preset)
+            preset_prefix = f"Preset: {info['name']}" if info else f"Preset: {active_preset}"
+            all_threads = [t for t in all_threads if t["name"].startswith("Preset:") or t["id"] == threads.get_active_id()]
+    except Exception:
+        pass
     # Bulk-fetch thread stats in one query instead of 4N separate queries
     stats_rows = db.fetchall("""
         SELECT thread_id,
