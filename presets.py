@@ -921,13 +921,13 @@ def uninstall(preset_id: str) -> None:
         except Exception as e:
             _log.debug(f"uninstall: tag-based delete failed: {e}")
 
-        # Also delete by file_path (belt-and-suspenders)
+        # Also delete by file_path — full cleanup (Qdrant chunks + SQLite kv tracking)
         import rag
         k_dir = d / "knowledge"
         if k_dir.exists():
             for f in k_dir.rglob("*"):
                 if f.is_file():
-                    rag._delete_file_chunks(str(f.resolve()))
+                    rag.delete_file(str(f.resolve()))
     except Exception as e:
         _log.warning(f"uninstall: knowledge cleanup failed: {e}")
 
