@@ -3626,11 +3626,8 @@ async function activatePreset(id) {
       throw new Error(err.error || 'activation failed');
     }
     status.className = 'kn-upload-status ok';
-    status.textContent = `✓ Activated ${id}`;
-    await loadPresets();
-    // Soul may have changed — refresh the Soul settings card if it's been loaded
-    try { if (typeof loadSettingsSoul === 'function') await loadSettingsSoul(); } catch (e) {}
-    setTimeout(() => { status.textContent = ''; }, 4000);
+    status.textContent = `✓ Activated ${id} — reloading...`;
+    setTimeout(() => location.reload(), 500);
   } catch (e) {
     status.className = 'kn-upload-status err';
     status.textContent = `✗ ${e.message || e}`;
@@ -3645,10 +3642,8 @@ async function deactivatePreset() {
     const res = await fetch('/api/presets/deactivate', { method: 'POST' });
     if (!res.ok) throw new Error('deactivate failed');
     status.className = 'kn-upload-status ok';
-    status.textContent = '✓ Deactivated — original soul restored';
-    await loadPresets();
-    try { if (typeof loadSettingsSoul === 'function') await loadSettingsSoul(); } catch (e) {}
-    setTimeout(() => { status.textContent = ''; }, 4000);
+    status.textContent = '✓ Deactivated — reloading...';
+    setTimeout(() => location.reload(), 500);
   } catch (e) {
     status.className = 'kn-upload-status err';
     status.textContent = `✗ ${e.message || e}`;
@@ -3667,9 +3662,8 @@ async function removePreset(id) {
       throw new Error(err.error || 'remove failed');
     }
     status.className = 'kn-upload-status ok';
-    status.textContent = `✓ Removed ${id}`;
-    await loadPresets();
-    setTimeout(() => { status.textContent = ''; }, 4000);
+    status.textContent = `✓ Removed ${id} — reloading...`;
+    setTimeout(() => location.reload(), 500);
   } catch (e) {
     status.className = 'kn-upload-status err';
     status.textContent = `✗ ${e.message || e}`;
