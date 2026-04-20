@@ -1562,6 +1562,20 @@ async def presets_activate(preset_id: str):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+@app.get("/api/presets/onboarding")
+async def presets_onboarding():
+    """Get onboarding content for the active preset."""
+    import presets
+    if not presets.should_show_onboarding():
+        return {"show": False}
+    text = presets.get_onboarding()
+    if not text:
+        return {"show": False}
+    info = presets.get_active_info()
+    presets.mark_onboarding_shown()
+    return {"show": True, "text": text, "name": info["name"] if info else ""}
+
+
 @app.post("/api/presets/deactivate")
 async def presets_deactivate():
     """Deactivate the current preset (restores the soul backup)."""

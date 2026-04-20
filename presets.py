@@ -1338,3 +1338,59 @@ def get_active_skills_dir() -> Path | None:
 def get_active_info() -> dict | None:
     pid = get_active()
     return get_info(pid) if pid else None
+
+
+def get_onboarding() -> str | None:
+    """Return onboarding text for the active preset (None if no preset or no onboarding)."""
+    pid = get_active()
+    if not pid:
+        return None
+    info = get_info(pid)
+    if not info:
+        return None
+    manifest = info["manifest"]
+    ob = manifest.get("onboarding") or {}
+    text = ob.get("text")
+    if not text:
+        pth = ob.get("path")
+        if pth:
+            base = preset_dir(pid)
+            full = (base / pth).resolve()
+            if _is_within(full, base.resolve()) and full.exists():
+                try:
+                    text = full.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+    if not text:
+        return None
+    # Substitute env vars ($SHOP_NAME etc.)
+    for entry in (manifest.get("install") or {}).get("env_vars") or []:
+        var = entry.get("name", "")
+        default = entry.get("default", "")
+        val = os.environ.get(var, default)
+        text = text.replace(f"${var}", val)
+    return text
+
+
+def should_show_onboarding() -> bool:
+    """True if onboarding should be shown (first_activate and not yet shown)."""
+    pid = get_active()
+    if not pid:
+        return False
+    info = get_info(pid)
+    if not info:
+        return False
+    ob = info["manifest"].get("onboarding") or {}
+    if ob.get("show_on") != "first_activate":
+        return False
+    shown_key = f"onboarding_shown:{pid}"
+    if db.kv_get(shown_key):
+        return False
+    return True
+
+
+def mark_onboarding_shown():
+    """Mark onboarding as shown for the active preset."""
+    pid = get_active()
+    if pid:
+        db.kv_set(f"onboarding_shown:{pid}", "1")

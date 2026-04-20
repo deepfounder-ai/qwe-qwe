@@ -3941,7 +3941,7 @@ function connect() {
   ws.onopen = () => {
     document.getElementById('statusDot').classList.add('connected');
     clearTimeout(reconnectTimer);
-    loadThreads(); loadStatus(); checkVersion();
+    loadThreads(); loadStatus(); checkVersion(); checkOnboarding();
   };
   ws.onclose = () => {
     document.getElementById('statusDot').classList.remove('connected');
@@ -5860,6 +5860,16 @@ async function loadStatus() {
 }
 
 // ── Version check ──
+async function checkOnboarding() {
+  try {
+    const res = await fetch('/api/presets/onboarding');
+    const data = await res.json();
+    if (!data.show || !data.text) return;
+    // Show onboarding as first assistant message
+    addMessage('assistant', data.text, {tokens: 0, duration_ms: 0});
+  } catch {}
+}
+
 async function checkVersion() {
   try {
     const res = await fetch('/api/version');
