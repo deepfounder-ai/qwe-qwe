@@ -179,6 +179,17 @@ async def lifespan(app: FastAPI):
             config.TZ_OFFSET = int(tz_val)
         except (ValueError, TypeError):
             pass
+    # Restore preset workspace if a preset was active before restart
+    try:
+        import presets as _presets
+        active_preset = _presets.get_active()
+        if active_preset:
+            p_workspace = _presets.preset_dir(active_preset) / "workspace"
+            p_workspace.mkdir(exist_ok=True)
+            config.WORKSPACE_DIR = p_workspace
+            _log.info(f"restored preset workspace: {p_workspace}")
+    except Exception:
+        pass
     import scheduler
     scheduler.start()
     # Start MCP servers

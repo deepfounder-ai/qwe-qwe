@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.15.1"
+VERSION = "0.16.0"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──

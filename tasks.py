@@ -17,8 +17,7 @@ MAX_ROUNDS_PER_WORKER = 15
 MAX_WORKER_DEPTH = 3  # max chain continuations (total rounds = 15 * 3 = 45)
 
 
-def _strip_thinking(text: str) -> str:
-    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
+from utils import strip_thinking as _strip_thinking
 
 
 def _build_worker_prompt(depth: int = 0, continuation: str | None = None) -> str:

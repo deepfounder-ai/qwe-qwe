@@ -1142,9 +1142,32 @@ def activate(preset_id: str) -> dict:
         _index_knowledge(preset_id, info["manifest"])
         db.kv_set("active_preset", preset_id)
         _enable_preset_skills(info["manifest"])
+
+        # Switch workspace to preset directory
+        p_dir = preset_dir(preset_id)
+        p_workspace = p_dir / "workspace"
+        p_workspace.mkdir(exist_ok=True)
+        db.kv_set("preset_original_workspace", str(config.WORKSPACE_DIR))
+        config.WORKSPACE_DIR = p_workspace
+        _log.info(f"workspace switched to {p_workspace}")
+
+        # Switch to preset-specific thread
+        import threads
+        original_thread = threads.get_active_id()
+        db.kv_set("preset_original_thread", original_thread)
+        preset_thread_name = f"Preset: {info['name']}"
+        # Find existing preset thread or create new
+        all_threads = threads.list_all()
+        preset_thread = next((t for t in all_threads if t["name"] == preset_thread_name), None)
+        if preset_thread:
+            threads.switch(preset_thread["id"])
+        else:
+            tid = threads.create(preset_thread_name)
+            threads.switch(tid)
+        _log.info(f"thread switched to '{preset_thread_name}'")
+
     except Exception as e:
         _log.error(f"activate {preset_id} failed mid-application: {e}; rolling back")
-        # Rollback in reverse order
         try:
             _disable_preset_skills()
         except Exception:
@@ -1164,7 +1187,7 @@ def activate(preset_id: str) -> dict:
 
 
 def deactivate() -> None:
-    """Restore the soul backup and clear the active preset marker."""
+    """Restore the soul backup, workspace, thread, and clear the active preset marker."""
     current = get_active()
     if not current:
         return
@@ -1175,6 +1198,25 @@ def deactivate() -> None:
             _restore_soul(snapshot)
         except Exception as e:
             _log.warning(f"deactivate: soul restore failed: {e}")
+
+    # Restore workspace
+    original_workspace = db.kv_get("preset_original_workspace")
+    if original_workspace:
+        config.WORKSPACE_DIR = Path(original_workspace)
+        _log.info(f"workspace restored to {original_workspace}")
+        db.kv_delete("preset_original_workspace")
+
+    # Restore thread
+    original_thread = db.kv_get("preset_original_thread")
+    if original_thread:
+        try:
+            import threads
+            threads.switch(original_thread)
+            _log.info(f"thread restored to {original_thread}")
+        except Exception as e:
+            _log.warning(f"deactivate: thread restore failed: {e}")
+        db.kv_delete("preset_original_thread")
+
     # Undo skill additions from the preset
     _disable_preset_skills()
     # Clear markers

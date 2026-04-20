@@ -103,7 +103,7 @@ def _resize_image_b64(b64: str, max_area: int = 49152, quality: int = 80) -> str
         _log.warning(f"image resize failed: {e} — sending as-is")
         return b64
 _abort_event = threading.Event()  # can be replaced by server
-_structured_output_failed = False  # runtime cache: disable after first 400
+_structured_output_failed: set[str] = set()  # providers that returned 400 on response_format
 _pending_image_path: str | None = None  # set by server before run() for image persistence
 _pending_file: dict | None = None  # {path, name, size} — set by server for file attachments
 
@@ -218,7 +218,8 @@ def _repair_tool_json(raw: str) -> str | None:
 
 def _json_format_extra() -> dict:
     """Return response_format kwarg if provider supports structured output."""
-    if _structured_output_failed:
+    provider = providers.get_active_name()
+    if provider in _structured_output_failed:
         return {}
     if providers.supports("supports_response_format"):
         return {"response_format": {"type": "json_object"}}
@@ -226,12 +227,12 @@ def _json_format_extra() -> dict:
 
 
 def _mark_structured_failed(error: Exception):
-    """Cache structured output failure to avoid repeated 400s."""
-    global _structured_output_failed
+    """Cache structured output failure per-provider to avoid repeated 400s."""
     err_str = str(error)
     if "400" in err_str or "response_format" in err_str.lower():
-        _structured_output_failed = True
-        _log.info("structured output disabled for this session (provider returned 400)")
+        provider = providers.get_active_name()
+        _structured_output_failed.add(provider)
+        _log.info(f"structured output disabled for provider '{provider}' (returned 400)")
 
 
 def _get_tool_schema(tool_name: str) -> dict | None:
@@ -470,48 +471,7 @@ def _self_check_tool_call(client, model: str, tool_name: str,
         return True, None
 
 
-def _strip_thinking(text: str) -> str:
-    """Remove thinking blocks from model output (Qwen <think>, Gemma <|channel>thought, etc.)."""
-    # Qwen / DeepSeek style
-    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
-
-    # Gemma style: <|channel>thought ... entire content may be inside
-    # If the WHOLE text is a thinking block, extract any user-facing reply from it
-    if text.strip().startswith("<|channel>thought"):
-        # Try to find actual reply after thinking reasoning
-        # Look for patterns that indicate the model switched to answering
-        lines = text.split("\n")
-        reply_lines = []
-        in_reply = False
-        for line in lines:
-            stripped = line.strip()
-            # Skip the opening tag
-            if stripped.startswith("<|channel>"):
-                continue
-            # Heuristic: reply starts after thinking when model addresses user directly
-            # (Russian/English text without "Step", "Thinking", numbered analysis)
-            if not in_reply:
-                # Detect transition to reply
-                if (stripped and not stripped.startswith(("Step ", "Thinking", "Analysis", "1.", "2.", "3.", "4.", "5."))
-                        and not stripped.startswith(("-", "*"))
-                        and len(stripped) > 30
-                        and any(c in stripped for c in "абвгдежзийклмнопрстуфхцчшщьыъэюяАБВ")):
-                    in_reply = True
-                    reply_lines.append(line)
-            else:
-                reply_lines.append(line)
-        if reply_lines:
-            text = "\n".join(reply_lines)
-        else:
-            # Fallback: just strip the tag and return everything
-            text = re.sub(r"<\|channel\>thought\b\s*", "", text, flags=re.DOTALL)
-    else:
-        # Non-whole-block: strip thinking segment
-        text = re.sub(r"<\|channel\>thought\b.*?(?=<\|channel\>|$)", "", text, flags=re.DOTALL)
-
-    # Generic: strip any remaining <|...|> special tokens
-    text = re.sub(r"<\|[^>]+\>", "", text)
-    return text.strip()
+from utils import strip_thinking as _strip_thinking
 
 
 def _clean_response(text: str) -> str:
@@ -563,10 +523,7 @@ def _clean_response(text: str) -> str:
     return text.strip()
 
 
-def _extract_thinking(text: str) -> str | None:
-    """Extract thinking content."""
-    m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
-    return m.group(1).strip() if m else None
+from utils import extract_thinking as _extract_thinking
 
 
 def _summarize_tool_output(tool_name: str, output: str, max_chars: int) -> str:
