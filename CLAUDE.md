@@ -43,7 +43,8 @@ server.py (WebSocket) → agent.run() → _build_messages() → agent_loop.run_l
 - **Tool result clearing**: before each LLM call, old tool results replaced with one-line summaries (keep last 3 intact). Prevents context overflow during multi-step tasks.
 - **Tool result cap**: individual results capped at 4K chars.
 - **Text-to-tool extraction**: if model describes a tool call in text but doesn't emit `delta.tool_calls`, regex extracts and executes it (handles Qwen leaked `<tool_call>` syntax, function-call-in-text patterns).
-- **Loop detection**: 2 identical tool call signatures → `_force_finish=True`. Also per-tool frequency limit (>5 calls to same tool → reject).
+- **Loop detection**: 2 identical tool call signatures (same tool + same args) → `_force_finish=True`. No hard round/call limits — agent works until done.
+- **No artificial limits**: `max_turns=0`, `max_tool_calls=0` (unlimited). Only loop detection stops infinite loops.
 - **Anti-hedge**: if model produces only thinking tags and empty reply, nudge once with assistant continuation (no `[system]` user messages — those break model flow).
 - **tool_search short-circuit**: 2nd+ call returns "tools ALREADY ACTIVE" instead of re-listing.
 - **Abort support**: checks `abort_event` at loop start + every streaming chunk.
@@ -52,7 +53,7 @@ server.py (WebSocket) → agent.run() → _build_messages() → agent_loop.run_l
 
 ### Tool System (tools.py)
 
-**Core tools** (always loaded, ~10): memory_save, memory_search, read_file, write_file, shell, http_request, spawn_task, tool_search, browser_open, browser_snapshot, send_file, camera_capture.
+**Core tools** (always loaded, ~18): memory_save, memory_search, read_file, write_file, shell, http_request, spawn_task, tool_search, browser_open, browser_snapshot, browser_click, browser_fill, browser_eval, browser_set_visible, send_file, camera_capture, open_url.
 
 **Extended tools** (activated via `tool_search("keyword")`): notes, schedule, secret, mcp, profile, rag, skill, soul, timer + 13 more browser tools. Meta-tool pattern saves ~75% tokens.
 
@@ -83,7 +84,7 @@ Hybrid search: FastEmbed dense (384d, multilingual) + SPLADE++ sparse, fused via
 
 Key rules the model follows:
 - Rule 3: "NEVER STOP EARLY" — keep calling tools until ALL steps complete
-- Rule 6: http_request for APIs, browser_open for web pages
+- Rule 6: BROWSER MODES: `browser_open` = read silently (headless); `open_url` = show user a page; `browser_set_visible(true)` + browser tools = interact with visible browser window
 - Rule 11: Brave Search for web search (not Google/DuckDuckGo — they block headless)
 - Rule 12: After write_file, call send_file to attach file to chat
 - Rule 14: "MULTI-STEP: plan mentally then EXECUTE each step"
@@ -124,6 +125,9 @@ Single-file SPA. Key features:
 - **File uploads**: Web UI and Telegram support drag/drop files. Server saves to uploads/, injects path reference (not content) into user message.
 - **Windows asyncio**: custom exception handler silences `ConnectionResetError` from MCP subprocess cleanup.
 - **Warning suppression**: FastEmbed pooling warning + Qdrant local index warnings suppressed via `warnings.catch_warnings()`.
+- **Shared utilities**: `utils.py` contains `strip_thinking()` and `extract_thinking()` — single canonical implementation imported by agent.py, agent_loop.py, tasks.py.
+- **Preset isolation**: activating a preset switches thread + workspace. Deactivating restores originals.
+- **Visible browser**: `browser_set_visible(true)` launches Playwright with `headless=False`. All 23 browser tools work on the visible window.
 
 ## Data Layout
 
@@ -133,7 +137,8 @@ All user data in `~/.qwe-qwe/` (configurable via `QWE_DATA_DIR`):
 - `wiki/` — synthesized markdown pages
 - `skills/` — user-created skills
 - `uploads/` — images, documents, camera captures
-- `workspace/` — default CWD for relative paths
+- `workspace/` — default CWD for relative paths (switches to preset workspace when preset is active)
+- `presets/<id>/` — installed presets (each with own workspace/, knowledge/, skills/)
 - `logs/` — qwe-qwe.log (INFO+), errors.log (WARNING+)
 
 ## Environment Variables
