@@ -908,7 +908,6 @@ def execute(name: str, args: dict) -> str:
             import uuid as _uuid
             file_id = _uuid.uuid4().hex[:8]
             dest = Path(config.UPLOADS_DIR) / f"{file_id}_{p.name}"
-            import shutil
             shutil.copy2(str(p), str(dest))
             url = f"/uploads/{dest.name}"
             caption = args.get("caption", p.name)
@@ -925,7 +924,6 @@ def execute(name: str, args: dict) -> str:
             url = args.get("url", "")
             if not url:
                 return "Error: URL required"
-            import subprocess, sys
             try:
                 if sys.platform == "win32":
                     subprocess.Popen(["cmd.exe", "/c", "start", "", url], shell=False)

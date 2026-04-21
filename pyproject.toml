@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwe-qwe"
-version = "0.17.6"
+version = "0.17.7"
 description = "Lightweight offline AI agent for local models"
 readme = "README.md"
 license = {text = "MIT"}
