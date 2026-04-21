@@ -3517,7 +3517,13 @@ async function loadAdvanced() {
   } else if (t === 'stats') {
     try { state.stats = await api('/api/stats'); render(); } catch {}
   } else if (t === 'secrets') {
-    try { const r = await api('/api/secrets'); state.secrets = r.keys || r || []; render(); } catch { state.secrets = []; render(); }
+    try {
+      const r = await api('/api/secrets');
+      // Server returns a bare array of keys. Array.prototype.keys is a function
+      // (truthy!) so `r.keys || r` would leak the method — be explicit.
+      state.secrets = Array.isArray(r) ? r : (r && (r.secrets || r.list) || []);
+      render();
+    } catch { state.secrets = []; render(); }
   } else if (t === 'updates') {
     try { state.version = await api('/api/version'); render(); } catch {}
   } else if (t === 'logs') {

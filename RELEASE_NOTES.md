@@ -1,23 +1,22 @@
-# v0.17.4 — Preset routes fix
+# v0.17.5 — Secrets list not updating
 
-Quick patch addressing a route-ordering bug in `server.py`.
+Quick patch: the Secrets sub-tab didn't refresh after a secret was saved, so users saw a "saved" toast but the list stayed empty.
 
 ## 🐛 Fix
 
-- **`GET /api/presets/onboarding` → 404** and **`POST /api/presets/deactivate` → 405** — these literal-path routes were declared *after* the parameterised catch-all `GET /api/presets/{preset_id}`, so FastAPI swallowed requests to `/api/presets/onboarding` into the `{preset_id}` handler which returned 404 (no preset with id `"onboarding"` exists). Similarly for `deactivate`.
+- **`state.secrets` was being assigned a function** — the loader had:
+  ```js
+  state.secrets = r.keys || r || [];
+  ```
+  `/api/secrets` returns a bare array of keys. `r.keys` on an array resolves to `Array.prototype.keys` (a truthy method reference), so the fallback chain leaked the method into state instead of the array. `state.secrets.map(...)` then failed silently.
 
-  Fixed by reordering: literal routes now declared **before** `{preset_id}`, matching FastAPI's declaration-order resolution.
-
-  Visible symptoms this fixes:
-  - Boot-time console noise: `GET /api/presets/onboarding 404`
-  - Preset deactivation via UI silently failing
-  - `POST /api/secrets` 405 reports — if the user sees these, it's from a stale server binary; restart the process after `git pull` and the 405 vanishes (the endpoint has existed since v0.17.0).
+  Now uses an explicit guard: `Array.isArray(r) ? r : (r.secrets || r.list || [])`.
 
 ## 📦 Upgrade
 
 ```bash
 git pull && pip install -e . --upgrade
-# Then restart the server (Ctrl+C then relaunch qwe-qwe --web)
+# Restart the server
 ```
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
