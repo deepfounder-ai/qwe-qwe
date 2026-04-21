@@ -4024,11 +4024,11 @@ function renderTabVoice() {
       settingRow('Test TTS', 'Play a short sample.', '<button class="btn-secondary" data-act="tts-test">play</button>') +
       settingRow('Reference audio', 'WAV file (5–30s) — voice cloning. Local backends only.',
         '<div style="display:flex;gap:6px;align-items:center">' +
-          '<input type="text" class="setting-input mono" data-setting-key="tts_ref_audio" value="' + esc((state.allSettings && state.allSettings.tts_ref_audio) || '') + '" placeholder="/abs/path/to/voice.wav" style="width:220px">' +
+          '<input type="text" class="setting-input mono" data-setting-key="tts_ref_audio" data-setting-type="str" value="' + esc((state.allSettings && state.allSettings.tts_ref_audio && state.allSettings.tts_ref_audio.value) || '') + '" placeholder="/abs/path/to/voice.wav" style="width:220px">' +
           '<button class="btn-secondary" data-act="tts-ref-upload">upload</button>' +
         '</div>') +
       settingRow('Reference transcript', 'What the reference audio says (helps alignment).',
-        '<input type="text" class="setting-input" data-setting-key="tts_ref_text" value="' + esc((state.allSettings && state.allSettings.tts_ref_text) || '') + '" placeholder="Exact words spoken in the WAV">')
+        '<input type="text" class="setting-input" data-setting-key="tts_ref_text" data-setting-type="str" value="' + esc((state.allSettings && state.allSettings.tts_ref_text && state.allSettings.tts_ref_text.value) || '') + '" placeholder="Exact words spoken in the WAV">')
     );
 }
 
@@ -4286,24 +4286,38 @@ function renderAdvancedSub() {
       { label: 'STT', keys: ['stt_backend','stt_model','stt_language','stt_api_url','stt_api_model','stt_openai_key'] },
       { label: 'TTS', keys: ['tts_enabled','tts_api_url','tts_api_key','tts_api_model','tts_api_voice','tts_ref_audio','tts_ref_text'] },
     ];
+    // /api/settings returns {key: {value, default, description, type, min, max}}
     const fieldFor = (k) => {
-      const v = s[k];
-      const isBool = typeof v === 'number' && (v === 0 || v === 1) && /(_enabled|v2)$/.test(k);
-      const isSecret = /_key$/.test(k);
-      const type = isSecret ? 'password' : (typeof v === 'number' ? 'number' : 'text');
+      const meta = s[k] || {};
+      const v = meta.value;
+      const stype = (meta.type || '').toLowerCase();   // 'int' | 'float' | 'str' | 'bool'
+      const isBool = stype === 'bool' || (/(_enabled|_v2)$/.test(k) && (v === 0 || v === 1));
+      const isSecret = /(_key|_token|api_key)$/.test(k);
+      const isNumeric = stype === 'int' || stype === 'float';
       if (isBool) {
         return '<button class="toggle ' + (v ? 'on' : '') + '" data-setting-toggle="' + esc(k) + '"><span class="knob"></span></button>';
       }
-      return '<input type="' + type + '" class="setting-input mono" data-setting-key="' + esc(k) + '" value="' + esc(v == null ? '' : v) + '">';
+      const inputType = isSecret ? 'password' : (isNumeric ? 'number' : 'text');
+      const step = stype === 'float' ? '0.01' : (stype === 'int' ? '1' : null);
+      const minAttr = (meta.min != null) ? ' min="' + meta.min + '"' : '';
+      const maxAttr = (meta.max != null) ? ' max="' + meta.max + '"' : '';
+      const stepAttr = step ? ' step="' + step + '"' : '';
+      const valueStr = (v == null ? '' : String(v));
+      return '<input type="' + inputType + '" class="setting-input mono"' +
+        ' data-setting-key="' + esc(k) + '"' +
+        ' data-setting-type="' + esc(stype) + '"' +
+        minAttr + maxAttr + stepAttr +
+        ' value="' + esc(valueStr) + '">';
     };
     if (!state.allSettings) {
       return '<div style="padding:24px 0;color:var(--fg-4);font-size:12px">Loading settings…</div>';
     }
     return '<p class="intro">Low-level tunables. Changes apply on next turn (no restart). Touch at your own risk.</p>' +
       groups.map(g => {
-        const rows = g.keys.filter(k => k in s).map(k =>
-          settingRow(k, '', fieldFor(k))
-        ).join('');
+        const rows = g.keys.filter(k => k in s).map(k => {
+          const desc = (s[k] && s[k].description) || '';
+          return settingRow(k, desc, fieldFor(k));
+        }).join('');
         return rows ? settingsSection(g.label, rows) : '';
       }).join('');
   }
@@ -5001,7 +5015,7 @@ function wireEvents() {
           const r = await api('/api/knowledge/upload', { method: 'POST', body: fd });
           if (r && r.path) {
             await api('/api/settings', { method: 'POST', body: { tts_ref_audio: r.path } });
-            if (state.allSettings) state.allSettings.tts_ref_audio = r.path;
+            if (state.allSettings && state.allSettings.tts_ref_audio) state.allSettings.tts_ref_audio.value = r.path;
             toast('ref audio saved');
             render();
           }
@@ -5296,22 +5310,37 @@ function wireEvents() {
     b.onclick = () => { navigator.clipboard.writeText(state.logs || ''); toast('logs copied'); };
   });
 
-  // Full settings editor
+  // Full settings editor — values live at state.allSettings[key].value
   document.querySelectorAll('[data-setting-key]').forEach(inp => {
     inp.addEventListener('change', async () => {
       const key = inp.dataset.settingKey;
+      const stype = inp.dataset.settingType || 'str';
       let value = inp.value;
-      if (inp.type === 'number') value = parseFloat(value);
-      try { await api('/api/settings', { method: 'POST', body: { [key]: value } }); toast(key + ' saved'); state.allSettings[key] = value; }
-      catch { toast('save failed', 'err'); }
+      if (stype === 'int') value = parseInt(value, 10);
+      else if (stype === 'float') value = parseFloat(value);
+      if ((stype === 'int' || stype === 'float') && Number.isNaN(value)) {
+        toast('invalid number', 'err'); return;
+      }
+      try {
+        await api('/api/settings', { method: 'POST', body: { [key]: value } });
+        toast(key + ' saved');
+        if (state.allSettings && state.allSettings[key]) state.allSettings[key].value = value;
+      } catch { toast('save failed', 'err'); }
     });
   });
   document.querySelectorAll('[data-setting-toggle]').forEach(b => {
     b.onclick = async () => {
       const key = b.dataset.settingToggle;
-      const want = b.classList.contains('on') ? 0 : 1;
-      try { await api('/api/settings', { method: 'POST', body: { [key]: want } }); toast(key + ': ' + (want ? 'on' : 'off')); state.allSettings[key] = want; render(); }
-      catch { toast('save failed', 'err'); }
+      const meta = (state.allSettings || {})[key] || {};
+      const current = meta.value;
+      const isBool = meta.type === 'bool';
+      const want = isBool ? !current : (current ? 0 : 1);
+      try {
+        await api('/api/settings', { method: 'POST', body: { [key]: want } });
+        toast(key + ': ' + (want ? 'on' : 'off'));
+        if (state.allSettings && state.allSettings[key]) state.allSettings[key].value = want;
+        render();
+      } catch { toast('save failed', 'err'); }
     };
   });
 
