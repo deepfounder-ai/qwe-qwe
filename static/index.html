@@ -1132,6 +1132,9 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
 
 @media (max-width: 1100px) { .inspector { display: none; } }
 
+/* Hamburger: hidden by default (desktop), shown on mobile via media query below */
+.mobile-hamburger { display: none; }
+
 /* ───── Mobile (phones, tight tablets) ───── */
 @media (max-width: 780px) {
   /* iPhone safe-area handling: dynamic viewport height (dvh) accounts for the
@@ -1264,9 +1267,22 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
   .stats-row .stat:nth-child(-n+2) { border-top: none; }
   .stats-row .stat:nth-child(2n) { border-left: 1px solid var(--line); }
 
-  /* Card grids: 1 column */
+  /* Card grids: 1 column on phones */
   .card-grid, .kb-grid { grid-template-columns: 1fr; }
-  .picker-grid { grid-template-columns: 1fr 1fr; }
+  .picker-grid { grid-template-columns: 1fr; }
+
+  /* Settings rows — stack label + control vertically so 220-px inputs don't
+     crush the label on narrow screens. Controls full-width. */
+  .setting-row { grid-template-columns: 1fr; gap: 10px; }
+  .setting-row > div:last-child { width: 100%; display: flex; justify-content: flex-start; }
+  .setting-input { width: 100%; max-width: 100%; box-sizing: border-box; }
+  .setting-row .toggle { margin-left: 0; }
+  .setting-row select.setting-input { width: 100% !important; }
+
+  /* Provider/model picker cards: full text visible, mild padding */
+  .picker-card { padding: 12px 14px; }
+  .picker-card .name { white-space: normal; word-break: break-word; }
+  .picker-card .sub { white-space: normal; word-break: break-all; font-size: 10px; }
 
   /* Upload zone + search — stack */
   .upload-zone { flex-wrap: wrap; }
@@ -1284,9 +1300,6 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
     margin-right: 4px;
   }
 }
-
-/* Hide hamburger on desktop */
-.mobile-hamburger { display: none; }
 
 @media (max-width: 420px) {
   /* Very narrow phones — compress further */
