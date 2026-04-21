@@ -1020,6 +1020,19 @@ async def list_secrets():
     return vault.list_keys()
 
 
+@app.post("/api/secrets")
+async def put_secret(data: dict):
+    """Encrypt and store a secret. Body: ``{"key": "name", "value": "token"}``."""
+    import vault
+    key = (data.get("key") or "").strip()
+    value = data.get("value", "")
+    if not key:
+        return JSONResponse({"error": "key required"}, status_code=400)
+    if value is None or value == "":
+        return JSONResponse({"error": "value required"}, status_code=400)
+    return {"result": vault.save(key, value)}
+
+
 @app.delete("/api/secrets/{key}")
 async def delete_secret(key: str):
     """Delete a secret."""
@@ -1640,9 +1653,61 @@ async def knowledge_scan(data: dict):
     return result
 
 
+@app.post("/api/knowledge/url")
+async def knowledge_url(data: dict):
+    """Fetch a URL, extract readable text, and index it. Runs in the background.
+
+    Body: {"url": "https://…", "tags": ["optional","list"]}
+    """
+    global _knowledge_task
+    import rag
+    url = (data.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"error": "URL required"}, status_code=400)
+    if not url.startswith(("http://", "https://")):
+        return JSONResponse({"error": "URL must start with http:// or https://"}, status_code=400)
+    tags_raw = data.get("tags", [])
+    tags = [t.strip() for t in tags_raw if isinstance(t, str) and t.strip()] if tags_raw else []
+
+    # Block if an indexing run is already live
+    with _knowledge_lock:
+        if _knowledge_task and _knowledge_task.get("status") == "running":
+            return JSONResponse({"error": "Indexing already in progress"}, status_code=409)
+
+    import tasks as t
+    task_id = t.register("knowledge_url", f"Fetching {url}")
+    with _knowledge_lock:
+        _knowledge_task = {
+            "task_id": task_id, "status": "running",
+            "current": 0, "total": 1, "file": url, "phase": "fetch", "errors": [],
+        }
+
+    def _run_url():
+        try:
+            result = rag.index_url(url, tags=tags)
+            with _knowledge_lock:
+                if result.get("status") == "indexed":
+                    _knowledge_task.update({
+                        "status": "done", "current": 1,
+                        "file": result.get("path", url),
+                        "phase": "done",
+                    })
+                else:
+                    _knowledge_task["errors"].append(f"{url}: {result.get('status')}")
+                    _knowledge_task.update({"status": "done", "current": 1, "phase": "done"})
+        except Exception as e:
+            _log.error(f"URL index error {url}: {e}", exc_info=True)
+            with _knowledge_lock:
+                _knowledge_task["errors"].append(f"{url}: {e}")
+                _knowledge_task.update({"status": "done", "current": 1, "phase": "done"})
+
+    threading.Thread(target=_run_url, daemon=True).start()
+    return {"task_id": task_id, "status": "started", "url": url}
+
+
 @app.post("/api/knowledge/index")
 async def knowledge_index(data: dict):
-    """Start background indexing of selected files."""
+    """Start background indexing of selected files (or URLs)."""
     global _knowledge_task
 
     files = data.get("files", [])
@@ -1651,11 +1716,14 @@ async def knowledge_index(data: dict):
     if not files:
         return JSONResponse({"error": "No files to index"}, status_code=400)
 
-    # Accept paths under $HOME OR under UPLOADS_DIR (for files uploaded via the KB upload UI)
+    # Accept paths under $HOME OR under UPLOADS_DIR, OR any http(s) URL
     home = Path.home().resolve()
     uploads = UPLOADS_DIR.resolve()
     for f in files:
-        fp = Path(f.get("path", "")).resolve()
+        src = f.get("path") or f.get("url", "")
+        if isinstance(src, str) and src.startswith(("http://", "https://")):
+            continue  # URLs handled by index_url inside the worker
+        fp = Path(src).resolve()
         ok = False
         for allowed in (home, uploads):
             try:
@@ -1665,7 +1733,7 @@ async def knowledge_index(data: dict):
             except ValueError:
                 continue
         if not ok:
-            return JSONResponse({"error": f"Access denied: {f.get('path')}"}, status_code=403)
+            return JSONResponse({"error": f"Access denied: {src}"}, status_code=403)
 
     with _knowledge_lock:
         if _knowledge_task and _knowledge_task.get("status") == "running":
@@ -1942,6 +2010,51 @@ async def delete_thread(thread_id: str):
     return {"result": threads.delete(thread_id)}
 
 
+@app.post("/api/threads/{thread_id}/regenerate")
+async def regenerate_turn(thread_id: str):
+    """Erase the last user → assistant turn so the client can re-send a fresh prompt.
+
+    Behaviour:
+      1. Walk messages for this thread newest-first, collect rows since the last
+         user message (inclusive). That's the "last turn" — assistant reply,
+         any tool traces, and the triggering user message.
+      2. Delete those rows.
+      3. Return the user's original text + attachments so the client can re-submit
+         via the normal WebSocket path. From the agent's perspective it's a fresh
+         prompt — no "this is a regeneration" signal leaks into context.
+    """
+    rows = db.fetchall(
+        "SELECT id, role, content, meta FROM messages WHERE thread_id=? ORDER BY id DESC",
+        (thread_id,)
+    )
+    if not rows:
+        return JSONResponse({"error": "empty thread"}, status_code=400)
+
+    to_delete: list[int] = []
+    user_text = ""
+    user_meta = None
+    for mid, role, content, meta_json in rows:
+        to_delete.append(mid)
+        if role == "user":
+            user_text = content or ""
+            try:
+                user_meta = json.loads(meta_json) if meta_json else None
+            except Exception:
+                user_meta = None
+            break
+    if not user_text:
+        return JSONResponse({"error": "no user message in recent turn"}, status_code=400)
+
+    db.delete_messages_by_ids(to_delete)
+    _log.info(f"regenerate: deleted {len(to_delete)} messages in thread {thread_id}")
+    return {
+        "ok": True,
+        "deleted": len(to_delete),
+        "user_text": user_text,
+        "meta": user_meta or {},
+    }
+
+
 # ── WebSocket chat ──
 
 async def _ws_send_safe(ws: WebSocket, data: dict) -> bool:
@@ -2176,6 +2289,23 @@ async def websocket_chat(ws: WebSocket):
                 pending = tools.get_pending_files()
                 if pending:
                     reply_payload["files"] = pending
+                    # Persist files into the last assistant message's meta so
+                    # reloads (F5 / thread switch) restore the download chips.
+                    try:
+                        row = db.fetchone(
+                            "SELECT id, meta FROM messages WHERE thread_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+                            (result["thread_id"],)
+                        )
+                        if row:
+                            mid, meta_raw = row
+                            meta_dict = json.loads(meta_raw) if meta_raw else {}
+                            meta_dict["files"] = pending
+                            if audio_url:
+                                meta_dict["audio_url"] = audio_url
+                            db.execute("UPDATE messages SET meta=? WHERE id=?",
+                                       (json.dumps(meta_dict), mid))
+                    except Exception as e:
+                        _log.debug(f"failed to persist files to message meta: {e}")
                 if not await _ws_send_safe(ws, reply_payload):
                     break
 
@@ -2547,18 +2677,52 @@ def start(host: str = "0.0.0.0", port: int = 7860, ssl: bool = False):
     _current_port = port
     import uvicorn
 
-    # Suppress noisy Windows asyncio ConnectionResetError on MCP subprocess cleanup
+    # Suppress noisy Windows asyncio socket-shutdown errors during WS/subprocess cleanup.
+    # These are purely cosmetic — the connection has already closed, we just can't call
+    # shutdown() on a socket the peer already reset. See: https://bugs.python.org/issue39010
     import sys
     if sys.platform == "win32":
         import asyncio
+        _BENIGN = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
         def _quiet_exception_handler(loop, context):
             exc = context.get("exception")
-            if isinstance(exc, ConnectionResetError):
-                return  # silently ignore — normal on Windows when killing old MCP processes
+            msg = context.get("message", "") or ""
+            if isinstance(exc, _BENIGN):
+                return
+            if isinstance(exc, OSError) and "_call_connection_lost" in msg:
+                return  # proactor shutdown race
             loop.default_exception_handler(context)
+
+        # Install on every loop uvicorn (or anything else) creates.
+        class _QuietPolicy(type(asyncio.get_event_loop_policy())):
+            def new_event_loop(self):
+                loop = super().new_event_loop()
+                loop.set_exception_handler(_quiet_exception_handler)
+                return loop
+        try:
+            asyncio.set_event_loop_policy(_QuietPolicy())
+        except Exception:
+            pass
+        # Also patch current loop if one is already running.
         try:
             asyncio.get_event_loop().set_exception_handler(_quiet_exception_handler)
         except RuntimeError:
+            pass
+
+        # Monkey-patch the proactor transport to swallow the shutdown OSError directly —
+        # belt & braces: the exception handler catches most cases, this catches the rest.
+        try:
+            from asyncio.proactor_events import _ProactorBasePipeTransport
+            _orig = _ProactorBasePipeTransport._call_connection_lost
+
+            def _quiet_call_connection_lost(self, exc):
+                try:
+                    return _orig(self, exc)
+                except (OSError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    return None
+            _ProactorBasePipeTransport._call_connection_lost = _quiet_call_connection_lost
+        except Exception:
             pass
 
     # Check LAN access setting (default: on for backward compat)

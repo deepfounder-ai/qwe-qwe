@@ -21,8 +21,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.17.0-blue" alt="version">
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
+  <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
   <img src="https://img.shields.io/badge/runs-100%25_offline-purple" alt="offline">
   <a href="https://t.me/qwe_qwe_ai"><img src="https://img.shields.io/badge/community-Telegram-blue?logo=telegram" alt="Telegram"></a>
@@ -64,23 +65,55 @@ qwe-qwe makes the trade-off worth it by working *with* the model's limitations i
 
 ### Install
 
-**One-line install:**
+Runs natively on **Linux**, **macOS** (Intel & Apple Silicon) and **Windows 10/11** — single `pip install -e .` pulls every runtime dep (including MarkItDown, python-docx/pptx, openpyxl, pdfminer.six, pypdf, fastembed, qdrant-client, uvicorn).
+
+#### 🐧 Linux / 🍎 macOS — one-line
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/deepfounder-ai/qwe-qwe/main/install.sh | bash
 ```
 
-**Windows:**
+This clones the repo, creates a venv, installs everything, verifies critical deps, pre-downloads the embedding model, and drops `qwe-qwe` on your `$PATH`.
+
+#### 🪟 Windows
+
 ```cmd
-git clone https://github.com/deepfounder-ai/qwe-qwe.git && cd qwe-qwe
+git clone https://github.com/deepfounder-ai/qwe-qwe.git
+cd qwe-qwe
 setup.bat
 ```
 
-**Manual:**
+On Windows shell commands are routed through **Git Bash** (auto-detected at install time — install [Git for Windows](https://git-scm.com/download/win) if missing). Falls back to `cmd.exe` if not found.
+
+#### Manual (any platform)
+
 ```bash
-git clone https://github.com/deepfounder-ai/qwe-qwe.git && cd qwe-qwe
-./setup.sh
-source .venv/bin/activate
+git clone https://github.com/deepfounder-ai/qwe-qwe.git
+cd qwe-qwe
+
+# Create venv
+python3 -m venv .venv            # or `python -m venv .venv` on Windows
+source .venv/bin/activate        # macOS/Linux
+# .venv\Scripts\activate         # Windows PowerShell / cmd
+
+# Install package + all runtime deps
+pip install -e .
+
+# Verify everything is wired
+qwe-qwe --doctor
 ```
+
+#### Update an existing install
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/deepfounder-ai/qwe-qwe/main/install.sh | bash
+
+# Any platform, inside the checkout:
+git pull && pip install -e . --upgrade
+```
+
+The update script is idempotent — re-running it detects an existing checkout and refreshes deps.
 
 ### Run
 
@@ -139,21 +172,43 @@ Telegram bot    <--/    Loop   +-- Tools (8 core + tool_search)
 ### Web UI
 
 ```bash
-qwe-qwe --web
+qwe-qwe --web                    # http://localhost:7860
+qwe-qwe --web --ssl --port 7861  # HTTPS (needed for mic/camera)
 ```
 
-ChatGPT-style dark UI with:
-- **Left sidebar** with thread list (collapsible on desktop, slide-in on mobile)
-- **Real-time streaming** via WebSocket
-- **Tool call activity log** — collapsible groups showing what the agent did (Claude Code style)
-- Thread management (create, switch, rename, branch)
-- Image upload & vision
-- Soul personality editor
-- Model picker with provider switching
-- MCP server management
-- Settings page (all agent parameters)
-- Mobile responsive (iOS/Android friendly)
-- LAN access from phone/tablet/PC
+Premium single-file SPA — **zero runtime JS dependencies** (no React, no CDN build). Linear / Vercel / Anthropic-Console aesthetic with Geist + Instrument Serif + Geist Mono type stack.
+
+**Shell**
+- 56-px icon rail (left) → chat / memory / scheduler / presets / settings
+- 264-px thread list with rename + delete inline actions
+- Editorial chat canvas (centered, 780 px)
+- Right-side **Inspector**: context-window gauge, INPUT / OUTPUT token cards, sparkbars (tokens-per-turn), recalled memories (`/api/knowledge/search` on last user prompt), active tools, latency bars
+- **⌘K command palette** + Gmail-style **Alt+letter** nav shortcuts
+- Keyboard cheatsheet modal (`Shift+?`)
+
+**Chat fidelity**
+- Streaming without flicker — in-place DOM patches, targeted updates, never full re-render during a turn
+- **Tool calls grouped by 11 categories** (memory / knowledge / files / shell / browser / web / vision / voice / automation / skills / orchestration), each expandable for full JSON input + output
+- **Markdown** rendering (H1–H6, bold / italic / strike, inline code, blockquote, lists, links)
+- **Code blocks** with line-number gutter, filename + language label, copy button
+- **Thinking** block as collapsible `<details>` after the turn ends
+- **Regenerate** = clean restart — server deletes the last user→assistant turn so the model has no idea it's a regeneration
+- Persistent attachments — images + files saved to message meta, survive server restart
+
+**Memory / Knowledge**
+- Drag-drop upload supporting **50+ formats** (see [Knowledge ingest](#knowledge-ingest))
+- URL scraping via MarkItDown
+- Folder scan — preview + batch index
+- Interactive knowledge graph (force-directed SVG) with hover edge highlights + search filter
+
+**Mobile**
+- iPhone safe-area insets on all 4 sides
+- Bottom tab bar replaces rail
+- Slide-in drawer for thread list
+- Composer textarea at 16 px (no iOS auto-zoom)
+- `100dvh` viewport, honors URL bar + home indicator
+
+**Settings** — 17 tabs grouped into Agent / I/O / Automation / System (Model, Soul, Tools, Memory, Voice, Camera, Telegram, MCP, Heartbeat, Inference, Network, Privacy, Appearance, Advanced, Account). Advanced sub-tabs expose all 30+ `EDITABLE_SETTINGS` as forms. **Abort** button stops runaway turns; **login modal** handles password-protected installs.
 
 ### Terminal (CLI)
 
@@ -270,6 +325,27 @@ Primary target is **local models via LM Studio or Ollama**. Cloud providers supp
 
 Switch on the fly via `/model` (CLI/Telegram) or Settings (Web UI). Auto-discovers available models.
 
+## Knowledge ingest
+
+The knowledge base ingests **50+ formats** via Microsoft **MarkItDown** (primary) with stdlib fallbacks (pinned as hard deps — no silent degradation on fresh installs):
+
+| Category | Formats |
+|---|---|
+| **Documents** | PDF · DOCX · PPTX · XLSX · EPUB · ODT · RTF · Jupyter notebooks (`.ipynb`) |
+| **Web** | HTML · any `https://…` URL (MarkItDown handles fetch + markdown conversion) |
+| **Data** | JSON · CSV · TSV · YAML · TOML · XML · INI · ENV |
+| **Code** | Python, JS/TS, Go, Rust, Java/Kotlin/Scala, C/C++, Ruby, PHP, SQL, GraphQL, 40+ extensions total |
+| **Markup** | Markdown · reStructuredText · AsciiDoc · TeX |
+| **Images** | PNG · JPG · WEBP — via vision pipeline |
+
+### Three ways to ingest
+
+1. **Drop or pick files** — Memory tab upload-zone → batch upload + index
+2. **Paste URL** — `POST /api/knowledge/url` fetches, converts to markdown, indexes under `source:url` tag
+3. **Scan folder** — preview first (lists indexable files with size/method), then index all in one pass
+
+Each source is stored under `~/.qwe-qwe/uploads/kb/<slug>_<name>`, chunked into ~800-char pieces, embedded + dense-vector-indexed in Qdrant, and queued for the nightly **synthesis** job that extracts entities + wiki pages from the content.
+
 ## Memory & Knowledge Graph
 
 Three-layer knowledge system in a single Qdrant collection:
@@ -383,12 +459,32 @@ Checks 20+ system components: Python, dependencies, SQLite, Qdrant, provider, LL
 Environment variables:
 
 ```bash
-QWE_LLM_URL=http://localhost:1234/v1    # LLM server URL
+QWE_LLM_URL=http://localhost:1234/v1   # LLM server URL
 QWE_LLM_MODEL=qwen/qwen3.5-9b          # Model name
 QWE_LLM_KEY=lm-studio                  # API key
-QWE_DB_PATH=~/.qwe-qwe/qwe_qwe.db     # Database path
-QWE_QDRANT_MODE=disk                    # memory | disk | server
-QWE_PASSWORD=                           # Web UI auth (optional)
+QWE_DB_PATH=~/.qwe-qwe/qwe_qwe.db      # Database path
+QWE_DATA_DIR=~/.qwe-qwe                # Where threads / memory / uploads live
+QWE_QDRANT_MODE=disk                   # memory | disk | server
+QWE_PASSWORD=                          # Web UI password (shows login modal if set)
+QWE_STT_DEVICE=cpu                     # STT inference device (cpu | cuda)
+```
+
+Everything else (30+ knobs — `context_budget`, `rag_chunk_size`, `synthesis_time`, `tts_api_url`, etc.) lives in **Settings → Advanced → Settings** and persists in SQLite.
+
+### Data layout
+
+All user data in `~/.qwe-qwe/` (configurable via `QWE_DATA_DIR`):
+
+```
+qwe_qwe.db        SQLite — messages, threads, KV, settings
+memory/           Qdrant vectors (disk mode)
+wiki/             Synthesized markdown pages
+skills/           User-created skills
+uploads/          Images, documents, camera captures
+  kb/             Knowledge-base files awaiting / done indexing
+workspace/        Default CWD for relative paths (switches per-preset)
+presets/<id>/     Installed presets (each with own workspace/, knowledge/, skills/)
+logs/             qwe-qwe.log (INFO+), errors.log (WARNING+)
 ```
 
 ## Docker

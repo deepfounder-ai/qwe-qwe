@@ -10,13 +10,33 @@ _log = logger.get("rag")
 RAG_COLLECTION = "qwe_rag"
 CHUNK_SIZE = 800        # chars (~200 tokens), configurable via settings
 CHUNK_OVERLAP = 100     # chars (~25 tokens), configurable via settings
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx",
-                        ".json", ".csv", ".yaml", ".yml", ".toml", ".cfg",
-                        ".sh", ".bash", ".html", ".css", ".sql", ".go",
-                        ".rs", ".java", ".c", ".cpp", ".h", ".rb", ".php"}
+SUPPORTED_EXTENSIONS = {
+    # Plain text & markdown
+    ".txt", ".md", ".markdown", ".rst", ".asciidoc", ".adoc", ".tex", ".log",
+    # Data / config
+    ".json", ".jsonc", ".ndjson", ".csv", ".tsv",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".properties",
+    ".xml", ".xsd", ".svg",
+    # Web
+    ".html", ".htm", ".xhtml", ".css", ".scss", ".sass", ".less",
+    # Code
+    ".py", ".pyi", ".ipynb",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".go", ".rs", ".java", ".kt", ".kts", ".scala", ".groovy",
+    ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".m", ".mm",
+    ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".jl", ".dart",
+    ".swift", ".sql", ".graphql", ".gql", ".proto", ".thrift",
+    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+    ".vim", ".nix", ".tf", ".tfvars", ".hcl",
+    # Docker / CI
+    ".dockerfile", ".containerfile",
+}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 PDF_EXTENSION = ".pdf"
-ALL_INDEXABLE = SUPPORTED_EXTENSIONS | IMAGE_EXTENSIONS | {PDF_EXTENSION}
+# Office & book formats — parsed by specialist readers in _read_file
+OFFICE_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".odt", ".epub", ".rtf"}
+URL_SCHEMES = ("http://", "https://")
+ALL_INDEXABLE = SUPPORTED_EXTENSIONS | IMAGE_EXTENSIONS | {PDF_EXTENSION} | OFFICE_EXTENSIONS
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 VISION_RATE_LIMIT = 1.0  # seconds between vision API calls
 SCANNED_PAGE_THRESHOLD = 50  # chars — below this, page is likely scanned
@@ -90,15 +110,255 @@ def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
+def _get_markitdown():
+    """Lazy-load a MarkItDown instance. Cached on first call.
+
+    Returns None if the package is missing (graceful fallback to stdlib readers).
+    """
+    global _markitdown_cache
+    try:
+        return _markitdown_cache
+    except NameError:
+        pass
+    try:
+        from markitdown import MarkItDown
+        _markitdown_cache = MarkItDown(enable_plugins=False)
+        _log.info("markitdown loaded — advanced document conversion enabled")
+    except ImportError:
+        _log.warning("markitdown not installed — falling back to stdlib readers")
+        _markitdown_cache = None
+    except Exception as e:
+        _log.warning(f"markitdown init failed: {e} — using stdlib fallbacks")
+        _markitdown_cache = None
+    return _markitdown_cache
+
+
+def _markitdown_convert(source) -> str | None:
+    """Try to extract markdown via MarkItDown. Returns None if unavailable or failed.
+
+    ``source`` may be a filesystem path (str / Path) or an http(s) URL.
+    """
+    md = _get_markitdown()
+    if md is None:
+        return None
+    try:
+        src = str(source)
+        result = md.convert(src)
+        text = getattr(result, "text_content", None) or getattr(result, "markdown", None)
+        if text and text.strip():
+            return text.strip()
+    except Exception as e:
+        _log.debug(f"markitdown failed on {source}: {e}")
+    return None
+
+
+def _strip_html(html: str) -> str:
+    """Quick stdlib HTML → text. Drops script/style, collapses whitespace."""
+    import re as _re
+    # Remove script/style blocks
+    html = _re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=_re.S | _re.I)
+    # Replace common block-level tags with newlines
+    html = _re.sub(r"</(p|div|li|tr|h[1-6]|br|section|article|header|footer|nav|aside)[^>]*>", "\n", html, flags=_re.I)
+    html = _re.sub(r"<br\s*/?>", "\n", html, flags=_re.I)
+    # Strip all remaining tags
+    html = _re.sub(r"<[^>]+>", "", html)
+    # Decode common entities (minimal)
+    from html import unescape
+    html = unescape(html)
+    # Collapse whitespace
+    html = _re.sub(r"\n{3,}", "\n\n", html)
+    html = _re.sub(r"[ \t]+", " ", html)
+    return html.strip()
+
+
+def _read_docx(path: Path) -> str | None:
+    """Extract text from .docx (Word) via stdlib zipfile — no deps needed."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(str(path)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", errors="replace")
+    except Exception as e:
+        _log.error(f"docx read failed: {path}: {e}")
+        return None
+    # Join <w:t> runs with spaces; paragraphs (<w:p>) already separated
+    import re as _re
+    # Insert paragraph breaks
+    xml = _re.sub(r"</w:p>", "\n", xml)
+    # Tab stops
+    xml = _re.sub(r"<w:tab[^/>]*/?>", "\t", xml)
+    # Extract text runs
+    parts = _re.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml)
+    return "".join(parts).strip() or None
+
+
+def _read_pptx(path: Path) -> str | None:
+    """Extract text from .pptx (PowerPoint) — iterate slide XMLs."""
+    import zipfile, re as _re
+    try:
+        with zipfile.ZipFile(str(path)) as z:
+            slide_names = sorted(n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
+            chunks = []
+            for name in slide_names:
+                xml = z.read(name).decode("utf-8", errors="replace")
+                # PowerPoint uses <a:t> for text runs
+                parts = _re.findall(r"<a:t[^>]*>([^<]*)</a:t>", xml)
+                if parts:
+                    chunks.append("\n".join(parts))
+            return "\n\n---\n\n".join(chunks).strip() or None
+    except Exception as e:
+        _log.error(f"pptx read failed: {path}: {e}")
+        return None
+
+
+def _read_xlsx(path: Path) -> str | None:
+    """Extract text from .xlsx — prefer openpyxl, fall back to stdlib."""
+    # Try openpyxl first (richer output, handles formulas)
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(str(path), data_only=True, read_only=True)
+        out = []
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            out.append(f"# Sheet: {sheet}")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    out.append("\t".join(cells))
+        return "\n".join(out).strip() or None
+    except ImportError:
+        pass
+    except Exception as e:
+        _log.error(f"xlsx read failed (openpyxl): {path}: {e}")
+        # Fall through to stdlib
+    # Stdlib fallback: unpack sharedStrings.xml + sheet cells
+    import zipfile, re as _re
+    try:
+        with zipfile.ZipFile(str(path)) as z:
+            shared = []
+            if "xl/sharedStrings.xml" in z.namelist():
+                sx = z.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
+                shared = _re.findall(r"<t[^>]*>([^<]*)</t>", sx)
+            chunks = []
+            for name in sorted(n for n in z.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")):
+                xml = z.read(name).decode("utf-8", errors="replace")
+                # Inline strings
+                inline = _re.findall(r"<t[^>]*>([^<]*)</t>", xml)
+                # Shared-string refs: <c t="s"><v>IDX</v></c>
+                refs = _re.findall(r'<c[^>]*t="s"[^>]*><v>(\d+)</v>', xml)
+                resolved = [shared[int(i)] if int(i) < len(shared) else "" for i in refs]
+                chunks.append("\n".join(filter(None, inline + resolved)))
+            return "\n\n".join(chunks).strip() or None
+    except Exception as e:
+        _log.error(f"xlsx stdlib read failed: {path}: {e}")
+        return None
+
+
+def _read_epub(path: Path) -> str | None:
+    """Extract text from .epub — zip of xhtml files, strip HTML from each."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(str(path)) as z:
+            xhtml_names = sorted(n for n in z.namelist() if n.lower().endswith((".xhtml", ".html", ".htm")))
+            chunks = []
+            for name in xhtml_names:
+                try:
+                    html = z.read(name).decode("utf-8", errors="replace")
+                    text = _strip_html(html)
+                    if text:
+                        chunks.append(text)
+                except Exception:
+                    pass
+            return "\n\n---\n\n".join(chunks).strip() or None
+    except Exception as e:
+        _log.error(f"epub read failed: {path}: {e}")
+        return None
+
+
+def _read_rtf(path: Path) -> str | None:
+    """Very rough RTF strip: remove control words and groups."""
+    import re as _re
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        _log.error(f"rtf read failed: {path}: {e}")
+        return None
+    # Remove RTF headers, control words, and braces
+    raw = _re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)   # \b, \par0, \fs24 , etc.
+    raw = _re.sub(r"\\'[0-9a-fA-F]{2}", "", raw)    # hex-escaped bytes
+    raw = _re.sub(r"[{}]", "", raw)
+    raw = _re.sub(r"\s+", " ", raw).strip()
+    return raw or None
+
+
+def _read_odt(path: Path) -> str | None:
+    """Extract text from .odt (OpenOffice) — zip with content.xml."""
+    import zipfile, re as _re
+    try:
+        with zipfile.ZipFile(str(path)) as z:
+            xml = z.read("content.xml").decode("utf-8", errors="replace")
+        # <text:p>, <text:span> etc. — strip tags
+        xml = _re.sub(r"</text:p>", "\n", xml)
+        xml = _re.sub(r"<[^>]+>", "", xml)
+        from html import unescape
+        return unescape(xml).strip() or None
+    except Exception as e:
+        _log.error(f"odt read failed: {path}: {e}")
+        return None
+
+
+def _read_ipynb(path: Path) -> str | None:
+    """Extract markdown + code cells from a Jupyter notebook."""
+    import json
+    try:
+        nb = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        _log.error(f"ipynb parse failed: {path}: {e}")
+        return None
+    out = []
+    for cell in nb.get("cells", []):
+        src = cell.get("source", "")
+        if isinstance(src, list):
+            src = "".join(src)
+        if cell.get("cell_type") == "markdown":
+            out.append(src)
+        elif cell.get("cell_type") == "code":
+            out.append("```python\n" + src + "\n```")
+    return "\n\n".join(out).strip() or None
+
+
 def _read_file(path: Path) -> str | None:
-    """Read file content. Supports text files, PDFs, and images."""
+    """Read file content. Supports text, PDF, images, Office, ebooks.
+
+    Strategy:
+      1. MarkItDown as primary converter for rich formats (PDF/Office/HTML/EPUB/images).
+         MarkItDown pulls in its own dependencies (pdfminer.six, python-docx, pptx, openpyxl…)
+         and produces clean markdown that preserves tables, headings, and reading order.
+      2. Stdlib / pypdf fallbacks when markitdown is unavailable or fails on a given file.
+      3. Plain text read for anything that's just a text-like file.
+    """
     ext = path.suffix.lower()
+
+    # Images: use the vision-based describer (markitdown can do OCR too but we
+    # already have a tuned vision pipeline with rate-limiting + describe_image).
     if ext in IMAGE_EXTENSIONS:
         try:
             return _describe_image(path)
         except Exception as e:
             _log.error(f"image read failed: {path}: {e}")
             return None
+
+    # Formats where MarkItDown is noticeably better than our stdlib readers.
+    MD_PRIMARY = {".pdf", ".docx", ".pptx", ".xlsx", ".epub",
+                  ".html", ".htm", ".xhtml", ".rtf", ".odt",
+                  ".csv", ".tsv", ".ipynb"}
+    if ext in MD_PRIMARY:
+        md_text = _markitdown_convert(path)
+        if md_text:
+            return md_text
+        # Fall through to stdlib fallbacks below
+        _log.info(f"markitdown returned no text for {path.name}, trying stdlib reader")
+
+    # Stdlib fallbacks (work even without markitdown installed)
     if ext == ".pdf":
         try:
             from pypdf import PdfReader
@@ -110,12 +370,105 @@ def _read_file(path: Path) -> str | None:
         except Exception as e:
             _log.error(f"PDF read failed: {path}: {e}")
             return None
-    # Text files
+    if ext == ".docx":
+        return _read_docx(path)
+    if ext == ".pptx":
+        return _read_pptx(path)
+    if ext == ".xlsx":
+        return _read_xlsx(path)
+    if ext == ".epub":
+        return _read_epub(path)
+    if ext == ".rtf":
+        return _read_rtf(path)
+    if ext == ".odt":
+        return _read_odt(path)
+    if ext == ".ipynb":
+        return _read_ipynb(path)
+    if ext in (".html", ".htm", ".xhtml"):
+        try:
+            return _strip_html(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception as e:
+            _log.error(f"html read failed: {path}: {e}")
+            return None
+    # Plain text
     try:
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         _log.error(f"read failed: {path}: {e}")
         return None
+
+
+def index_url(url: str, tags: list[str] | None = None) -> dict:
+    """Fetch a URL, convert to markdown, and index it.
+
+    MarkItDown handles the full pipeline: HTTP fetch, content-type detection,
+    HTML→markdown (preserving headings/tables/lists), PDF extraction, even
+    YouTube transcripts. Falls back to urllib + stdlib HTML strip if
+    MarkItDown fails (e.g. auth-walled page, unusual MIME).
+    """
+    import uuid as _uuid
+    from urllib.parse import urlparse
+
+    if not url.startswith(URL_SCHEMES):
+        return {"url": url, "chunks": 0, "status": "invalid URL scheme"}
+
+    uploads = Path(config.UPLOADS_DIR) / "kb"
+    uploads.mkdir(parents=True, exist_ok=True)
+    slug = _uuid.uuid4().hex[:8]
+    parsed = urlparse(url)
+    base = (parsed.netloc + parsed.path).rstrip("/").replace("/", "_")[-60:] or "page"
+
+    # Primary path: MarkItDown converts the URL directly to markdown.
+    md_text = _markitdown_convert(url)
+    if md_text:
+        dest = uploads / f"{slug}_{base}.md"
+        header = (
+            f"<!-- Source: {url} -->\n"
+            f"<!-- Fetched: {time.strftime('%Y-%m-%d %H:%M:%S')} -->\n"
+            f"<!-- Converter: markitdown -->\n\n"
+        )
+        dest.write_text(header + md_text, encoding="utf-8")
+        all_tags = list(tags or []) + ["source:url", url]
+        result = index_file(str(dest), tags=all_tags)
+        result["url"] = url
+        result["converter"] = "markitdown"
+        return result
+
+    # Fallback: raw urllib + stdlib HTML strip.
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; qwe-qwe/kb; +https://github.com/deepfounder-ai/qwe-qwe)",
+        })
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            raw = resp.read()
+    except Exception as e:
+        _log.error(f"URL fetch failed: {url}: {e}")
+        return {"url": url, "chunks": 0, "status": f"fetch failed: {e}"}
+
+    if ctype.startswith("text/html") or ctype == "" or url.lower().endswith((".html", ".htm")):
+        text = _strip_html(raw.decode("utf-8", errors="replace"))
+        dest = uploads / f"{slug}_{base}.txt"
+        dest.write_text(
+            f"# Source: {url}\n# Fetched: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}",
+            encoding="utf-8",
+        )
+    elif ctype.startswith("application/pdf") or url.lower().endswith(".pdf"):
+        dest = uploads / f"{slug}_{base}.pdf"
+        dest.write_bytes(raw)
+    elif ctype.startswith("text/"):
+        text = raw.decode("utf-8", errors="replace")
+        dest = uploads / f"{slug}_{base}.txt"
+        dest.write_text(f"# Source: {url}\n\n{text}", encoding="utf-8")
+    else:
+        return {"url": url, "chunks": 0, "status": f"unsupported content-type: {ctype}"}
+
+    all_tags = list(tags or []) + ["source:url", url]
+    result = index_file(str(dest), tags=all_tags)
+    result["url"] = url
+    result["converter"] = "stdlib-fallback"
+    return result
 
 
 def index_file(filepath: str, tags: list[str] | None = None) -> dict:
@@ -596,24 +949,70 @@ def index_files_batch(files: list[dict], progress_cb=None, phase_cb=None,
 
 
 def list_indexed_files() -> list[dict]:
-    """Return all indexed files from the kv store.
+    """Return all indexed files enriched with chunk count + file size.
 
     Returns:
-        list of ``{path, mtime, filename, tags}`` dicts.
+        list of ``{path, filename, tags, mtime, indexed_at, size, chunks}`` dicts.
+        Chunks are counted by grouping Qdrant points by ``file_path`` in a single
+        scroll — much cheaper than N separate count() calls.
     """
     rows = db.fetchall("SELECT key, value FROM kv WHERE key LIKE 'rag:mtime:%'")
-    results = []
     prefix_len = len("rag:mtime:")
+    results = []
+    paths = []
     for key, value in rows:
         fpath = key[prefix_len:]
+        paths.append(fpath)
         tags_str = db.kv_get(f"rag:tags:{fpath}") or ""
         tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
+        p = Path(fpath)
+        size = 0
+        try:
+            if p.exists():
+                size = p.stat().st_size
+        except Exception:
+            pass
         results.append({
             "path": fpath,
-            "mtime": float(value) if value else 0.0,
-            "filename": Path(fpath).name,
+            "filename": p.name,
+            "name": p.name,
             "tags": tags,
+            "mtime": float(value) if value else 0.0,
+            "indexed_at": float(value) if value else 0.0,
+            "size": size,
+            "bytes": size,
+            "chunks": 0,
         })
+    # Bulk-count chunks per file_path across the unified memory collection
+    try:
+        import memory
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        qc = memory._get_qdrant()
+        counts: dict[str, int] = {}
+        # Group by file_path — scroll through all knowledge-tagged points with file_path set
+        offset = None
+        limit = 512
+        while True:
+            points, offset = qc.scroll(
+                config.QDRANT_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="source_type", match=MatchValue(value="file")),
+                ]),
+                with_payload=["file_path"],
+                with_vectors=False,
+                limit=limit,
+                offset=offset,
+            )
+            for p in points:
+                fp = (p.payload or {}).get("file_path")
+                if fp:
+                    counts[fp] = counts.get(fp, 0) + 1
+            if not offset:
+                break
+        for r in results:
+            r["chunks"] = counts.get(r["path"], 0)
+    except Exception as e:
+        _log.debug(f"chunk count enrichment failed: {e}")
     return results
 
 

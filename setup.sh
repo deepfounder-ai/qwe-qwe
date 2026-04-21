@@ -61,6 +61,11 @@ python3 -c "import fastapi" 2>/dev/null || MISSING="$MISSING fastapi"
 python3 -c "import uvicorn" 2>/dev/null || MISSING="$MISSING uvicorn"
 python3 -c "import requests" 2>/dev/null || MISSING="$MISSING requests"
 python3 -c "from PIL import Image" 2>/dev/null || MISSING="$MISSING Pillow"
+python3 -c "import pypdf" 2>/dev/null || MISSING="$MISSING pypdf"
+python3 -c "from markitdown import MarkItDown" 2>/dev/null || MISSING="$MISSING markitdown[all]"
+python3 -c "import docx" 2>/dev/null || MISSING="$MISSING python-docx"
+python3 -c "import pptx" 2>/dev/null || MISSING="$MISSING python-pptx"
+python3 -c "import openpyxl" 2>/dev/null || MISSING="$MISSING openpyxl"
 
 if [ -n "$MISSING" ]; then
     warn "Missing packages:$MISSING — installing..."

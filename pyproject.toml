@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwe-qwe"
-version = "0.16.0"
+version = "0.17.0"
 description = "Lightweight offline AI agent for local models"
 readme = "README.md"
 license = {text = "MIT"}
@@ -25,6 +25,18 @@ dependencies = [
     "pypdf>=4.0",
     "PyYAML>=6.0",
     "jsonschema>=4.0",
+    # Universal document → Markdown converter (Microsoft). Drives knowledge-base
+    # ingestion: URL scraping, PDF / DOCX / PPTX / XLSX / HTML / EPUB / images.
+    # The [all] extra covers Office + audio; we also pin the critical siblings
+    # directly so a fresh `pip install` never ships a degraded KB pipeline.
+    "markitdown[all]>=0.1.0",
+    "python-docx>=1.0",
+    "python-pptx>=1.0",
+    "openpyxl>=3.1",
+    "mammoth>=1.8",
+    "markdownify>=0.14",
+    "beautifulsoup4>=4.12",
+    "pdfminer.six>=20240706",
 ]
 
 [project.optional-dependencies]

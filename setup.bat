@@ -65,6 +65,11 @@ python -c "import fastapi" 2>nul || set "MISSING=!MISSING! fastapi"
 python -c "import uvicorn" 2>nul || set "MISSING=!MISSING! uvicorn"
 python -c "import requests" 2>nul || set "MISSING=!MISSING! requests"
 python -c "from PIL import Image" 2>nul || set "MISSING=!MISSING! Pillow"
+python -c "import pypdf" 2>nul || set "MISSING=!MISSING! pypdf"
+python -c "from markitdown import MarkItDown" 2>nul || set "MISSING=!MISSING! markitdown[all]"
+python -c "import docx" 2>nul || set "MISSING=!MISSING! python-docx"
+python -c "import pptx" 2>nul || set "MISSING=!MISSING! python-pptx"
+python -c "import openpyxl" 2>nul || set "MISSING=!MISSING! openpyxl"
 
 if not "%MISSING%"=="" (
     echo   [!] Missing packages:%MISSING%

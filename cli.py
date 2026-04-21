@@ -13,15 +13,24 @@ _log = logger.get("cli")
 
 console = Console()
 
-# Enable readline for input history + arrow keys (Linux/Mac only — Windows uses pyreadline3)
+# Enable readline for input history + arrow keys (Linux/Mac uses GNU readline;
+# Windows may have pyreadline3 pulled in as a transitive — its parser doesn't
+# accept GNU keydescr, so we swallow those errors too).
 try:
     import readline
-    readline.parse_and_bind('"\\e[A": previous-history')
-    readline.parse_and_bind('"\\e[B": next-history')
-    readline.parse_and_bind('"\\e[C": forward-char')
-    readline.parse_and_bind('"\\e[D": backward-char')
+    for _binding in (
+        '"\\e[A": previous-history',
+        '"\\e[B": next-history',
+        '"\\e[C": forward-char',
+        '"\\e[D": backward-char',
+    ):
+        try:
+            readline.parse_and_bind(_binding)
+        except Exception:
+            # pyreadline3 (Windows) raises IndexError on \e[X keydescr — ignore
+            pass
 except ImportError:
-    pass  # readline not available on Windows by default
+    pass
 
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
