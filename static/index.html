@@ -1841,11 +1841,14 @@ const handleWsMessage = (msg) => {
   // loses scrollTop. If the patch target is gone (view changed), fall back.
   const target = s || state.messages[state.messages.length - 1];
   const patched = target ? patchMessageInPlace(target) : false;
+  const turnEnded = t === 'reply' || t === 'done' || t === 'end' || t === 'finish' || t === 'error';
   if (!patched) {
     render();
-  } else if (t === 'reply' || t === 'done' || t === 'end' || t === 'finish' || t === 'error') {
-    // Turn ended — refresh inspector data without touching chat DOM.
-    // Inspector is a separate <aside>, re-rendering it doesn't affect scroll.
+  } else if (turnEnded) {
+    // Turn ended — refresh inspector / topbar / composer surgically so we
+    // don't touch the chat-scroll container (preserves scrollTop). Updating
+    // the composer is critical: the Stop button must flip back to Send when
+    // state.busy just became false.
     const inspEl = document.querySelector('aside.inspector');
     if (inspEl) {
       const tmp = document.createElement('div');
@@ -1853,13 +1856,58 @@ const handleWsMessage = (msg) => {
       const next = tmp.firstElementChild;
       if (next) inspEl.replaceWith(next);
     }
-    // Also refresh top-bar status / idle state
     const topBarEl = document.querySelector('header.topbar');
     if (topBarEl) {
       const tmp = document.createElement('div');
       tmp.innerHTML = renderTopBar();
       const next = tmp.firstElementChild;
-      if (next) { topBarEl.replaceWith(next); document.querySelectorAll('[data-act="palette"]').forEach(b => b.onclick = openPalette); }
+      if (next) {
+        topBarEl.replaceWith(next);
+        document.querySelectorAll('[data-act="palette"]').forEach(b => b.onclick = openPalette);
+        document.querySelectorAll('[data-act="toggle-threadlist"]').forEach(b => {
+          b.onclick = () => { state.threadlistOpen = !state.threadlistOpen; render(); };
+        });
+      }
+    }
+    // Composer lives at the end of `.scroll-col .inner` — re-render it
+    // without touching the messages list above.
+    const composerEl = document.querySelector('.composer');
+    if (composerEl && state.view === 'chat') {
+      // Preserve textarea state across the swap so the user doesn't lose
+      // whatever they started typing during the turn.
+      const ta = document.getElementById('composer-ta');
+      const pendingText = ta ? ta.value : '';
+      const caretStart = ta ? ta.selectionStart : 0;
+      const caretEnd = ta ? ta.selectionEnd : 0;
+      // Re-run the composer slice of renderChatView by pulling state and
+      // rebuilding from the same builder — cheapest path is a full render,
+      // but that would reset scrollTop. Instead, just toggle the right side.
+      const right = composerEl.querySelector('.right');
+      if (right) {
+        right.innerHTML =
+          '<span class="counter" id="composer-count">' + pendingText.length + '</span>' +
+          (state.busy
+            ? '<button class="btn-danger" data-act="abort-turn" style="padding:5px 12px;font-size:12px;display:inline-flex;align-items:center;gap:5px">' + ico('close', 11) + 'Stop</button>'
+            : '<button class="btn-primary" id="composer-send"' + (pendingText.trim() ? '' : ' disabled') + '>Send <span class="kbd">↵</span></button>');
+        // Re-wire the right-side buttons
+        right.querySelectorAll('[data-act="abort-turn"]').forEach(b => {
+          b.onclick = async () => {
+            try { await api('/api/abort', { method: 'POST' }); toast('stopping…'); state.busy = false; state.streaming = null; render(); }
+            catch { toast('abort failed', 'err'); }
+          };
+        });
+        const sendBtn = document.getElementById('composer-send');
+        if (sendBtn) sendBtn.onclick = () => {
+          const val = (ta && ta.value || '').trim(); if (!val) return;
+          sendMessage(ta.value); ta.value = ''; ta.style.height = 'auto';
+          const c = document.getElementById('composer-count'); if (c) c.textContent = '0';
+          sendBtn.disabled = true;
+        };
+      }
+      // Restore textarea focus + caret if the user was mid-typing
+      if (ta && document.activeElement !== ta) {
+        try { ta.focus(); ta.setSelectionRange(caretStart, caretEnd); } catch {}
+      }
     }
   }
 };
@@ -3680,16 +3728,34 @@ function openAddProviderModal() {
   });
 }
 
-function openAddMcpModal() {
+async function openAddMcpModal() {
+  // Fetch presets — if unavailable, modal still works as manual form
+  let presets = {};
+  try { const r = await api('/api/mcp/presets'); presets = (r && r.presets) || {}; } catch {}
+
+  const presetCards = Object.entries(presets).map(([id, p]) => {
+    const cmd = p.transport === 'stdio' ? (p.command + ' ' + (p.args || []).join(' ')) : (p.url || '');
+    return '<button class="picker-card" data-mcp-preset="' + esc(id) + '" style="text-align:left">' +
+      '<div class="name">' + esc(id) + '</div>' +
+      '<div class="sub" style="white-space:normal">' + esc(p.description || cmd) + '</div>' +
+    '</button>';
+  }).join('');
+
   const body =
+    (Object.keys(presets).length
+      ? '<div class="field"><div class="label">Presets</div>' +
+        '<div class="picker-grid" style="margin-top:4px">' + presetCards + '</div>' +
+        '<div class="hint">Click a preset to prefill the form.</div></div>'
+      : '') +
     '<div class="field"><div class="label">Name</div><input type="text" id="mc-name" placeholder="filesystem / github / ..." autofocus></div>' +
-    '<div class="field"><div class="label">Transport</div><select id="mc-transport">' +
+    '<div class="field"><div class="label">Transport</div><select id="mc-transport" class="setting-input mono" style="width:100%">' +
       '<option value="stdio">stdio (spawn a command)</option><option value="http">HTTP</option></select></div>' +
     '<div class="field"><div class="label">Command</div><input type="text" id="mc-cmd" class="mono" placeholder="npx"></div>' +
     '<div class="field"><div class="label">Args</div><input type="text" id="mc-args" class="mono" placeholder="-y, @modelcontextprotocol/server-filesystem, /path">' +
       '<div class="hint">Comma-separated.</div></div>' +
     '<div class="field"><div class="label">URL (HTTP transport)</div><input type="url" id="mc-url" placeholder="https://…"></div>' +
-    '<div class="field"><div class="label">Env vars</div><textarea id="mc-env" placeholder="KEY=value\\nOTHER=value"></textarea></div>';
+    '<div class="field"><div class="label">Env vars</div><textarea id="mc-env" placeholder="KEY=value\nOTHER=value"></textarea>' +
+      '<div class="hint">One per line. Use these for API keys, tokens, etc.</div></div>';
   openModal({
     title: 'Add MCP server', body, wide: true,
     actions: [
@@ -3707,11 +3773,37 @@ function openAddMcpModal() {
           envRaw.split(/\r?\n/).forEach(line => {
             const i = line.indexOf('='); if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
           });
-          try { await api('/api/mcp/servers', { method: 'POST', body: { name, transport, command, args, env, url, enabled: true } }); toast('added'); loadMcp(); }
+          try {
+            const r = await api('/api/mcp/servers', { method: 'POST', body: { name, transport, command, args, env, url, enabled: true } });
+            if (r && r.error) { toast(r.error, 'err'); return false; }
+            toast('added'); loadMcp();
+          }
           catch { toast('add failed', 'err'); return false; }
       }},
     ],
   });
+  // Wire preset click → prefill fields (defer until DOM exists)
+  setTimeout(() => {
+    document.querySelectorAll('[data-mcp-preset]').forEach(b => {
+      b.onclick = (e) => {
+        e.preventDefault();
+        const id = b.dataset.mcpPreset;
+        const p = presets[id];
+        if (!p) return;
+        const setVal = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v == null ? '' : v; };
+        setVal('mc-name', id);
+        setVal('mc-transport', p.transport || 'stdio');
+        setVal('mc-cmd', p.command || '');
+        setVal('mc-args', (p.args || []).join(', '));
+        setVal('mc-url', p.url || '');
+        const envLines = Object.entries(p.env || {}).map(([k, v]) => k + '=' + v).join('\n');
+        setVal('mc-env', envLines);
+        // Highlight picked preset
+        document.querySelectorAll('[data-mcp-preset]').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+      };
+    });
+  }, 40);
 }
 
 function openAddHeartbeatModal() {
@@ -4015,26 +4107,74 @@ function renderTabTelegram() {
 
 function renderTabMcp() {
   const servers = state.mcpServers || [];
-  return '<h2>MCP servers</h2><p class="intro">Model Context Protocol bridges. Each server exposes its own tool set, activated on demand.</p>' +
-    '<div style="display:flex;align-items:center;gap:8px;margin:14px 0"><span class="mono" style="font-size:10px;color:var(--fg-4);letter-spacing:0.1em;text-transform:uppercase;flex:1">Configured servers</span>' +
+  const running = servers.filter(s => s.connected).length;
+  const tripped = servers.filter(s => (s.error_streak || 0) >= 3).length;
+  const toolsTotal = servers.reduce((n, s) => n + (s.tools_count || 0), 0);
+
+  const statsStrip = servers.length
+    ? '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0">' +
+        '<div class="mini-stat"><div class="lbl">RUNNING</div><div class="v">' + running + ' / ' + servers.length + '</div></div>' +
+        '<div class="mini-stat"><div class="lbl">TOOLS</div><div class="v">' + toolsTotal + '</div></div>' +
+        '<div class="mini-stat"><div class="lbl">TRIPPED</div><div class="v" style="color:' + (tripped ? 'var(--err)' : 'var(--fg)') + '">' + tripped + '</div></div>' +
+      '</div>'
+    : '';
+
+  const renderServer = (s) => {
+    const name = s.name || s.id;
+    const conn = !!s.connected;
+    const enabled = s.enabled !== false;
+    const streak = s.error_streak || 0;
+    const statusCls = conn ? 'ok' : (streak >= 3 ? 'err' : (enabled ? 'warn' : ''));
+    const statusLabel = conn ? 'running' : (streak >= 3 ? 'broken' : (enabled ? 'stopped' : 'disabled'));
+    const toolsList = (s.tools || []).slice(0, 8).map(t =>
+      '<span class="tool-chip" title="' + esc(t.description || '') + '">' + esc(t.name) + '</span>'
+    ).join('');
+    const moreTools = (s.tools_count || 0) > 8 ? '<span class="tag">+' + ((s.tools_count || 0) - 8) + '</span>' : '';
+    const envChips = (s.env_keys || []).map(k =>
+      '<span class="tag" style="margin-right:4px">' + esc(k) + '</span>'
+    ).join('');
+    const errorBox = s.error
+      ? '<div style="margin-top:8px;padding:8px 10px;border-radius:6px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);font-family:var(--font-mono);font-size:11px;color:var(--err);white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto">' +
+        esc(s.error) +
+        (s.stderr_tail && s.stderr_tail.length
+          ? '\n\n<stderr tail>\n' + esc(s.stderr_tail.slice(-5).join('\n'))
+          : '') +
+        '</div>'
+      : '';
+    return '<div class="job-card" style="padding:14px 16px">' +
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">' +
+              '<span class="job-title">' + esc(name) + '</span>' +
+              '<span class="status-badge ' + statusCls + '"><span class="sbdot"></span>' + statusLabel + '</span>' +
+            '</div>' +
+            '<div class="mono" style="font-size:11px;color:var(--fg-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+              esc(s.transport || 'stdio') + ' · ' + esc(s.command || s.url || '—') +
+              ((s.args || []).length ? ' ' + esc((s.args || []).join(' ')) : '') +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:2px;flex-shrink:0">' +
+            '<button class="icon-btn" data-mcp="' + esc(name) + '" data-mcp-act="restart" title="Restart">' + ico('refresh', 13) + '</button>' +
+            '<button class="icon-btn" data-mcp="' + esc(name) + '" data-mcp-act="toggle" title="' + (enabled ? 'Disable' : 'Enable') + '">' + ico(enabled ? 'pause' : 'play', 13) + '</button>' +
+            '<button class="icon-btn" data-mcp="' + esc(name) + '" data-mcp-act="delete" title="Remove">' + ico('trash', 13) + '</button>' +
+          '</div>' +
+        '</div>' +
+        (envChips ? '<div style="margin-bottom:6px">' + envChips + '</div>' : '') +
+        (toolsList
+          ? '<div style="display:flex;flex-wrap:wrap;gap:4px;padding-top:8px;border-top:1px solid var(--line)">' + toolsList + moreTools + '</div>'
+          : (conn ? '<div style="padding:8px 0;color:var(--fg-4);font-size:11px">No tools exposed by this server.</div>' : '')) +
+        errorBox +
+      '</div>';
+  };
+
+  return '<h2>MCP servers</h2><p class="intro">Model Context Protocol bridges. Each server runs as a subprocess (stdio) or HTTP endpoint and exposes its own tool set, automatically merged into the agent\'s tool catalogue.</p>' +
+    statsStrip +
+    '<div style="display:flex;align-items:center;gap:8px;margin:14px 0 10px"><span class="mono" style="font-size:10px;color:var(--fg-4);letter-spacing:0.1em;text-transform:uppercase;flex:1">Configured servers</span>' +
+      '<button class="btn-secondary" data-act="mcp-refresh" title="Refresh">' + ico('refresh', 12) + '</button>' +
       '<button class="btn-secondary" data-act="mcp-add">' + ico('plusSmall', 12) + ' Add server</button></div>' +
     (servers.length
-      ? servers.map(s => {
-          const name = s.name || s.id;
-          const running = !!s.running;
-          const enabled = s.enabled !== false;
-          return '<div class="entry-row"><div style="flex:1;min-width:0">' +
-              '<div class="title">' + esc(name) + '</div>' +
-              '<div class="sub">' + esc(s.transport || 'stdio') + ' · ' + esc(s.command || s.url || '—') + '</div>' +
-            '</div>' +
-            '<span class="status-badge ' + (running ? 'ok' : (enabled ? 'warn' : '')) + '"><span class="sbdot"></span>' + (running ? 'running' : (enabled ? 'stopped' : 'disabled')) + '</span>' +
-            '<div class="actions">' +
-              '<button class="icon-btn" data-mcp="' + esc(name) + '" data-mcp-act="restart" title="Restart">' + ico('refresh', 13) + '</button>' +
-              '<button class="icon-btn" data-mcp="' + esc(name) + '" data-mcp-act="toggle" title="' + (enabled ? 'Disable' : 'Enable') + '">' + ico(enabled ? 'pause' : 'play', 13) + '</button>' +
-              '<button class="icon-btn" data-mcp="' + esc(name) + '" data-mcp-act="delete" title="Remove">' + ico('trash', 13) + '</button>' +
-            '</div></div>';
-        }).join('')
-      : '<div style="padding:24px 0;color:var(--fg-4);font-size:12px">No MCP servers configured.</div>');
+      ? '<div style="display:flex;flex-direction:column;gap:8px">' + servers.map(renderServer).join('') + '</div>'
+      : '<div style="padding:24px 0;color:var(--fg-4);font-size:12px">No MCP servers configured. Click <b>Add server</b> to pick from presets (filesystem, github, brave-search, memory, puppeteer, sqlite, fetch) or define your own.</div>');
 }
 
 function renderTabHeartbeat() {
@@ -4999,6 +5139,7 @@ function wireEvents() {
 
   // MCP
   document.querySelectorAll('[data-act="mcp-add"]').forEach(b => { b.onclick = openAddMcpModal; });
+  document.querySelectorAll('[data-act="mcp-refresh"]').forEach(b => { b.onclick = loadMcp; });
   document.querySelectorAll('[data-mcp]').forEach(b => {
     b.onclick = async () => {
       const name = b.dataset.mcp, act = b.dataset.mcpAct;

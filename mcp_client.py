@@ -42,10 +42,78 @@ def save_config(config: dict):
     db.kv_set("mcp:servers", json.dumps(config, ensure_ascii=False))
 
 
+# ── Built-in server presets — one-click install of common MCP servers ──
+PRESETS: dict[str, dict] = {
+    "filesystem": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "{path}"],
+        "description": "Read/write files in a given directory. Placeholder {path} → your chosen folder.",
+        "placeholders": {"path": "~/projects"},
+    },
+    "github": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "{token}"},
+        "description": "GitHub API — read repos, issues, PRs, search code.",
+        "placeholders": {"token": "ghp_... (Personal Access Token)"},
+    },
+    "brave-search": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "env": {"BRAVE_API_KEY": "{api_key}"},
+        "description": "Brave web search (free tier available at brave.com/search/api).",
+        "placeholders": {"api_key": "BSA... (Brave Search API key)"},
+    },
+    "memory": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "description": "Persistent key-value scratchpad — the agent can remember things across turns.",
+    },
+    "puppeteer": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+        "description": "Headless browser automation via Puppeteer.",
+    },
+    "sqlite": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sqlite", "--db", "{path}"],
+        "description": "Query a local SQLite database.",
+        "placeholders": {"path": "~/my.db"},
+    },
+    "fetch": {
+        "transport": "stdio", "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-fetch"],
+        "description": "Fetch and convert web pages to markdown.",
+    },
+}
+
+
+def get_presets() -> dict:
+    """Return the built-in preset catalogue for the UI picker."""
+    return PRESETS
+
+
+def _validate_config(config: dict) -> str | None:
+    """Return an error message if the config is invalid, else None."""
+    transport = config.get("transport", "stdio")
+    if transport == "stdio":
+        if not config.get("command", "").strip():
+            return "stdio transport requires a 'command'"
+    elif transport == "http":
+        url = (config.get("url") or "").strip()
+        if not url:
+            return "http transport requires a 'url'"
+        if not url.startswith(("http://", "https://")):
+            return "url must start with http:// or https://"
+    else:
+        return f"unknown transport: {transport!r}"
+    return None
+
+
 def add_server(name: str, **kwargs) -> str:
     """Add or update an MCP server config."""
     config = load_config()
-    config[name] = {
+    new_config = {
         "command": kwargs.get("command", ""),
         "args": kwargs.get("args", []),
         "env": kwargs.get("env", {}),
@@ -53,6 +121,10 @@ def add_server(name: str, **kwargs) -> str:
         "transport": kwargs.get("transport", "stdio"),
         "enabled": kwargs.get("enabled", True),
     }
+    err = _validate_config(new_config)
+    if err:
+        return f"Invalid config for '{name}': {err}"
+    config[name] = new_config
     save_config(config)
     return f"MCP server '{name}' configured"
 
@@ -81,6 +153,9 @@ class MCPServerConnection:
         self.tools: list[dict] = []  # cached MCP tool definitions
         self.connected = False
         self.error: str | None = None
+        self.error_streak = 0          # consecutive RPC failures → circuit-breaker
+        self.last_used: float = 0.0    # timestamp of last successful RPC
+        self.stderr_tail: list[str] = []  # last N stderr lines (stdio only)
 
     def _next_id(self) -> int:
         self._id += 1
@@ -92,16 +167,18 @@ class MCPServerConnection:
     def initialize(self) -> bool:
         """Send initialize handshake."""
         try:
+            import config as _config
             resp = self._rpc("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "qwe-qwe", "version": "0.6.0"},
+                "clientInfo": {"name": "qwe-qwe", "version": getattr(_config, "VERSION", "0.17.1")},
             })
             if resp.get("result"):
                 # Send initialized notification
                 self._notify("notifications/initialized")
                 self.connected = True
                 self.error = None
+                self.error_streak = 0
                 _log.info(f"MCP '{self.name}' initialized")
                 return True
             self.error = resp.get("error", {}).get("message", "Init failed")
@@ -127,8 +204,17 @@ class MCPServerConnection:
             _log.error(f"MCP '{self.name}' tools/list failed: {e}")
             return []
 
+    _CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures → mark disconnected
+
     def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool and return text result."""
+        if not self.connected:
+            return f"Error: MCP '{self.name}' is disconnected (restart via MCP settings)"
+        if self.error_streak >= self._CIRCUIT_BREAKER_THRESHOLD:
+            return (
+                f"Error: MCP '{self.name}' disabled after {self.error_streak} consecutive failures. "
+                f"Last error: {self.error or 'unknown'}. Restart the server from the MCP settings."
+            )
         try:
             resp = self._rpc("tools/call", {
                 "name": tool_name,
@@ -138,7 +224,12 @@ class MCPServerConnection:
             if result.get("isError"):
                 content = result.get("content", [])
                 err_text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
+                self.error_streak += 1
+                self.error = err_text or "tool execution failed"
                 return f"Error: {err_text}" if err_text else "Error: tool execution failed"
+            # Success — reset breaker
+            self.error_streak = 0
+            self.error = None
             # Extract text content
             content = result.get("content", [])
             parts = []
@@ -151,6 +242,15 @@ class MCPServerConnection:
                     parts.append(f"[resource: {c.get('uri', '')}]")
             return "\n".join(parts) if parts else str(result)
         except Exception as e:
+            self.error_streak += 1
+            self.error = str(e)
+            # Mark disconnected when breaker trips so subsequent calls fail fast
+            if self.error_streak >= self._CIRCUIT_BREAKER_THRESHOLD:
+                self.connected = False
+                _log.warning(
+                    f"MCP '{self.name}' circuit-breaker tripped after "
+                    f"{self.error_streak} failures — marking disconnected"
+                )
             return f"Error calling MCP tool '{tool_name}': {e}"
 
     def stop(self):
@@ -170,9 +270,37 @@ class MCPServerConnection:
 class StdioMCPServer(MCPServerConnection):
     """MCP server connected via subprocess stdin/stdout."""
 
+    _RPC_TIMEOUT = 30.0      # max seconds to wait for a response line
+    _STDERR_TAIL_MAX = 50    # keep last N stderr lines for debugging
+
     def __init__(self, name: str, config: dict):
         super().__init__(name, config)
         self.proc: subprocess.Popen | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stopping = False
+
+    def _drain_stderr(self):
+        """Background reader: drain the subprocess stderr so its buffer
+        doesn't fill up and block the server. Keeps a tail for diagnostics."""
+        try:
+            while self.proc and self.proc.stderr and not self._stopping:
+                line = self.proc.stderr.readline()
+                if not line:
+                    break
+                try:
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                except Exception:
+                    continue
+                if text:
+                    self.stderr_tail.append(text)
+                    if len(self.stderr_tail) > self._STDERR_TAIL_MAX:
+                        self.stderr_tail = self.stderr_tail[-self._STDERR_TAIL_MAX:]
+                    # MCP servers often log verbose info to stderr — only surface warnings+
+                    lower = text.lower()
+                    if any(w in lower for w in ("error", "fatal", "exception", "traceback")):
+                        _log.warning(f"MCP '{self.name}' stderr: {text[:200]}")
+        except Exception as e:
+            _log.debug(f"MCP '{self.name}' stderr reader exited: {e}")
 
     def start(self) -> bool:
         """Spawn the server process."""
@@ -184,19 +312,54 @@ class StdioMCPServer(MCPServerConnection):
             return False
         env = {**os.environ, **(env_overrides or {})}
         try:
+            # Don't inherit our stdin; ensure line-buffered where possible
             self.proc = subprocess.Popen(
                 [command] + args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
+                bufsize=0,  # unbuffered — critical for line-based JSON-RPC
             )
+            self._stopping = False
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr, name=f"mcp-{self.name}-stderr", daemon=True
+            )
+            self._stderr_thread.start()
             _log.info(f"MCP '{self.name}' process started (PID {self.proc.pid})")
             return True
+        except FileNotFoundError:
+            self.error = f"Command not found on PATH: {command!r}"
+            _log.error(f"MCP '{self.name}' start failed: {self.error}")
+            return False
         except Exception as e:
             self.error = f"Failed to start: {e}"
             _log.error(f"MCP '{self.name}' start failed: {e}")
             return False
+
+    def _readline_with_timeout(self, timeout: float) -> bytes:
+        """Read a line from stdout with a timeout — avoids hanging forever
+        when the server dies mid-request. Uses a helper thread so we work
+        uniformly on Windows (no select() on pipes)."""
+        result: list[bytes] = []
+        err: list[Exception] = []
+        done = threading.Event()
+
+        def _reader():
+            try:
+                line = self.proc.stdout.readline()
+                result.append(line)
+            except Exception as e:
+                err.append(e)
+            finally:
+                done.set()
+
+        threading.Thread(target=_reader, daemon=True).start()
+        if not done.wait(timeout):
+            raise TimeoutError(f"no response within {timeout:.0f}s")
+        if err:
+            raise err[0]
+        return result[0] if result else b""
 
     def _rpc(self, method: str, params: dict | None = None) -> dict:
         if not self.proc or self.proc.poll() is not None:
@@ -207,12 +370,23 @@ class StdioMCPServer(MCPServerConnection):
             msg["params"] = params
         raw = json.dumps(msg) + "\n"
         with self._lock:
-            self.proc.stdin.write(raw.encode("utf-8"))
-            self.proc.stdin.flush()
-            # Read response line (JSON-RPC responses are newline-delimited)
-            line = self.proc.stdout.readline()
+            try:
+                self.proc.stdin.write(raw.encode("utf-8"))
+                self.proc.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
+                raise ConnectionError(f"MCP '{self.name}' stdin broken: {e}")
+            try:
+                line = self._readline_with_timeout(self._RPC_TIMEOUT)
+            except TimeoutError:
+                raise
             if not line:
-                raise ConnectionError(f"MCP '{self.name}' returned empty response")
+                # Stdout closed → process exited. Surface stderr tail to help debug.
+                tail = "\n".join(self.stderr_tail[-10:]) or "(no stderr)"
+                raise ConnectionError(
+                    f"MCP '{self.name}' returned empty response (process likely exited). "
+                    f"Recent stderr:\n{tail}"
+                )
+        self.last_used = time.time()
         return json.loads(line.decode("utf-8"))
 
     def _notify(self, method: str, params: dict | None = None):
@@ -228,6 +402,7 @@ class StdioMCPServer(MCPServerConnection):
 
     def stop(self):
         super().stop()
+        self._stopping = True
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.terminate()
@@ -239,6 +414,10 @@ class StdioMCPServer(MCPServerConnection):
                     pass
             _log.info(f"MCP '{self.name}' process stopped")
         self.proc = None
+        # Let stderr reader exit naturally
+        if self._stderr_thread and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=1)
+        self._stderr_thread = None
 
 
 class HttpMCPServer(MCPServerConnection):
@@ -424,7 +603,7 @@ def execute_mcp_tool(full_name: str, args: dict) -> str:
 # ── Status ──
 
 def list_servers() -> list[dict]:
-    """List all configured servers with connection status."""
+    """List all configured servers with connection status + diagnostics."""
     config = load_config()
     result = []
     with _servers_lock:
@@ -435,17 +614,40 @@ def list_servers() -> list[dict]:
             "name": name,
             "transport": srv_config.get("transport", "stdio"),
             "command": srv_config.get("command", ""),
+            "args": srv_config.get("args", []),
             "url": srv_config.get("url", ""),
+            "env_keys": list((srv_config.get("env") or {}).keys()),  # names only — no secret values
             "enabled": srv_config.get("enabled", True),
-            "connected": conn.connected if conn else False,
+            "connected": bool(conn and conn.connected),
             "tools_count": len(conn.tools) if conn else 0,
             "error": conn.error if conn else None,
+            "error_streak": conn.error_streak if conn else 0,
+            "stderr_tail": (getattr(conn, "stderr_tail", None) or [])[-10:] if conn else [],
+            "last_used": conn.last_used if conn else 0.0,
             "tools": [],
         }
         if conn and conn.tools:
             entry["tools"] = [
-                {"name": t["name"], "description": t.get("description", "")[:100]}
+                {"name": t["name"], "description": t.get("description", "")[:160]}
                 for t in conn.tools
             ]
         result.append(entry)
     return result
+
+
+def health_check() -> dict:
+    """Fast health probe — returns counts without hitting the wire.
+
+    Useful for UI polling + startup summary.
+    """
+    with _servers_lock:
+        servers = list(_servers.values())
+    running = sum(1 for s in servers if s.connected)
+    tripped = sum(1 for s in servers if s.error_streak >= 3)
+    tools_total = sum(len(s.tools) for s in servers if s.connected)
+    return {
+        "configured": len(load_config()),
+        "running": running,
+        "tripped": tripped,
+        "tools_total": tools_total,
+    }

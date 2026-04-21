@@ -2457,6 +2457,20 @@ def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
 
 # ── MCP Server Management ──
 
+@app.get("/api/mcp/presets")
+async def mcp_presets():
+    """Return the built-in MCP server preset catalogue for the UI picker."""
+    import mcp_client
+    return {"presets": mcp_client.get_presets()}
+
+
+@app.get("/api/mcp/health")
+async def mcp_health():
+    """Fast MCP health summary: configured / running / tripped / tools_total."""
+    import mcp_client
+    return mcp_client.health_check()
+
+
 @app.get("/api/mcp/servers")
 async def mcp_list_servers():
     """List all configured MCP servers with status."""
