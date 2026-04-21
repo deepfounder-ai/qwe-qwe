@@ -1,26 +1,23 @@
-# v0.17.3 — Advanced Settings rendering fix
+# v0.17.4 — Preset routes fix
 
-Quick patch addressing a UI regression in **Settings → Advanced → Settings**.
+Quick patch addressing a route-ordering bug in `server.py`.
 
-## 🐛 Fixes
+## 🐛 Fix
 
-- **All 30+ tunables rendered as `[object Object]`** — `/api/settings` returns each key as `{value, default, description, type, min, max}` but the UI was reading the nested object as a flat value. Every input / toggle in the Advanced Settings tab now:
-  - Pulls the real value from `.value`
-  - Uses `.type` (`int` / `float` / `str` / `bool`) to pick the right input element + cast on save
-  - Shows `.description` as the row sub-text (was empty before)
-  - Applies `.min` / `.max` / `step` attributes for numeric fields
-  - Password inputs for `*_key` / `*_token` / `api_key` fields
+- **`GET /api/presets/onboarding` → 404** and **`POST /api/presets/deactivate` → 405** — these literal-path routes were declared *after* the parameterised catch-all `GET /api/presets/{preset_id}`, so FastAPI swallowed requests to `/api/presets/onboarding` into the `{preset_id}` handler which returned 404 (no preset with id `"onboarding"` exists). Similarly for `deactivate`.
 
-- **TTS reference audio / transcript fields** on the Voice tab had the same bug — fixed in the same pass.
+  Fixed by reordering: literal routes now declared **before** `{preset_id}`, matching FastAPI's declaration-order resolution.
 
-- **Secret fields saving** — inputs that used to send `"[object Object]"` as the value back to `/api/settings` now send the correct typed value. API keys persist properly.
-
-- **Toggle semantics** — boolean settings now flip `true`/`false` (proper `bool` type) instead of `0`/`1` int-casting, matching what `config.set` expects.
+  Visible symptoms this fixes:
+  - Boot-time console noise: `GET /api/presets/onboarding 404`
+  - Preset deactivation via UI silently failing
+  - `POST /api/secrets` 405 reports — if the user sees these, it's from a stale server binary; restart the process after `git pull` and the 405 vanishes (the endpoint has existed since v0.17.0).
 
 ## 📦 Upgrade
 
 ```bash
 git pull && pip install -e . --upgrade
+# Then restart the server (Ctrl+C then relaunch qwe-qwe --web)
 ```
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

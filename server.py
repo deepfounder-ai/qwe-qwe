@@ -1509,14 +1509,34 @@ async def presets_list():
     return {"items": presets.list_installed(), "active": presets.get_active()}
 
 
-@app.get("/api/presets/{preset_id}")
-async def presets_info(preset_id: str):
-    """Get full manifest of an installed preset."""
+# NOTE: literal-path routes MUST be declared before the parameterised
+# `/api/presets/{preset_id}` catch-all — FastAPI matches in declaration order,
+# so declaring `{preset_id}` first swallows `/api/presets/onboarding` etc.
+
+
+@app.get("/api/presets/onboarding")
+async def presets_onboarding():
+    """Get onboarding content for the active preset."""
     import presets
-    info = presets.get_info(preset_id)
-    if not info:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return info
+    if not presets.should_show_onboarding():
+        return {"show": False}
+    text = presets.get_onboarding()
+    if not text:
+        return {"show": False}
+    info = presets.get_active_info()
+    presets.mark_onboarding_shown()
+    return {"show": True, "text": text, "name": info["name"] if info else ""}
+
+
+@app.post("/api/presets/deactivate")
+async def presets_deactivate():
+    """Deactivate the current preset (restores the soul backup)."""
+    import presets
+    current = presets.get_active()
+    if not current:
+        return {"ok": True, "was_active": None}
+    presets.deactivate()
+    return {"ok": True, "was_active": current}
 
 
 @app.post("/api/presets/install")
@@ -1575,29 +1595,15 @@ async def presets_activate(preset_id: str):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
-@app.get("/api/presets/onboarding")
-async def presets_onboarding():
-    """Get onboarding content for the active preset."""
+@app.get("/api/presets/{preset_id}")
+async def presets_info(preset_id: str):
+    """Get full manifest of an installed preset. (Catch-all — must be after
+    literal `/api/presets/onboarding` etc.)"""
     import presets
-    if not presets.should_show_onboarding():
-        return {"show": False}
-    text = presets.get_onboarding()
-    if not text:
-        return {"show": False}
-    info = presets.get_active_info()
-    presets.mark_onboarding_shown()
-    return {"show": True, "text": text, "name": info["name"] if info else ""}
-
-
-@app.post("/api/presets/deactivate")
-async def presets_deactivate():
-    """Deactivate the current preset (restores the soul backup)."""
-    import presets
-    current = presets.get_active()
-    if not current:
-        return {"ok": True, "was_active": None}
-    presets.deactivate()
-    return {"ok": True, "was_active": current}
+    info = presets.get_info(preset_id)
+    if not info:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return info
 
 
 @app.delete("/api/presets/{preset_id}")
