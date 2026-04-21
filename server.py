@@ -656,6 +656,11 @@ async def status():
     import skills
     active_skills = sorted(skills.get_active())
 
+    # Ground-truth core tools from tools.TOOLS — don't let the UI hardcode a
+    # different list that drifts from reality.
+    import tools
+    core_tools = sorted(t["function"]["name"] for t in tools.TOOLS)
+
     active_thread = threads.get(threads.get_active_id())
 
     return {
@@ -669,6 +674,7 @@ async def status():
         "turns": s_turns,
         "memories": mem_count,
         "skills": active_skills,
+        "core_tools": core_tools,
     }
 
 

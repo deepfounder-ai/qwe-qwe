@@ -3021,7 +3021,10 @@ function renderInspector() {
 
   // Active skills — from /api/status.skills
   const skillList = Array.isArray(st.skills) ? st.skills : [];
-  const coreCore = ['memory_search','memory_save','read_file','write_file','shell','http_request','browser_open','camera_capture'];
+  // Ground-truth from /api/status.core_tools (what's actually in tools.TOOLS)
+  const coreCore = (st.core_tools && st.core_tools.length)
+    ? st.core_tools
+    : ['memory_search','memory_save','read_file','write_file','shell','http_request','camera_capture'];
   const colorFor = (n) => {
     if (n.startsWith('memory_')) return 'var(--magic)';
     if (n === 'shell' || n === 'write_file') return 'var(--warn)';
@@ -3914,18 +3917,22 @@ function renderTabModel() {
 }
 
 function renderTabSoul() {
-  const s = state.soulFull || state.soul || {};
-  const traits = s.traits || {};
-  const customs = s.custom_traits || [];
+  // /api/soul returns {values: {...all keys incl. traits + custom_traits + name/language}, traits: {...descriptions}}
+  const full = state.soulFull || {};
+  const values = full.values || state.soul || {};
+  const descriptions = full.traits || {};  // key → description
+  const customs = values.custom_traits || [];
   const traitNames = ['humor','honesty','curiosity','brevity','formality','proactivity','empathy','creativity'];
   const levels = ['low','moderate','high'];
   const traitRow = (name, isCustom, customMeta) => {
-    const val = isCustom ? (customMeta.level || 'moderate') : (traits[name] || 'moderate');
+    const val = isCustom
+      ? (values[name] || customMeta.level || 'moderate')
+      : (values[name] || 'moderate');
     return '<div class="setting-row">' +
       '<div><div class="key">' + esc(name) + '</div>' +
         (isCustom
           ? '<div class="desc">' + esc(customMeta.low || 'low') + ' ↔ ' + esc(customMeta.high || 'high') + (customMeta.description ? ' · ' + esc(customMeta.description) : '') + '</div>'
-          : '<div class="desc">built-in trait</div>') +
+          : '<div class="desc">' + esc(descriptions[name] || 'built-in trait') + '</div>') +
       '</div>' +
       '<div style="display:flex;gap:6px;align-items:center">' +
         '<select class="setting-input mono" style="width:140px" data-trait="' + esc(name) + '" data-trait-custom="' + (isCustom ? '1' : '0') + '">' +
@@ -3936,8 +3943,8 @@ function renderTabSoul() {
   };
   return '<h2>Soul</h2><p class="intro">Personality traits shape tone, verbosity, and style. Saved instantly.</p>' +
     settingsSection('Identity',
-      settingRow('Agent name', '', '<input class="setting-input" data-soul="agent_name" value="' + esc(s.agent_name || 'qwe-qwe') + '">') +
-      settingRow('Language', 'Two-letter code: en, ru, es…', '<input class="setting-input mono" data-soul="language" value="' + esc(s.language || 'en') + '">')
+      settingRow('Agent name', '', '<input class="setting-input" data-soul="name" value="' + esc(values.name || values.agent_name || 'qwe-qwe') + '">') +
+      settingRow('Language', 'Two-letter code: en, ru, es…', '<input class="setting-input mono" data-soul="language" value="' + esc(values.language || 'en') + '">')
     ) +
     settingsSection('Built-in traits',
       traitNames.map(n => traitRow(n, false, null)).join('')
@@ -3953,16 +3960,50 @@ function renderTabSoul() {
 
 function renderTabTools() {
   const skills = state.skills || [];
-  const coreTools = [
-    { id: 'memory_search', desc: 'Semantic search over stored memories.', c: 'var(--magic)' },
-    { id: 'memory_save', desc: 'Write new memories from the current thread.', c: 'var(--magic)' },
-    { id: 'read_file', desc: 'Read a local file into context.', c: 'var(--info)' },
-    { id: 'write_file', desc: 'Create or overwrite a local file.', c: 'var(--info)' },
-    { id: 'shell', desc: 'Execute shell commands in the workspace.', c: 'var(--warn)' },
-    { id: 'http_request', desc: 'Fetch a URL and return cleaned text.', c: 'var(--ok)' },
-    { id: 'browser_open', desc: 'Headless browser for scraping + search.', c: 'var(--ok)' },
-    { id: 'camera_capture', desc: 'Grab a frame and run vision analysis.', c: 'var(--info)' },
-  ];
+  const st = state.status || {};
+  // Ground-truth list from /api/status.core_tools (what tools.TOOLS actually exposes)
+  const realCore = Array.isArray(st.core_tools) ? st.core_tools : [];
+  const CORE_DESCRIPTIONS = {
+    memory_search: 'Semantic search over stored memories.',
+    memory_save: 'Write new memories from the current thread.',
+    memory_delete: 'Delete a memory by ID.',
+    shell: 'Execute shell commands in the workspace.',
+    read_file: 'Read a local file into context.',
+    write_file: 'Create or overwrite a local file.',
+    send_file: 'Queue a file to attach to the current reply.',
+    camera_capture: 'Grab a frame and run vision analysis.',
+    open_url: 'Open a URL in the desktop browser.',
+    schedule_task: 'Schedule a task to run later or on a cron expression.',
+    list_cron: 'List scheduled cron tasks.',
+    remove_cron: 'Remove a scheduled task by ID.',
+    switch_model: 'Switch to a different LLM model / provider.',
+    spawn_task: 'Run a task in the background.',
+    secret_save: 'Store an encrypted secret in the vault.',
+    secret_get: 'Read a decrypted secret.',
+    secret_list: 'List stored secret keys (values hidden).',
+    secret_delete: 'Delete a secret from the vault.',
+    user_profile_update: "Update a key in the user's persistent profile.",
+    user_profile_get: "Read the user's profile.",
+    http_request: 'Fetch a URL and return cleaned text.',
+    rag_index: 'Index a file into the RAG knowledge base.',
+    rag_search: 'Search the RAG knowledge base.',
+    rag_status: 'Show RAG knowledge-base stats.',
+    self_config: 'Agent self-configuration (name, language, soul, heartbeat).',
+    tool_search: 'Discover + activate more tools by keyword (meta-tool).',
+  };
+  const colorFor = (n) => {
+    if (n.startsWith('memory_')) return 'var(--magic)';
+    if (n.startsWith('rag_')) return 'var(--magic)';
+    if (n.startsWith('secret_')) return 'var(--warn)';
+    if (n === 'shell' || n === 'write_file') return 'var(--warn)';
+    if (n.startsWith('browser_') || n === 'http_request' || n === 'open_url') return 'var(--ok)';
+    if (n === 'camera_capture' || n === 'read_file' || n === 'send_file') return 'var(--info)';
+    if (n === 'tool_search' || n === 'spawn_task' || n === 'self_config') return 'var(--fg-3)';
+    return 'var(--fg-3)';
+  };
+  const coreTools = realCore.length
+    ? realCore.map(id => ({ id, desc: CORE_DESCRIPTIONS[id] || '', c: colorFor(id) }))
+    : [];
   const renderToolRow = (t) =>
     '<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)">' +
       '<span style="width:8px;height:8px;border-radius:50%;background:' + t.c + ';box-shadow:' + (t.on === false ? 'none' : '0 0 6px ' + t.c) + ';opacity:' + (t.on === false ? 0.35 : 1) + '"></span>' +
@@ -4900,8 +4941,17 @@ function wireEvents() {
   document.querySelectorAll('[data-settings]').forEach(b => { b.onclick = () => openSettingsTab(b.dataset.settings); });
   document.querySelectorAll('[data-soul]').forEach(inp => {
     inp.addEventListener('change', async () => {
-      try { await api('/api/soul', { method: 'POST', body: { [inp.dataset.soul]: inp.value } }); toast('saved'); state.soul[inp.dataset.soul] = inp.value; }
-      catch { toast('save failed', 'err'); }
+      const key = inp.dataset.soul;
+      const value = inp.value;
+      try {
+        await api('/api/soul', { method: 'POST', body: { [key]: value } });
+        if (!state.soul) state.soul = {};
+        state.soul[key] = value;
+        if (!state.soulFull) state.soulFull = { values: {}, traits: {} };
+        if (!state.soulFull.values) state.soulFull.values = {};
+        state.soulFull.values[key] = value;
+        toast('saved');
+      } catch { toast('save failed', 'err'); }
     });
   });
 
@@ -4944,7 +4994,12 @@ function wireEvents() {
       const value = sel.value;
       try {
         if (isCustom) await api('/api/soul/traits', { method: 'POST', body: { name, value } });
-        else await api('/api/soul', { method: 'POST', body: { traits: { [name]: value } } });
+        else await api('/api/soul', { method: 'POST', body: { [name]: value } });
+        // Update local state so UI reflects the change without a full reload
+        if (!state.soulFull) state.soulFull = { values: {}, traits: {} };
+        if (!state.soulFull.values) state.soulFull.values = {};
+        state.soulFull.values[name] = value;
+        if (state.soul) state.soul[name] = value;
         toast('saved');
         loadSoulFull();
       } catch { toast('save failed', 'err'); }
