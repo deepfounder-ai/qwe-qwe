@@ -3736,20 +3736,23 @@ function settingRow(key, desc, controlHtml) {
 
 // ───── Settings loaders ─────
 async function loadModelPicker() {
-  try {
-    const p = await api('/api/providers');
-    state.providers = p.providers || p || [];
-  } catch { state.providers = []; }
-  try {
-    const m = await api('/api/models');
-    state.models = m.models || m || [];
-  } catch { state.models = []; }
-  try {
-    const t = await api('/api/thinking'); state.thinkingOn = !!(t && (t.enabled || t.on));
-  } catch {}
-  try {
-    const s = await api('/api/streaming'); state.streamingOn = !!(s && (s.enabled !== false));
-  } catch {}
+  // Fire all four in PARALLEL instead of sequentially. The server's
+  // /api/providers pings local backends (up to 2s cold) and /api/models
+  // hits the active provider's /v1/models endpoint (can be slow on cold
+  // cloud providers) — sequential = worst case ~5–7s, parallel = max of
+  // the slowest single call.
+  const results = await Promise.allSettled([
+    api('/api/providers'),
+    api('/api/models'),
+    api('/api/thinking'),
+    api('/api/streaming'),
+  ]);
+  const [p, m, t, s] = results;
+  state.providers = p.status === 'fulfilled' ? (p.value.providers || p.value || []) : [];
+  state.models = m.status === 'fulfilled' ? (m.value.models || m.value || []) : [];
+  if (t.status === 'fulfilled' && t.value) state.thinkingOn = !!(t.value.enabled || t.value.on);
+  if (s.status === 'fulfilled' && s.value) state.streamingOn = !!(s.value.enabled !== false);
+  state.modelsLoading = false;
   render();
 }
 async function loadSoulFull() {
@@ -4294,7 +4297,9 @@ function renderTabModel() {
     ) +
     settingsSection('Model',
       (models.length === 0
-        ? '<div style="padding:10px 0;color:var(--fg-4);font-size:12px">No models yet. Select a provider first, or use <span class="mono">qwe-qwe --doctor</span>.</div>'
+        ? (state.modelsLoading
+            ? '<div style="padding:12px 0;color:var(--fg-3);font-size:12px;display:flex;align-items:center;gap:10px"><div class="spinner" style="width:13px;height:13px;border:2px solid var(--line-2);border-top-color:var(--accent);border-radius:50%;animation:kb-spin 0.8s linear infinite"></div>Loading models from ' + esc(activeProv || 'provider') + '…</div>'
+            : '<div style="padding:10px 0;color:var(--fg-4);font-size:12px">No models yet. Select a provider first, or use <span class="mono">qwe-qwe --doctor</span>.</div>')
         : '<div class="picker-grid">' + models.map(m => {
             const id = m.id || m.name || m;
             return '<button class="picker-card ' + (id === activeModel ? 'active' : '') + '" data-pick-model="' + esc(id) + '">' +
@@ -5556,8 +5561,28 @@ function wireEvents() {
         openProviderKeyModal(name);
         return;
       }
-      try { await api('/api/model', { method: 'POST', body: { provider: name } }); toast('provider: ' + name); await loadStatus(); await loadModelPicker(); }
-      catch { toast('switch failed', 'err'); }
+      // Optimistic UI: clear stale models + flip active card BEFORE awaiting
+      // the server round-trip. Previously the old provider's models stayed on
+      // screen until /api/models came back — confusing because the active
+      // highlight had already moved.
+      state.models = [];
+      state.modelsLoading = true;
+      if (Array.isArray(state.providers)) {
+        state.providers = state.providers.map(p => ({ ...p, active: (p.name || p.id) === name }));
+      }
+      state.model = { ...(state.model || {}), provider: name };
+      render();
+      try {
+        await api('/api/model', { method: 'POST', body: { provider: name } });
+        toast('provider: ' + name);
+      } catch {
+        toast('switch failed', 'err');
+        state.modelsLoading = false;
+        render();
+        return;
+      }
+      await loadStatus();
+      await loadModelPicker();  // flips state.modelsLoading = false at the end
     };
   });
   document.querySelectorAll('[data-pick-model]').forEach(b => {
