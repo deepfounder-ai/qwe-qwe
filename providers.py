@@ -215,7 +215,7 @@ def get_fallback_model() -> str | None:
 
 def ensure_model_loaded() -> bool:
     """For local providers (lmstudio/ollama): check if model is loaded, auto-load if not.
-    
+
     Uses LM Studio v1 REST API to check loaded_instances and POST /api/v1/models/load.
     Returns True if model is ready, False if loading failed.
     """
@@ -545,7 +545,8 @@ def detect_context_length(timeout: float = 1.5) -> int:
     base = url[:-3].rstrip("/") if url.endswith("/v1") else url
 
     try:
-        import urllib.request, json as _json
+        import urllib.request
+        import json as _json
         if name == "lmstudio" or "1234" in url:
             # LM Studio native API exposes loaded_context_length per model
             req = urllib.request.Request(f"{base}/api/v0/models")

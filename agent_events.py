@@ -1,7 +1,7 @@
 """Agent event system — replaces callback spaghetti with typed events."""
 
 from dataclasses import dataclass, field
-from typing import Callable, Any
+from typing import Callable
 import logger
 
 _log = logger.get("events")

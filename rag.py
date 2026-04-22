@@ -1,8 +1,11 @@
 """RAG — index and search local files via Qdrant (hybrid dense + sparse)."""
 
-import os, time, uuid, threading
+import time
+import threading
 from pathlib import Path
-import config, db, logger
+import config
+import db
+import logger
 
 _log = logger.get("rag")
 
@@ -208,7 +211,8 @@ def _read_docx(path: Path) -> str | None:
 
 def _read_pptx(path: Path) -> str | None:
     """Extract text from .pptx (PowerPoint) — iterate slide XMLs."""
-    import zipfile, re as _re
+    import zipfile
+    import re as _re
     try:
         with zipfile.ZipFile(str(path)) as z:
             slide_names = sorted(n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
@@ -246,7 +250,8 @@ def _read_xlsx(path: Path) -> str | None:
         _log.error(f"xlsx read failed (openpyxl): {path}: {e}")
         # Fall through to stdlib
     # Stdlib fallback: unpack sharedStrings.xml + sheet cells
-    import zipfile, re as _re
+    import zipfile
+    import re as _re
     try:
         with zipfile.ZipFile(str(path)) as z:
             shared = []
@@ -307,7 +312,8 @@ def _read_rtf(path: Path) -> str | None:
 
 def _read_odt(path: Path) -> str | None:
     """Extract text from .odt (OpenOffice) — zip with content.xml."""
-    import zipfile, re as _re
+    import zipfile
+    import re as _re
     try:
         with zipfile.ZipFile(str(path)) as z:
             xml = z.read("content.xml").decode("utf-8", errors="replace")
@@ -443,7 +449,8 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
         _log.info("yt-dlp not installed — skipping YouTube-specific path (fallback to markitdown)")
         return None
 
-    import tempfile, shutil
+    import tempfile
+    import shutil
     from pathlib import Path
 
     # We'll decide the language priority AFTER extract_info() so we can read

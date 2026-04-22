@@ -1,6 +1,13 @@
 """Tool definitions and execution — optimized for small models."""
 
-import json, subprocess, os, re, shutil, sys, threading, time, unicodedata
+import subprocess
+import os
+import re
+import shutil
+import sys
+import threading
+import time
+import unicodedata
 from pathlib import Path
 import config
 import memory
@@ -1096,7 +1103,8 @@ def execute(name: str, args: dict) -> str:
             if not frame:
                 return "Error: no camera available. Connect a webcam or enable camera in web UI."
             # Save frame to uploads so user can see it in chat
-            import uuid as _uuid, base64 as _b64
+            import uuid as _uuid
+            import base64 as _b64
             img_id = _uuid.uuid4().hex[:8]
             img_path = Path(config.UPLOADS_DIR) / f"cam_{img_id}.jpg"
             img_path.write_bytes(_b64.b64decode(frame))

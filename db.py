@@ -1,7 +1,9 @@
 """SQLite storage — conversation history, settings, state."""
 
-import sqlite3, json, time, threading
-from pathlib import Path
+import sqlite3
+import json
+import time
+import threading
 import config
 import logger
 

@@ -1,6 +1,6 @@
 """Agent budget system — multi-dimensional limits for agent execution."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import config
 
 

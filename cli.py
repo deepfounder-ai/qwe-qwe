@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """qwe-qwe CLI — lightweight AI agent for local models."""
 
-import sys, time, threading
+import os
+import sys
+import threading
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.live import Live
-import agent, config, db, soul, skills, tasks, scheduler, providers, threads
+import agent
+import config
+import db
+import soul
+import skills
+import tasks
+import scheduler
+import providers
+import threads
 import logger
 
 _log = logger.get("cli")
@@ -35,8 +45,8 @@ except ImportError:
 LOGO = """[bold yellow]
    ██████╗ ██╗    ██╗███████╗     ██████╗ ██╗    ██╗███████╗
   ██╔═══██╗██║    ██║██╔════╝    ██╔═══██╗██║    ██║██╔════╝
-  ██║   ██║██║ █╗ ██║█████╗█████╗██║   ██║██║ █╗ ██║█████╗  
-  ██║▄▄ ██║██║███╗██║██╔══╝╚════╝██║▄▄ ██║██║███╗██║██╔══╝  
+  ██║   ██║██║ █╗ ██║█████╗█████╗██║   ██║██║ █╗ ██║█████╗
+  ██║▄▄ ██║██║███╗██║██╔══╝╚════╝██║▄▄ ██║██║███╗██║██╔══╝
   ╚██████╔╝╚███╔███╔╝███████╗    ╚██████╔╝╚███╔███╔╝███████╗
    ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝     ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝[/]"""
 
@@ -82,13 +92,13 @@ def show_banner():
     console.print(f"""
   [dim]🦆 qwe-qwe — your fully offline AI agent[/]
   [dim]No cloud. No API keys. No subscriptions. Just your GPU.[/]
-  
+
   [dim]🧠 Model:[/]  {providers.get_model()} @ {providers.get_active_name()}
   [dim]👤 User:[/]   {user_name} [dim]({city}, UTC{config.TZ_OFFSET:+d})[/]
   [dim]🤖 Agent:[/]  {s['name']} [dim]| {s['language']}[/]
   [dim]💾 Memory:[/] {mem_count} memories [dim]| SQLite + Qdrant[/]
   [dim]⚙️  Skills:[/] {', '.join(sorted(active)) if active else 'none'} [dim]| /skills to manage[/]
-  
+
   [dim]Commands: /thread  /model  /provider  /telegram  /soul  /skills  /memory  /cron  /tasks  /stats  /logs  /clear  /quit[/]
 """
     )
@@ -350,7 +360,8 @@ def _preset_exec(action: str, rest: str) -> dict:
 def _preset_trust(rest: str, _p) -> dict:
     """Handle `/preset trust <subcommand>`."""
     from pathlib import Path
-    import shlex, os as _os
+    import shlex
+    import os as _os
     # shlex respects quotes so Windows paths with spaces like
     #   trust add "C:\Users\me\my keys\key.pub.pem"
     # split cleanly. On Windows we use posix=False so backslashes stay
@@ -1141,7 +1152,8 @@ def handle_mcp(args: str):
 
 def handle_synthesis():
     """Run knowledge graph synthesis manually."""
-    import synthesis, memory
+    import synthesis
+    import memory
     pending = memory.get_pending_synthesis(limit=100)
     pending_count = sum(len(v) for v in pending.values())
     if pending_count == 0:
@@ -1606,7 +1618,6 @@ def doctor():
 
     def _check_tts():
         try:
-            import tts
             if str(config.get("tts_enabled")) != "1":
                 return "⚠ disabled (set tts_enabled=1)"
             url = config.get("tts_api_url") or ""
@@ -1614,7 +1625,7 @@ def doctor():
                 return "⚠ no tts_api_url configured"
             import requests as _req
             try:
-                r = _req.get(url, timeout=3)
+                _req.get(url, timeout=3)
                 return f"✓ server reachable at {url}"
             except _req.ConnectionError:
                 return f"⚠ server not reachable at {url}"
@@ -1626,9 +1637,9 @@ def doctor():
     console.print("  [dim]── Agent Loop ──[/]")
     def _check_loop_v2():
         try:
-            from agent_loop import run_loop
-            from agent_events import EventEmitter
-            from agent_budget import BudgetLimits
+            from agent_loop import run_loop  # noqa: F401 — availability check
+            from agent_events import EventEmitter  # noqa: F401 — availability check
+            from agent_budget import BudgetLimits  # noqa: F401 — availability check
             enabled = config.get("agent_loop_v2")
             max_turns = config.get("max_tool_rounds")
             status = "ON" if enabled else "OFF (legacy)"
@@ -1654,7 +1665,7 @@ def doctor():
     # ── Browser skill (Playwright) ──
     def _check_browser():
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.sync_api import sync_playwright  # noqa: F401 — availability check
             return "✓ playwright installed"
         except ImportError:
             return "⚠ playwright not installed (browser skill unavailable)"
@@ -1776,7 +1787,6 @@ def doctor():
 
     # ── 12. Logs ──
     def _check_logs():
-        from pathlib import Path
         log_path = config.LOGS_DIR / "qwe-qwe.log"
         if not log_path.exists():
             return "⚠ no log file"
@@ -1971,10 +1981,12 @@ def main_entry():
     args = parser.parse_args()
 
     if args.export_config:
-        import json, config
+        import json
+        import config
         print(json.dumps(config.export_config(), indent=2, ensure_ascii=False))
     elif args.import_config:
-        import json, config
+        import json
+        import config
         from pathlib import Path
         data = json.loads(Path(args.import_config).read_text())
         results = config.import_config(data)

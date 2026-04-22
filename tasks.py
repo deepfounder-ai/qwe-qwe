@@ -1,8 +1,13 @@
 """Background task runner — sub-agent tasks with chain-of-workers continuation."""
 
-import threading, queue, time, json, re
-from openai import OpenAI
-import config, db, memory, tools, providers
+import threading
+import queue
+import time
+import json
+import config
+import memory
+import tools
+import providers
 import logger
 
 _log = logger.get("tasks")

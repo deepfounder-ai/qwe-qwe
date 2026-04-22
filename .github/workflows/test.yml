@@ -26,6 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Lint with ruff
+        run: ruff check .
+
       - name: Syntax check against Python 3.11 grammar
         # Catches PEP 701 leakage — backslash / quote / triple-quote inside
         # f-string expressions is legal on 3.12 but breaks 3.11. pytest

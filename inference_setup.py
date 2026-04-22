@@ -3,7 +3,6 @@
 import platform
 import subprocess
 import shutil
-import os
 from rich.console import Console
 
 console = Console()

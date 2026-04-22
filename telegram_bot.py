@@ -93,7 +93,7 @@ def _pid_alive(pid: int) -> bool:
         return sys.platform != "win32"
 
 
-def _lock_file_path() -> "Path":
+def _lock_file_path():
     from pathlib import Path
     return Path(config.DATA_DIR) / "telegram.lock"
 
@@ -254,7 +254,7 @@ MAX_ATTEMPTS = 3      # permanent ban after this
 
 def generate_activation_code() -> str:
     """Generate a 6-digit activation code (called from web UI or CLI).
-    
+
     Returns the code. User must send it to the bot in Telegram.
     Code expires after 10 minutes.
     """
@@ -407,7 +407,7 @@ _command_registry: dict[str, dict] = {}  # cmd → {description, handler}
 
 def register_command(cmd: str, description: str, handler=None):
     """Register a bot command. Called at module level or by skills/plugins.
-    
+
     Args:
         cmd: command name without slash (e.g. "status")
         description: shown in Telegram predictive input (max 256 chars)
@@ -455,7 +455,10 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
                         token: str, topic_id: int | None = None,
                         thread_id: str | None = None) -> bool:
     """Handle built-in bot commands. Returns True if handled."""
-    import providers, soul, skills, threads as thr
+    import providers
+    import soul
+    import skills
+    import threads as thr
 
     if cmd == "chatid":
         info = f"📋 Chat ID: `{chat_id}`"
@@ -727,7 +730,7 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
 
 def _to_html(text: str) -> str:
     """Convert standard Markdown to Telegram HTML format.
-    
+
     More reliable than MarkdownV2 for complex content with code blocks.
     """
     import re as _re
@@ -790,7 +793,7 @@ def _to_html(text: str) -> str:
 
 def _to_markdownv2(text: str) -> str:
     """Convert standard Markdown to Telegram MarkdownV2.
-    
+
     Handles: **bold**, *italic*, `code`, ```codeblocks```, [links](url)
     Escapes special chars outside of formatted regions.
     """
@@ -913,7 +916,6 @@ def _run_doctor_checks() -> str:
     import config
     import providers
     import memory as mem
-    import soul
     import skills
     import threads
     import db as _db
@@ -1624,7 +1626,6 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
 
     # Check if model needs loading (notify user about delay)
     import providers
-    loading_notified = False
     if providers.get_active_name() in ("lmstudio", "ollama"):
         import requests as _req
         try:
@@ -1640,7 +1641,6 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
                 )
                 if not model_loaded:
                     send_message(chat_id, f"⏳ Loading model `{model}`...", token, topic_id=topic_id)
-                    loading_notified = True
         except Exception:
             pass
 
@@ -1739,8 +1739,7 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             if response:
                 typing_active.clear()
 
-                # Get thinking and tool info from agent result
-                thinking_text = "".join(_thinking_buf).strip()
+                # Get tool info from agent result (thinking text buffered but not shown)
                 tool_names = getattr(agent, '_last_tools', []) or []
 
                 # Build enriched response (no thinking — too noisy for Telegram)

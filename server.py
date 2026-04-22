@@ -1,10 +1,13 @@
 """Web server for qwe-qwe — FastAPI + WebSocket chat."""
 
-import faulthandler, sys, signal
+import faulthandler
+import sys
+import signal
 faulthandler.enable(file=sys.stderr)
 
 def _signal_handler(signum, frame):
-    import traceback, logger as _lg
+    import traceback
+    import logger as _lg
     _l = _lg.get("server")
     _l.error(f"SIGNAL {signum} received!")
     _l.error("".join(traceback.format_stack(frame)))
@@ -17,7 +20,6 @@ import base64
 import hashlib
 import hmac
 import json
-import re
 import time
 import os
 import threading
@@ -409,7 +411,7 @@ _TEXT_EXTENSIONS = {
     ".sh", ".bat", ".sql", ".xml", ".env", ".gitignore",
 }
 
-from dataclasses import dataclass as _dataclass, field as _field
+from dataclasses import dataclass as _dataclass
 
 
 @_dataclass
@@ -543,11 +545,11 @@ def _extract_file_text(filepath: Path, max_chars: int = 8000) -> str:
 @app.post("/api/upload")
 async def upload_image(request: Request):
     """Upload an image file. Returns image_id for use in chat."""
-    import base64, uuid
+    import base64
+    import uuid
     content_type = request.headers.get("content-type", "")
 
     if "multipart" in content_type:
-        from fastapi import UploadFile
         form = await request.form()
         file = form.get("file")
         if not file:
@@ -647,7 +649,8 @@ async def text_to_speech(request: Request):
 @app.get("/api/voice/status")
 async def voice_status():
     """Check STT/TTS availability with details."""
-    import stt, tts
+    import stt
+    import tts
     # Check faster-whisper
     has_whisper = stt._check_faster_whisper()
     # Check audio decoder (ffmpeg CLI or bundled PyAV)
@@ -1033,7 +1036,6 @@ async def setup_status():
 @app.post("/api/setup")
 async def setup_save(request: Request):
     """Save first-run onboarding data."""
-    import json as _json
     try:
         req = await request.json()
     except Exception as e:
@@ -1195,13 +1197,13 @@ async def set_thinking(data: dict):
 @app.get("/api/vision/cameras")
 async def list_cameras():
     """Scan available cameras with preview snapshots."""
-    import functools
     loop = asyncio.get_event_loop()
 
     def _scan_sync():
         cameras = []
         try:
-            import cv2, base64, math
+            import cv2
+            import base64
             for i in range(5):
                 cap = cv2.VideoCapture(i)
                 if not cap.isOpened():
@@ -2409,7 +2411,8 @@ async def websocket_chat(ws: WebSocket):
             file_size = 0
             if document:
                 try:
-                    import uuid as _uuid, re as _re
+                    import uuid as _uuid
+                    import re as _re
                     doc_id = str(_uuid.uuid4())[:8]
                     fname_raw = document.get("filename", "file.txt")
                     # Sanitize filename — keep original name for readability, strip paths
@@ -2625,7 +2628,7 @@ async def _broadcast(msg: dict):
             dead.add(ws)
     if dead:
         with _ws_lock:
-            _ws_clients -= dead
+            _ws_clients.difference_update(dead)
 
 
 def _cron_callback(name: str, task: str, result: str):
@@ -2914,8 +2917,8 @@ def _ensure_ssl_cert() -> tuple[str, str]:
         from cryptography.x509.oid import NameOID
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
-        from datetime import datetime, timedelta
-        import ipaddress, socket
+        from datetime import datetime
+        import ipaddress
 
         # Generate RSA key
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

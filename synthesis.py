@@ -12,8 +12,6 @@ Called by scheduler cron (default 03:00). Processes pending synthesis queue:
 import json
 import re
 import time
-import os
-from pathlib import Path
 import config
 import memory
 import providers

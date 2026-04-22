@@ -1,6 +1,11 @@
 """Qdrant-backed semantic memory — hybrid search (dense + sparse via FastEmbed), recommendations, grouping."""
 
-import atexit, os, re, uuid, time, threading
+import atexit
+import os
+import re
+import uuid
+import time
+import threading
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter,
@@ -1003,7 +1008,7 @@ def clear_graph():
     try:
         from qdrant_client.models import FilterSelector
         for tag in ("entity", "wiki"):
-            result = qc.delete(
+            qc.delete(
                 config.QDRANT_COLLECTION,
                 points_selector=FilterSelector(
                     filter=Filter(must=[

@@ -18,7 +18,6 @@ import logging
 import logging.handlers
 import json
 import time
-import os
 from pathlib import Path
 
 # ── Log directory ──

@@ -1,8 +1,6 @@
 """Encrypted secrets vault — stores sensitive data in SQLite with Fernet encryption."""
 
 import os
-import base64
-import hashlib
 
 try:
     from cryptography.fernet import Fernet
