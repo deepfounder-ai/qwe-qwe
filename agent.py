@@ -805,6 +805,9 @@ def _save_experience(user_input: str, result: "TurnResult", rounds: int,
         "self_config", "tool_search",
         "list_notes", "list_skills", "list_cron", "list_secrets",
         "get_stats", "list_experience",
+        "soul_editor", "skill_creator",
+        "add_trait", "remove_trait", "list_traits",
+        "rag_index", "user_profile_get",
     }
     if all(t in _META_TOOLS for t in tools_used):
         _log.debug(f"experience skipped: meta-only tools ({tools_used})")
@@ -816,6 +819,8 @@ def _save_experience(user_input: str, result: "TurnResult", rounds: int,
         "память", "memory", "запомни", "remember", "forget", "забудь",
         "очисти", "clean", "clear memory", "удали", "delete memory",
         "что ты помнишь", "what do you remember", "recall",
+        "забыл", "забыла", "забудьте", "забываешь",
+        "запомнил", "запомните", "вспомни", "вспомнил",
     )
     if any(kw in _low for kw in _MEMORY_KEYWORDS):
         _log.debug(f"experience skipped: memory-meta input ({_low[:40]})")
