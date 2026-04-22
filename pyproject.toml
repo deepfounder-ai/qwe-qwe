@@ -50,7 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff", "pytest"]
+dev = ["ruff", "pytest", "pytest-cov"]
 voice = ["faster-whisper>=1.0.0"]
 
 [project.scripts]
@@ -107,3 +107,31 @@ ignore = [
 # test, keep unused fixture imports, and use `assert False` for branches that
 # should never execute — all intentional test idioms.
 "tests/*" = ["E402", "F401", "F841", "B011"]
+
+[tool.coverage.run]
+# Measure top-level modules shipped by the package (mirrors py-modules above)
+# plus the skills/ subpackage. Excluding tests/, build artefacts, the virtualenv
+# and the static web bundle keeps the report focused on first-party code.
+source = ["."]
+omit = [
+    "tests/*",
+    ".venv/*",
+    "build/*",
+    "dist/*",
+    "static/*",
+    "setup.py",
+]
+
+[tool.coverage.report]
+# Don't count boilerplate or defensively unreachable lines against coverage.
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
+# Floor: set 2pp below the measured baseline so unrelated PRs don't trip CI,
+# but real regressions still do. Bump this up as coverage improves.
+fail_under = 24
+skip_covered = false
+show_missing = true

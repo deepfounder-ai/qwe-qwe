@@ -25,9 +25,17 @@ to run the agent end-to-end, but tests do not require one.
 ## Running tests and lint
 
 ```bash
-pytest tests/ -v        # unit + integration tests
+pytest tests/ --cov -v  # unit + integration tests with coverage
 ruff check .            # lint
 ```
+
+`pytest --cov` is the canonical local-run command: it measures coverage
+alongside the normal test suite. CI enforces a floor (`fail_under` in
+`pyproject.toml`, currently **24%**) — a PR that drops total coverage below
+that threshold fails the test job. The floor is intentionally a couple of
+points below the current baseline so unrelated changes don't trip it, but
+real regressions do. Bump it up when coverage improves; don't lower it to
+make a PR green.
 
 ## Branching and commits
 
@@ -46,7 +54,7 @@ Run them locally before opening a PR:
 ruff check .                                            # 1. lint
 python -c "import ast, pathlib; [ast.parse(p.read_text('utf-8'), filename=str(p), feature_version=(3,11)) for p in pathlib.Path('.').glob('*.py')]"   # 2. Python 3.11 syntax
 python -c "import agent, agent_loop, tools, server, memory, rag, providers"   # 3. import-time smoke
-pytest tests/ -v                                        # 4. tests
+pytest tests/ --cov -v                                  # 4. tests + coverage floor
 ```
 
 The import-time smoke check matters: a syntax error in `rag.py` will only
