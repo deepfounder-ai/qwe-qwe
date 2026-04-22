@@ -61,6 +61,25 @@ The import-time smoke check matters: a syntax error in `rag.py` will only
 surface when a request hits it, and pytest won't catch it unless the test
 happens to import that module.
 
+### Pre-commit hooks (optional but recommended)
+
+A `.pre-commit-config.yaml` wires `ruff check` and a JS syntax gate for
+`static/index.html` into the standard [pre-commit](https://pre-commit.com)
+framework. To run them automatically on every `git commit`:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The JS hook (`scripts/check_js.py`) runs `node --check` against each
+inline `<script>` block in `static/index.html`. It catches typos like
+`stae.x = 1` that nothing else sees — the UI is a single 5500-line file
+with no build step, so stray references and half-typed identifiers
+otherwise survive until a user opens the browser. If Node isn't on your
+PATH the hook prints a friendly warning and skips; CI has Node and runs
+it unconditionally, so nothing slips through.
+
 ## Adding a tool
 
 Edit `tools.py`: append an OpenAI function-schema entry to the `TOOLS` list
