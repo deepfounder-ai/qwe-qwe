@@ -18,17 +18,23 @@ from agent_budget import BudgetLimits, BudgetStats, check_budget, warning_check
 _log = logger.get("loop")
 
 
-def _run_tool(tool_executor, name: str, args: dict, abort_event) -> str:
+def _run_tool(tool_executor, name: str, args: dict, abort_event, ctx=None) -> str:
     """Invoke a tool with the per-thread abort event set, then clear it.
 
     This lets blocking tools (shell, http_request) observe the abort signal
     without having to change the tool_executor signature. Using tools.py's
     threading.local-backed slot keeps concurrent turns (web + telegram)
     isolated from each other.
+
+    ``ctx`` is stashed alongside the abort event so tools that want to emit
+    status / tool_call events (none do today, but it's there if they grow
+    that need) can reach the right client's queue.
     """
     try:
         import tools as _tools_mod
         _tools_mod._set_abort_event(abort_event)
+        if ctx is not None and hasattr(_tools_mod, "_set_turn_ctx"):
+            _tools_mod._set_turn_ctx(ctx)
     except Exception:
         pass
     try:
@@ -37,6 +43,8 @@ def _run_tool(tool_executor, name: str, args: dict, abort_event) -> str:
         try:
             import tools as _tools_mod
             _tools_mod._set_abort_event(None)
+            if hasattr(_tools_mod, "_set_turn_ctx"):
+                _tools_mod._set_turn_ctx(None)
         except Exception:
             pass
 
@@ -200,7 +208,7 @@ def _pre_dispatch_safety_check(tool_name: str, args: dict, self_check_fn=None) -
 
 
 def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats,
-                          abort_event=None, self_check_fn=None) -> str:
+                          abort_event=None, self_check_fn=None, ctx=None) -> str:
     """Execute a tool call that was detected from text/intent (not native function calling).
     Injects proper messages into the conversation and returns the tool result.
 
@@ -258,7 +266,7 @@ def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: l
 
     tool_start = time.time()
     try:
-        result = _run_tool(tool_executor, tool_name, args, abort_event)
+        result = _run_tool(tool_executor, tool_name, args, abort_event, ctx=ctx)
     except Exception as e:
         result = f"Error: {e}"
         stats.add_error()
@@ -287,6 +295,7 @@ def run_loop(
     self_check_fn=None,
     extra_kwargs: dict | None = None,
     abort_event=None,
+    ctx=None,
 ) -> dict:
     """Run the agent loop.
 
@@ -304,10 +313,19 @@ def run_loop(
         json_repair_fn: callable(raw_json) -> str|None (optional JSON repair)
         self_check_fn: callable(name, args) -> (ok, fixed_args)|None (optional)
         extra_kwargs: extra kwargs for LLM API call
+        abort_event: per-turn abort signal; takes precedence over ctx.abort_event
+            when both are given (back-compat).
+        ctx: optional :class:`turn_context.TurnContext`. When given, its
+            ``abort_event`` is used if ``abort_event=`` wasn't passed, and the
+            ctx is stashed on the tools module so tool executions can reach it.
 
     Returns:
         dict with: reply, thinking, tool_calls, finish_reason, stats
     """
+    # Prefer explicit abort_event arg, but fall back to ctx.abort_event so new
+    # callers only need to pass ctx.
+    if abort_event is None and ctx is not None:
+        abort_event = getattr(ctx, "abort_event", None)
     if budget is None:
         budget = BudgetLimits.from_config()
     if tool_executor is None:
@@ -605,7 +623,7 @@ def run_loop(
 
                     tool_start = time.time()
                     try:
-                        tool_result = _run_tool(tool_executor, tc["name"], args, abort_event)
+                        tool_result = _run_tool(tool_executor, tc["name"], args, abort_event, ctx=ctx)
                     except Exception as e:
                         tool_result = f"Error: {e}"
                         stats.add_error()
@@ -664,6 +682,7 @@ def run_loop(
                     tool_executor, messages, emitter, stats,
                     abort_event=abort_event,
                     self_check_fn=self_check_fn,
+                    ctx=ctx,
                 )
                 all_tool_calls.append(extracted[0])
                 continue  # Let LLM summarize the result

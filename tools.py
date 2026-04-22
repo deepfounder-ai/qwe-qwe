@@ -55,6 +55,22 @@ def _set_abort_event(evt: threading.Event | None) -> None:
 def _get_abort_event() -> threading.Event | None:
     return getattr(_tl, "abort_event", None)
 
+
+def _set_turn_ctx(ctx) -> None:
+    """Register the active :class:`turn_context.TurnContext` for this thread.
+
+    Tools that want to emit status / tool_call events to the user (none do
+    today; this is wiring for future needs) can read it via :func:`_get_turn_ctx`.
+    Paired with :func:`_set_abort_event` — both are cleared by the agent loop
+    after each tool dispatch.
+    """
+    _tl.turn_ctx = ctx
+
+
+def _get_turn_ctx():
+    """Return the active TurnContext for this thread, or None."""
+    return getattr(_tl, "turn_ctx", None)
+
 _log = logger.get("tools")
 
 # Agent workspace — all relative paths resolve here

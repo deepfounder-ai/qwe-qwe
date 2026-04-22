@@ -54,6 +54,7 @@ import tools
 import tts
 import updater
 import vault
+from turn_context import TurnContext
 
 # Global abort flag — used by legacy REST callers of _run_agent_sync() that
 # don't supply their own per-request event (e.g. the /api/abort endpoint).
@@ -181,40 +182,53 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
                     image_path: str | None = None,
                     file_meta: dict | None = None,
-                    abort_event: threading.Event | None = None) -> dict:
+                    abort_event: threading.Event | None = None,
+                    ctx: "TurnContext | None" = None) -> dict:
     """Run agent.run() synchronously — called from thread pool.
 
-    ``abort_event``: per-request event. When None, the legacy shared module
-    event is used (for /api/abort + older callers). WebSocket sessions pass
-    their own event so one client's disconnect doesn't abort another's turn.
+    ``ctx``: optional per-request :class:`turn_context.TurnContext`.
+    ``abort_event``: legacy per-request event. When both are None, the legacy
+    shared module event is used (for /api/abort + older callers). WebSocket
+    sessions pass their own event / ctx so one client's disconnect doesn't
+    abort another's turn.
     """
     import agent
-    if abort_event is None:
-        # Legacy path (e.g. REST callers): keep using the module global and
-        # the /api/abort endpoint. Clear it so stale flags don't fire.
-        _abort_event.clear()
-        abort_event = _abort_event
+    from turn_context import TurnContext
+
+    # Build a ctx if the caller didn't supply one.
+    if ctx is None:
+        if abort_event is None:
+            # Legacy path (e.g. REST callers): keep using the module global and
+            # the /api/abort endpoint. Clear it so stale flags don't fire.
+            _abort_event.clear()
+            abort_event = _abort_event
+        else:
+            abort_event.clear()
+        ctx = TurnContext(
+            abort_event=abort_event,
+            source="web",
+            image_path=image_path,
+            file_meta=file_meta,
+            # Default callbacks broadcast to every connected WS client — this
+            # is the non-streaming REST path. The streaming WS handler builds
+            # its own ctx with per-connection callbacks and passes it in.
+            on_status=_emit_agent_status,
+            on_thinking=_emit_agent_thinking,
+            on_content=_emit_agent_content,
+        )
     else:
-        abort_event.clear()
-    agent._abort_event = _abort_event  # retained for older code paths
-    # Pass image_path / file_meta so agent can store them in user message meta
-    agent._pending_image_path = image_path
-    agent._pending_file = file_meta
-    # Set live callbacks (only if not already set by caller, e.g. _run_with_queue)
-    if not agent._status_callback:
-        agent._status_callback = _emit_agent_status
-    if not agent._thinking_callback:
-        agent._thinking_callback = _emit_agent_thinking
-    if not agent._content_callback:
-        agent._content_callback = _emit_agent_content
+        # Caller-supplied ctx: fill in fields the HTTP layer just learned
+        # about and make sure we start with a clear abort state.
+        ctx.source = ctx.source or "web"
+        if image_path is not None:
+            ctx.image_path = image_path
+        if file_meta is not None:
+            ctx.file_meta = file_meta
+        if ctx.abort_event is not None:
+            ctx.abort_event.clear()
     t0 = time.time()
-    try:
-        result = agent.run(user_input, thread_id=thread_id, source="web",
-                           image_b64=image_b64, abort_event=abort_event)
-    finally:
-        # Clear so next turn without a file doesn't inherit it
-        agent._pending_image_path = None
-        agent._pending_file = None
+    result = agent.run(user_input, thread_id=thread_id, source=ctx.source,
+                       image_b64=image_b64, ctx=ctx)
     elapsed = int((time.time() - t0) * 1000)
     return {
         "reply": result.reply,
@@ -2440,8 +2454,14 @@ async def websocket_chat(ws: WebSocket):
                     file_meta = {"path": file_path, "name": file_name, "size": file_size}
 
                 def _run_with_queue(user_input, thread_id, image_b64, image_path, file_meta):
-                    """Wrap _run_agent_sync, routing content/thinking/status to queue."""
-                    import agent as _agent
+                    """Wrap _run_agent_sync, routing content/thinking/status to queue.
+
+                    Builds a fresh :class:`turn_context.TurnContext` for this
+                    request so one WS client's callbacks / pending image /
+                    abort event can never leak into a concurrent turn (web
+                    elsewhere, telegram bot).
+                    """
+                    from turn_context import TurnContext
 
                     def _queue_content(text):
                         asyncio.run_coroutine_threadsafe(
@@ -2463,19 +2483,24 @@ async def websocket_chat(ws: WebSocket):
                         asyncio.run_coroutine_threadsafe(
                             stream_queue.put({"type": "recall", "memories": memories}), loop)
 
-                    # Set per-request callbacks (override broadcast ones)
-                    # Web UI always streams
-                    _agent._content_callback = _queue_content
-                    _agent._thinking_callback = _queue_thinking
-                    _agent._status_callback = _queue_status
-                    _agent._tool_call_callback = _queue_tool_call
-                    _agent._recall_callback = _queue_recall
+                    ws_ctx = TurnContext(
+                        abort_event=my_abort_event,
+                        source="web",
+                        image_path=image_path,
+                        file_meta=file_meta,
+                        on_content=_queue_content,
+                        on_thinking=_queue_thinking,
+                        on_status=_queue_status,
+                        on_tool_call=_queue_tool_call,
+                        on_recall=_queue_recall,
+                    )
                     try:
                         return _run_agent_sync(user_input, thread_id,
                                                image_b64=image_b64,
                                                image_path=image_path,
                                                file_meta=file_meta,
-                                               abort_event=my_abort_event)
+                                               abort_event=my_abort_event,
+                                               ctx=ws_ctx)
                     finally:
                         # Signal queue drain to stop
                         asyncio.run_coroutine_threadsafe(stream_queue.put(None), loop)
@@ -2668,10 +2693,17 @@ import telegram_bot
 
 def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
                       thread_id: str | None = None, image_b64: str | None = None) -> str:
-    """Handle incoming Telegram message → agent → response."""
+    """Handle incoming Telegram message → agent → response.
+
+    Consumes the per-request :class:`turn_context.TurnContext` that
+    ``telegram_bot`` stashed on its thread-local before calling us — this
+    keeps every concurrent chat's callbacks / abort event isolated.
+    """
     import agent
     tid = thread_id or db.kv_get("telegram:thread_id") or None
-    result = agent.run(text, thread_id=tid, source="telegram", image_b64=image_b64)
+    tg_ctx = telegram_bot.pop_active_ctx()
+    result = agent.run(text, thread_id=tid, source="telegram",
+                       image_b64=image_b64, ctx=tg_ctx)
 
     # Store tool names so telegram_bot can access them for enriched display
     agent._last_tools = list(result.tool_calls_made) if result.tool_calls_made else []

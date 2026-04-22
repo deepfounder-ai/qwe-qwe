@@ -53,7 +53,7 @@ qwe-qwe = "cli:main_entry"
 
 [tool.setuptools]
 packages = ["skills"]
-py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "config", "db", "discovery", "inference_setup", "logger", "mcp_client", "memory", "presets", "providers", "rag", "scheduler", "server", "soul", "stt", "synthesis", "tasks", "telegram_bot", "threads", "tools", "tts", "updater", "utils", "vault"]
+py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "config", "db", "discovery", "inference_setup", "logger", "mcp_client", "memory", "presets", "providers", "rag", "scheduler", "server", "soul", "stt", "synthesis", "tasks", "telegram_bot", "threads", "tools", "tts", "turn_context", "updater", "utils", "vault"]
 
 [tool.setuptools.package-data]
 "*" = ["static/**/*", "schemas/*.yaml"]

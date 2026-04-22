@@ -4,6 +4,7 @@ import json
 import re
 import time
 import threading
+import warnings
 import base64
 import io
 from rich.console import Console
@@ -15,6 +16,7 @@ import soul
 import providers
 import threads
 import logger
+from turn_context import TurnContext, get_current as _get_ctx, set_current as _set_ctx, reset as _reset_ctx
 
 _log = logger.get("agent")
 _raw_console = Console(highlight=False, force_terminal=False)
@@ -38,69 +40,49 @@ class _SafeConsole:
 _console = _SafeConsole()
 _compaction_lock = threading.Lock()  # protects message read/delete during compaction
 
-# Status callback: set by server.py to push live updates to WebSocket
-_status_callback: callable = None  # (text: str) -> None
+
+# ── Per-turn callbacks ──
+#
+# Historical note: these used to be module-level globals (``_status_callback``
+# etc.), which meant two concurrent turns (web + telegram) stomped each other's
+# callbacks — messages from turn A got routed into client B's queue. Per-turn
+# state now lives on :class:`turn_context.TurnContext` and is read via a
+# ``contextvars.ContextVar`` so emit helpers don't need the ctx threaded
+# through every call.
+#
+# The old module-level names are kept as a **deprecation shim** (see
+# ``__getattr__`` / ``__setattr__`` at the bottom of this module) so callers
+# that haven't migrated (CLI stub, old snippets) still work — but a
+# ``DeprecationWarning`` fires the first time each name is written.
 
 
 def _emit_status(text: str):
-    """Emit a status update to connected clients (if callback set)."""
-    if _status_callback:
-        try:
-            _status_callback(text)
-        except Exception:
-            pass
-
-
-_thinking_callback = None  # set by server.py for live thinking streaming
+    """Emit a status update to the active turn's client (if any)."""
+    _get_ctx().emit_status(text)
 
 
 def _emit_thinking(text: str):
-    """Emit a thinking chunk to connected clients."""
-    if _thinking_callback:
-        try:
-            _thinking_callback(text)
-        except Exception:
-            pass
-
-
-_content_callback = None  # set by server.py / cli.py for live content streaming
+    """Emit a thinking chunk to the active turn's client (if any)."""
+    _get_ctx().emit_thinking(text)
 
 
 def _emit_content(text: str):
-    """Emit a content (reply) chunk to connected clients."""
-    if _content_callback:
-        try:
-            _content_callback(text)
-        except Exception:
-            pass
-
-
-_tool_call_callback = None  # set by server.py for tool call events
+    """Emit a content (reply) chunk to the active turn's client (if any)."""
+    _get_ctx().emit_content(text)
 
 
 def _emit_tool_call(name: str, args_preview: str, result_preview: str = ""):
-    """Emit a tool call event to connected clients (Claude Code style)."""
-    if _tool_call_callback:
-        try:
-            _tool_call_callback(name, args_preview, result_preview)
-        except Exception:
-            pass
-
-
-_recall_callback = None  # set by server.py — receives list[{tag,text,score,source}]
+    """Emit a tool call event to the active turn's client (if any)."""
+    _get_ctx().emit_tool_call(name, args_preview, result_preview)
 
 
 def _emit_recall(memories: list[dict]):
-    """Emit the memories that were auto-injected into the system prompt.
+    """Emit recalled memories to the active turn's client (if any).
 
     UI uses this to render the real 'Recalled memories' panel — the items
     the agent actually saw, not a speculative knowledge-base search.
     """
-    if _recall_callback and memories:
-        try:
-            _recall_callback(memories)
-        except Exception:
-            pass
+    _get_ctx().emit_recall(memories)
 
 
 def _resize_image_b64(b64: str, max_area: int = 49152, quality: int = 80) -> str:
@@ -128,10 +110,84 @@ def _resize_image_b64(b64: str, max_area: int = 49152, quality: int = 80) -> str
     except Exception as e:
         _log.warning(f"image resize failed: {e} — sending as-is")
         return b64
-_abort_event = threading.Event()  # can be replaced by server
-_structured_output_failed: set[str] = set()  # providers that returned 400 on response_format
-_pending_image_path: str | None = None  # set by server before run() for image persistence
-_pending_file: dict | None = None  # {path, name, size} — set by server for file attachments
+# Provider-level capability cache. Deliberately module-scoped: a 400 on
+# ``response_format`` is a fact about the provider, not about a turn.
+_structured_output_failed: set[str] = set()
+
+# ── Deprecation shim for the retired module globals ──
+#
+# ``_abort_event``, ``_pending_image_path``, ``_pending_file`` and the
+# ``_*_callback`` slots all moved onto :class:`turn_context.TurnContext`. We
+# keep the names importable so old code (``agent._pending_image_path = ...``)
+# still works, but the first write to each slot logs a ``DeprecationWarning``
+# and is mirrored into a module-owned fallback :class:`TurnContext` that's
+# used when ``agent.run()`` is called without an explicit ``ctx=``.
+_legacy_ctx = TurnContext(source="legacy-shim")
+_abort_event = _legacy_ctx.abort_event  # retained for /api/abort REST endpoint
+
+_DEPRECATED_SLOTS = {
+    "_status_callback": "on_status",
+    "_thinking_callback": "on_thinking",
+    "_content_callback": "on_content",
+    "_tool_call_callback": "on_tool_call",
+    "_recall_callback": "on_recall",
+    "_pending_image_path": "image_path",
+    "_pending_file": "file_meta",
+}
+
+# Remember which slots we've already warned about so migrating-but-noisy
+# callers (server.py's legacy path) don't spam the log on every request.
+_deprecation_warned: set[str] = set()
+
+
+def _warn_deprecated_slot(name: str) -> None:
+    if name in _deprecation_warned:
+        return
+    _deprecation_warned.add(name)
+    field = _DEPRECATED_SLOTS.get(name, "")
+    msg = (
+        f"agent.{name} is deprecated — use TurnContext.{field} (pass ctx=... to agent.run). "
+        "This shim will keep working, but new code should not rely on it."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=3)
+    _log.warning(msg)
+
+
+def __getattr__(name: str):
+    """Module-level getattr — forwards deprecated slots to ``_legacy_ctx``.
+
+    Only called when the attribute is otherwise unset on the module (PEP 562).
+    Callers that *write* to the slot (``agent._content_callback = fn``) bypass
+    this — the write sets a real module attribute. :func:`_harvest_legacy_slots`
+    picks those back up at ``run()`` time and copies them onto the active ctx.
+    """
+    if name in _DEPRECATED_SLOTS:
+        field = _DEPRECATED_SLOTS[name]
+        return getattr(_legacy_ctx, field)
+    raise AttributeError(f"module 'agent' has no attribute {name!r}")
+
+
+def _harvest_legacy_slots(ctx: TurnContext) -> None:
+    """Move values set via the legacy module-global API onto *ctx*.
+
+    Old callers wrote ``agent._content_callback = fn`` before calling
+    ``agent.run()``. After the refactor, we read callbacks off the active
+    ``TurnContext`` — so at the top of every turn we check whether any of
+    the old slots have been assigned and, if so, copy them onto the ctx
+    (emitting a one-shot ``DeprecationWarning`` the first time each name
+    is observed).
+    """
+    import sys
+    mod = sys.modules[__name__]
+    mod_dict = mod.__dict__
+    for legacy_name, ctx_field in _DEPRECATED_SLOTS.items():
+        if legacy_name in mod_dict:
+            value = mod_dict[legacy_name]
+            _warn_deprecated_slot(legacy_name)
+            # Only overwrite the ctx field if the caller didn't set one
+            # explicitly — explicit ctx wins over the global shim.
+            if getattr(ctx, ctx_field) is None:
+                setattr(ctx, ctx_field, value)
 
 
 def _repair_json(raw: str) -> dict:
@@ -1218,33 +1274,70 @@ def _get_thread_model(tid: str | None) -> str | None:
 
 def run(user_input: str, thread_id: str | None = None,
         source: str = "cli", image_b64: str | None = None,
-        abort_event: "threading.Event | None" = None) -> TurnResult:
+        abort_event: "threading.Event | None" = None,
+        ctx: TurnContext | None = None) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response.
 
     Args:
-        source: "cli", "web", or "telegram" — tells the agent where it's running
+        source: "cli", "web", or "telegram" — tells the agent where it's running.
+            If *ctx* is provided, its ``source`` takes precedence.
         image_b64: optional base64-encoded image for vision
-        abort_event: per-request abort event. When None, falls back to the
-            module-level ``_abort_event`` for backwards compatibility (but
-            callers that serve concurrent sources — web, telegram — should
-            pass a fresh Event so one client's Stop doesn't abort another's).
+        abort_event: legacy per-request abort event. When *ctx* is provided,
+            prefer ``ctx.abort_event`` instead — this parameter exists only
+            for back-compat with pre-TurnContext callers.
+        ctx: optional :class:`TurnContext`. When None, a default one is built
+            (back-compat with CLI / single-turn callers). Concurrent callers
+            (web server, telegram bot) should always supply their own.
     """
+    # Build or reuse the ctx.
+    if ctx is None:
+        ctx = TurnContext(source=source)
+        if abort_event is not None:
+            ctx.abort_event = abort_event
+        # Pull any callbacks / pending state set via the legacy module globals.
+        _harvest_legacy_slots(ctx)
+    else:
+        # Caller-supplied ctx wins, but honour the legacy abort_event= kwarg
+        # if it was passed *alongside* an incomplete ctx.
+        if abort_event is not None and ctx.abort_event is _legacy_ctx.abort_event:
+            ctx.abort_event = abort_event
     # Thread-specific model override (local variable, not global state mutation)
     model_override = _get_thread_model(thread_id)
-    return _run_inner(user_input, thread_id, source, image_b64, model_override,
-                       abort_event=abort_event)
+    return _run_inner(user_input, thread_id, ctx.source or source, image_b64,
+                      model_override, ctx=ctx)
 
 
 def _run_inner(user_input: str, thread_id: str | None,
                source: str, image_b64: str | None,
                model_override: str | None = None,
-               abort_event: "threading.Event | None" = None) -> TurnResult:
+               abort_event: "threading.Event | None" = None,
+               ctx: TurnContext | None = None) -> TurnResult:
     """Inner agent loop."""
-    # Per-request abort event — callers passing None keep the old behaviour
-    # (shared module-level event). Callers serving concurrent sources pass a
-    # fresh Event so Stop in one source doesn't kill another.
-    if abort_event is None:
-        abort_event = _abort_event
+    # Normalise ctx + abort_event. Callers going through ``run()`` always
+    # provide *ctx*; the legacy ``abort_event=`` path is kept so existing
+    # tests that call ``_run_inner`` directly keep working.
+    if ctx is None:
+        ctx = TurnContext(source=source)
+        if abort_event is not None:
+            ctx.abort_event = abort_event
+        _harvest_legacy_slots(ctx)
+    abort_event = ctx.abort_event
+
+    _ctx_token = _set_ctx(ctx)
+    try:
+        return _run_inner_body(user_input, thread_id, source, image_b64,
+                               model_override, abort_event, ctx)
+    finally:
+        _reset_ctx(_ctx_token)
+
+
+def _run_inner_body(user_input: str, thread_id: str | None,
+                    source: str, image_b64: str | None,
+                    model_override: str | None,
+                    abort_event: threading.Event,
+                    ctx: TurnContext) -> TurnResult:
+    """Body of the inner agent loop. Split out so _run_inner can install the
+    :class:`TurnContext` on the ContextVar before and tear it down after."""
     client = providers.get_client()
     _model = model_override or providers.get_model()  # thread-safe local
     result = TurnResult()
@@ -1295,10 +1388,10 @@ def _run_inner(user_input: str, thread_id: str | None,
 
     # Save user message (with image path / file attachment if present)
     user_meta = None
-    if image_b64 and _pending_image_path:
-        user_meta = {"image_path": _pending_image_path}
-    if _pending_file:
-        user_meta = {**(user_meta or {}), "file": _pending_file}
+    if image_b64 and ctx.image_path:
+        user_meta = {"image_path": ctx.image_path}
+    if ctx.file_meta:
+        user_meta = {**(user_meta or {}), "file": ctx.file_meta}
     db.save_message("user", user_input, thread_id=tid, meta=user_meta)
 
     messages = _build_messages(user_input, thread_id=tid, source=source, image_b64=image_b64)
@@ -1331,14 +1424,16 @@ def _run_inner(user_input: str, thread_id: str | None,
         from agent_budget import BudgetLimits
 
         emitter = EventEmitter()
-        # Wire emitter to existing callbacks
-        if _content_callback:
-            emitter.on("content_delta", lambda e: _content_callback(e.data["text"]))
-        if _thinking_callback:
-            emitter.on("thinking_delta", lambda e: _thinking_callback(e.data["text"]))
-        if _status_callback:
-            emitter.on("status", lambda e: _status_callback(e.data["text"]))
-        if _tool_call_callback:
+        # Wire emitter to the ctx's per-turn callbacks. Each lambda captures
+        # ``ctx`` by closure — NOT a module global — so concurrent turns can
+        # install different callback sets without stomping each other.
+        if ctx.on_content:
+            emitter.on("content_delta", lambda e: ctx.emit_content(e.data["text"]))
+        if ctx.on_thinking:
+            emitter.on("thinking_delta", lambda e: ctx.emit_thinking(e.data["text"]))
+        if ctx.on_status:
+            emitter.on("status", lambda e: ctx.emit_status(e.data["text"]))
+        if ctx.on_tool_call:
             # Track args from tool_start so tool_end can pair them
             _pending_args: dict[str, str] = {}
             def _on_start(e):
@@ -1346,7 +1441,7 @@ def _run_inner(user_input: str, thread_id: str | None,
             def _on_end(e):
                 name = e.data["name"]
                 args = _pending_args.pop(name, "")
-                _tool_call_callback(name, args, e.data.get("result", ""))
+                ctx.emit_tool_call(name, args, e.data.get("result", ""))
             emitter.on("tool_start", _on_start)
             emitter.on("tool_end", _on_end)
 
@@ -1367,6 +1462,7 @@ def _run_inner(user_input: str, thread_id: str | None,
             json_repair_fn=_repair_tool_json,
             extra_kwargs={"extra_body": {"options": {"num_ctx": config.get("ollama_num_ctx")}}} if providers.get_active_name() == "ollama" else {},
             abort_event=abort_event,
+            ctx=ctx,
         )
 
         result.reply = _clean_response(loop_result["reply"])
@@ -1700,10 +1796,11 @@ def _run_inner(user_input: str, thread_id: str | None,
                     _log.info(f"lazy-injected instruction for skill tool: {tc['name']}")
 
                 tool_start = time.time()
-                # Propagate per-request abort event into the tool via
+                # Propagate per-request abort event + ctx into the tool via
                 # threading.local — mirrors agent_loop._run_tool.
                 try:
                     tools._set_abort_event(abort_event)
+                    tools._set_turn_ctx(ctx)
                 except Exception:
                     pass
                 try:
@@ -1711,6 +1808,7 @@ def _run_inner(user_input: str, thread_id: str | None,
                 finally:
                     try:
                         tools._set_abort_event(None)
+                        tools._set_turn_ctx(None)
                     except Exception:
                         pass
                 tool_ms = int((time.time() - tool_start) * 1000)

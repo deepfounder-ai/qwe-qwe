@@ -38,6 +38,34 @@ import config
 
 _log = logger.get("telegram")
 
+
+# ── Per-request TurnContext stash ──
+#
+# The bot's long-poll thread spins up a fresh TurnContext for each incoming
+# message (so concurrent chats don't stomp each other's callbacks) and hands
+# it to ``server._telegram_handler`` via this thread-local slot rather than
+# plumbing a new kwarg through the ``on_message`` callback contract.
+_tg_tl = threading.local()
+
+
+def _push_active_ctx(ctx) -> None:
+    _tg_tl.active_ctx = ctx
+
+
+def _pop_active_ctx() -> None:
+    _tg_tl.active_ctx = None
+
+
+def pop_active_ctx():
+    """Return (and clear) the TurnContext for the current telegram request.
+
+    Called by ``server._telegram_handler`` — it uses the returned ctx to
+    route agent callbacks to this specific chat's message stream.
+    """
+    ctx = getattr(_tg_tl, "active_ctx", None)
+    _tg_tl.active_ctx = None
+    return ctx
+
 _thread: threading.Thread | None = None
 _running = False
 _on_message: Callable | None = None
@@ -1726,11 +1754,21 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             _update_stream()
             _last_update_ts[0] = now
 
-    # Set agent callbacks for this request
+    # Build a per-request :class:`turn_context.TurnContext` and stash it on
+    # this thread. ``server._telegram_handler`` reads it back via
+    # :func:`pop_active_ctx` and passes it into ``agent.run(..., ctx=tg_ctx)``.
+    # Concurrent turns (web + multiple telegram chats) each get their own
+    # callbacks + pending state — no more module-global stomping.
     streaming_on = db.kv_get("streaming_enabled") != "false"
-    agent._content_callback = _tg_content_cb if streaming_on else None
-    agent._thinking_callback = _tg_thinking_cb
-    agent._status_callback = _tg_status_cb if streaming_on else None
+    from turn_context import TurnContext
+    tg_ctx = TurnContext(
+        source="telegram",
+        session_id=str(chat_id) if chat_id else None,
+        on_content=_tg_content_cb if streaming_on else None,
+        on_thinking=_tg_thinking_cb,
+        on_status=_tg_status_cb if streaming_on else None,
+    )
+    _push_active_ctx(tg_ctx)
 
     if _on_message:
         try:
@@ -1818,9 +1856,7 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
             send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token, topic_id=topic_id)
         finally:
             typing_active.clear()
-            agent._content_callback = None
-            agent._thinking_callback = None
-            agent._status_callback = None
+            _pop_active_ctx()
 
 
 # ── Status ──
