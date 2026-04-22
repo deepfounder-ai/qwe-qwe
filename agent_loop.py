@@ -18,6 +18,29 @@ from agent_budget import BudgetLimits, BudgetStats, check_budget, warning_check
 _log = logger.get("loop")
 
 
+def _run_tool(tool_executor, name: str, args: dict, abort_event) -> str:
+    """Invoke a tool with the per-thread abort event set, then clear it.
+
+    This lets blocking tools (shell, http_request) observe the abort signal
+    without having to change the tool_executor signature. Using tools.py's
+    threading.local-backed slot keeps concurrent turns (web + telegram)
+    isolated from each other.
+    """
+    try:
+        import tools as _tools_mod
+        _tools_mod._set_abort_event(abort_event)
+    except Exception:
+        pass
+    try:
+        return tool_executor(name, args)
+    finally:
+        try:
+            import tools as _tools_mod
+            _tools_mod._set_abort_event(None)
+        except Exception:
+            pass
+
+
 # ── Text-to-Tool Extraction ──
 
 def _extract_tool_from_text(text: str, tool_names: set[str]) -> tuple[str, dict] | None:
@@ -124,7 +147,7 @@ def _cap_tool_result(result: str) -> str:
     return result[:_TOOL_RESULT_MAX_CHARS] + f"\n... [truncated at {_TOOL_RESULT_MAX_CHARS} chars, {n} total]"
 
 
-def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats) -> str:
+def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats, abort_event=None) -> str:
     """Execute a tool call that was detected from text/intent (not native function calling).
     Injects proper messages into the conversation and returns the tool result.
     """
@@ -148,7 +171,7 @@ def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: l
 
     tool_start = time.time()
     try:
-        result = tool_executor(tool_name, args)
+        result = _run_tool(tool_executor, tool_name, args, abort_event)
     except Exception as e:
         result = f"Error: {e}"
         stats.add_error()
@@ -482,7 +505,7 @@ def run_loop(
 
                     tool_start = time.time()
                     try:
-                        tool_result = tool_executor(tc["name"], args)
+                        tool_result = _run_tool(tool_executor, tc["name"], args, abort_event)
                     except Exception as e:
                         tool_result = f"Error: {e}"
                         stats.add_error()
@@ -532,7 +555,7 @@ def run_loop(
             if extracted:
                 _log.info(f"extracted tool from text: {extracted[0]}({str(extracted[1])[:60]})")
                 # Don't add the hedge text as final reply — execute the tool instead
-                _synthesize_tool_call(extracted[0], extracted[1], tool_executor, messages, emitter, stats)
+                _synthesize_tool_call(extracted[0], extracted[1], tool_executor, messages, emitter, stats, abort_event=abort_event)
                 all_tool_calls.append(extracted[0])
                 continue  # Let LLM summarize the result
 

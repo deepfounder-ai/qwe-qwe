@@ -1,10 +1,30 @@
 """Tool definitions and execution — optimized for small models."""
 
-import json, subprocess, os, re, shutil, sys
+import json, subprocess, os, re, shutil, sys, threading, time
 from pathlib import Path
 import config
 import memory
 import logger
+
+# Thread-local abort event for the currently-running tool call.
+# The agent loop sets `_current_abort_event` before each tool_executor call;
+# blocking tools (shell, http_request) poll it and abort early if set.
+# Using threading.local so concurrent turns (web + telegram) don't share state.
+_tl = threading.local()
+
+
+def _set_abort_event(evt: threading.Event | None) -> None:
+    """Register an abort event for tool calls made from the current thread.
+
+    Called by agent_loop.run_loop() before dispatching each tool call so the
+    blocking tools (shell, http_request) can observe aborts without having to
+    change the tool_executor signature.
+    """
+    _tl.abort_event = evt
+
+
+def _get_abort_event() -> threading.Event | None:
+    return getattr(_tl, "abort_event", None)
 
 _log = logger.get("tools")
 
@@ -992,28 +1012,100 @@ def execute(name: str, args: dict) -> str:
                 env["PATH"] = f"{venv}/bin:" + env.get("PATH", "")
             env["PYTHONIOENCODING"] = "utf-8"
 
+            # Popen + polling so we can react to the user pressing Stop.
+            # subprocess.run() would block the whole thread for up to 300s.
+            # We poll every 200ms and check the per-thread abort event; on
+            # abort we kill the whole process tree and return a concise message.
+            #
+            # Killing the tree matters: ``bash -c "sleep 10"`` spawns a child
+            # ``sleep`` that inherits the pipe fds. Killing only bash leaves
+            # ``sleep`` holding stdout/stderr open, and ``communicate()`` then
+            # hangs. So we use a new process group (POSIX) / CREATE_NEW_PROCESS_GROUP
+            # (Windows), and ``taskkill /T /F`` on Windows for tree kill.
+            abort_evt = _get_abort_event()
+            popen_kwargs = dict(
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL, env=env, cwd=cwd,
+            )
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                popen_kwargs["start_new_session"] = True
             try:
                 if _SHELL_EXE:
-                    result = subprocess.run(
-                        [_SHELL_EXE, "-c", cmd],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace",
-                        timeout=t, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
-                    )
+                    proc = subprocess.Popen([_SHELL_EXE, "-c", cmd], **popen_kwargs)
                 else:
-                    result = subprocess.run(
-                        cmd, shell=True, capture_output=True, text=True,
-                        encoding="utf-8", errors="replace",
-                        timeout=t, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
-                    )
+                    proc = subprocess.Popen(cmd, shell=True, **popen_kwargs)
             except OSError as e:
                 _log.error(f"shell OSError: {e}")
                 return f"Error: shell failed ({e}). Try a simpler command."
 
-            output = result.stdout or ""
-            if result.stderr:
-                output += f"\nSTDERR: {result.stderr}"
-            if result.returncode != 0:
-                output += f"\n(exit code: {result.returncode})"
+            def _kill_tree():
+                """Kill proc and all descendants. Best-effort, never raises."""
+                if sys.platform == "win32":
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=3,
+                        )
+                    except Exception as e:
+                        _log.warning(f"taskkill failed: {e}; falling back to proc.kill()")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+
+            deadline = time.monotonic() + t
+            aborted = False
+            timed_out = False
+            poll_interval = 0.2
+            try:
+                while True:
+                    if proc.poll() is not None:
+                        break
+                    if abort_evt is not None and abort_evt.is_set():
+                        aborted = True
+                        break
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    time.sleep(poll_interval)
+            finally:
+                if proc.poll() is None:
+                    _kill_tree()
+                try:
+                    stdout_b, stderr_b = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    stdout_b, stderr_b = b"", b""
+                except Exception:
+                    stdout_b, stderr_b = b"", b""
+
+            stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+            stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+
+            if aborted:
+                return "⏹ Shell aborted (user pressed Stop)."
+            if timed_out:
+                output = stdout
+                if stderr:
+                    output += f"\nSTDERR: {stderr}"
+                output += f"\n(timed out after {t}s)"
+                return output.strip() or f"(no output; timed out after {t}s)"
+
+            output = stdout
+            if stderr:
+                output += f"\nSTDERR: {stderr}"
+            if proc.returncode != 0:
+                output += f"\n(exit code: {proc.returncode})"
             # Truncate long outputs for small context models
             if len(output) > 2000:
                 output = output[:1000] + "\n...(truncated)...\n" + output[-500:]
@@ -1128,11 +1220,24 @@ def execute(name: str, args: dict) -> str:
                 ssl_ctx = _ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = _ssl.CERT_NONE
+            # Short timeout so aborts aren't blocked for 15s.
+            # urllib.request.urlopen has no built-in abort hook — we rely on the
+            # 5s socket timeout plus abort-event checks before and after.
+            abort_evt = _get_abort_event()
+            if abort_evt is not None and abort_evt.is_set():
+                return "⏹ HTTP aborted (user pressed Stop)."
+            http_timeout = float(args.get("timeout", 5))
+            if http_timeout > 30:
+                http_timeout = 30
             try:
-                with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
+                with urllib.request.urlopen(req, timeout=http_timeout, context=ssl_ctx) as resp:
                     text = resp.read().decode("utf-8", errors="replace")
                     if len(text) > 10000:
                         text = text[:10000] + "\n...(truncated)"
+                    # Abort check after the blocking read — if the user stopped
+                    # mid-request, surface that instead of the (now-stale) body.
+                    if abort_evt is not None and abort_evt.is_set():
+                        return "⏹ HTTP aborted (user pressed Stop)."
                     return f"HTTP {resp.status}: {text}"
             except urllib.error.HTTPError as he:
                 body_text = he.read().decode("utf-8", errors="replace")[:5000]
@@ -1140,7 +1245,7 @@ def execute(name: str, args: dict) -> str:
             except urllib.error.URLError as ue:
                 return f"HTTP error: {ue.reason}"
             except (socket.timeout, TimeoutError):
-                return "HTTP error: request timed out (15s)"
+                return f"HTTP error: request timed out ({http_timeout:g}s)"
             except Exception as e:
                 return f"HTTP error: {e}"
 

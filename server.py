@@ -25,7 +25,9 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 import tools
 
-# Global abort flag
+# Global abort flag — used by legacy REST callers of _run_agent_sync() that
+# don't supply their own per-request event (e.g. the /api/abort endpoint).
+# WebSocket sessions create their own events to avoid cross-source abort.
 _abort_event = threading.Event()
 
 # Connected WebSocket clients for broadcast (thread-safe via copy-on-iterate)
@@ -33,6 +35,11 @@ import threading as _threading
 _ws_clients: set = set()
 _ws_lock = _threading.Lock()
 _ws_loop: asyncio.AbstractEventLoop | None = None
+
+# Active per-session WS abort events — /api/abort fires all of these so the
+# "Stop" button still works from any client, while disconnect only fires one.
+_ws_abort_events: set[threading.Event] = set()
+_ws_abort_lock = threading.Lock()
 
 # Module-level state for knowledge indexing
 _knowledge_task: dict | None = None  # {task_id, status, current, total, file, phase, errors}
@@ -144,11 +151,23 @@ def _emit_agent_content(text: str):
 def _run_agent_sync(user_input: str, thread_id: str | None = None,
                     image_b64: str | None = None,
                     image_path: str | None = None,
-                    file_meta: dict | None = None) -> dict:
-    """Run agent.run() synchronously — called from thread pool."""
+                    file_meta: dict | None = None,
+                    abort_event: threading.Event | None = None) -> dict:
+    """Run agent.run() synchronously — called from thread pool.
+
+    ``abort_event``: per-request event. When None, the legacy shared module
+    event is used (for /api/abort + older callers). WebSocket sessions pass
+    their own event so one client's disconnect doesn't abort another's turn.
+    """
     import agent
-    _abort_event.clear()
-    agent._abort_event = _abort_event  # share abort flag with agent
+    if abort_event is None:
+        # Legacy path (e.g. REST callers): keep using the module global and
+        # the /api/abort endpoint. Clear it so stale flags don't fire.
+        _abort_event.clear()
+        abort_event = _abort_event
+    else:
+        abort_event.clear()
+    agent._abort_event = _abort_event  # retained for older code paths
     # Pass image_path / file_meta so agent can store them in user message meta
     agent._pending_image_path = image_path
     agent._pending_file = file_meta
@@ -161,7 +180,8 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
         agent._content_callback = _emit_agent_content
     t0 = time.time()
     try:
-        result = agent.run(user_input, thread_id=thread_id, source="web", image_b64=image_b64)
+        result = agent.run(user_input, thread_id=thread_id, source="web",
+                           image_b64=image_b64, abort_event=abort_event)
     finally:
         # Clear so next turn without a file doesn't inherit it
         agent._pending_image_path = None
@@ -1144,7 +1164,15 @@ async def delete_secret(key: str):
 
 @app.post("/api/abort")
 async def abort_generation():
-    """Abort current agent generation."""
+    """Abort current agent generation.
+
+    Fires every active WS session's per-request abort event plus the legacy
+    shared one (so REST-only callers of _run_agent_sync still work). Does not
+    discriminate between sessions — matches the original behaviour.
+    """
+    with _ws_abort_lock:
+        for evt in list(_ws_abort_events):
+            evt.set()
     _abort_event.set()
     return {"ok": True}
 
@@ -2314,6 +2342,10 @@ async def _ws_send_safe(ws: WebSocket, data: dict) -> bool:
 async def websocket_chat(ws: WebSocket):
     global _ws_loop
 
+    # Per-session abort event — so one client's disconnect / Stop doesn't
+    # abort a concurrent telegram (or other WS) turn.
+    my_abort_event = threading.Event()
+
     # Auth check for WebSocket (middleware doesn't cover WS)
     if _AUTH_PASSWORD:
         cookie = ws.cookies.get(_AUTH_COOKIE, "")
@@ -2324,6 +2356,8 @@ async def websocket_chat(ws: WebSocket):
     await ws.accept()
     with _ws_lock:
         _ws_clients.add(ws)
+    with _ws_abort_lock:
+        _ws_abort_events.add(my_abort_event)
     _ws_loop = asyncio.get_event_loop()
     _log.info(f"websocket client connected ({len(_ws_clients)} total)")
 
@@ -2485,7 +2519,8 @@ async def websocket_chat(ws: WebSocket):
                         return _run_agent_sync(user_input, thread_id,
                                                image_b64=image_b64,
                                                image_path=image_path,
-                                               file_meta=file_meta)
+                                               file_meta=file_meta,
+                                               abort_event=my_abort_event)
                     finally:
                         # Signal queue drain to stop
                         asyncio.run_coroutine_threadsafe(stream_queue.put(None), loop)
@@ -2562,16 +2597,19 @@ async def websocket_chat(ws: WebSocket):
                     break
 
     except WebSocketDisconnect:
-        _abort_event.set()  # abort agent if client disconnected
-        _log.info("websocket client disconnected — aborting agent")
+        # Only abort this session — not other concurrent sources (telegram, other WS).
+        my_abort_event.set()
+        _log.info("websocket client disconnected — aborting this session's agent turn")
     except (ConnectionResetError, RuntimeError, OSError):
-        _abort_event.set()
-        _log.debug("websocket connection reset — aborting agent")
+        my_abort_event.set()
+        _log.debug("websocket connection reset — aborting this session's agent turn")
     except Exception as e:
         _log.error(f"websocket error: {e}", exc_info=True)
     finally:
         with _ws_lock:
             _ws_clients.discard(ws)
+        with _ws_abort_lock:
+            _ws_abort_events.discard(my_abort_event)
         _log.info(f"websocket client disconnected ({len(_ws_clients)} left)")
 
 

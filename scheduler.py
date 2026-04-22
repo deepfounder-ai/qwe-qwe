@@ -9,6 +9,28 @@ _log = logger.get("scheduler")
 
 
 def _tz():
+    """Resolve the scheduler timezone.
+
+    Preference order:
+      1. ``config.get("tz_name")`` — an IANA zone like ``"Europe/Moscow"`` or
+         ``"America/New_York"`` — resolved via ``zoneinfo``. Honours DST so a
+         ``daily HH:MM`` task fires at the wall clock the user expects across
+         transitions.
+      2. Fallback: a fixed offset from ``config.TZ_OFFSET`` (the legacy
+         behaviour). Fixed offsets do not track DST and will drift ±1h
+         across transitions — acceptable if the user's locale doesn't have
+         DST or no ``tz_name`` is configured.
+    """
+    try:
+        tz_name = (config.get("tz_name") or "").strip()
+    except Exception:
+        tz_name = ""
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(tz_name)
+        except Exception as e:
+            _log.warning(f"invalid tz_name={tz_name!r} ({e}); falling back to fixed offset")
     return timezone(timedelta(hours=config.TZ_OFFSET))
 
 _thread_started = False

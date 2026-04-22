@@ -989,24 +989,33 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 
 # ── Compaction state (for notifications) ──
-_compaction_callbacks: list = []  # [(callback_fn, context)]
+# Single-slot callback — matches how other callbacks in this module are wired
+# (_status_callback, _content_callback, etc). Previously this was an
+# append-only list; callers that re-registered (e.g. hot reload) leaked.
+_compaction_callback = None
 
 
 def on_compaction(callback):
     """Register a callback for compaction events: callback(event, data).
-    
-    Events: 'start', 'summary', 'done', 'skip', 'error'
+
+    Events: 'start', 'summary', 'done', 'skip', 'error'.
+
+    Only one callback is kept — later calls replace the previous one. Pass
+    ``None`` to unregister.
     """
-    _compaction_callbacks.append(callback)
+    global _compaction_callback
+    _compaction_callback = callback
 
 
 def _notify_compaction(event: str, data: dict):
-    """Notify all registered callbacks about compaction events."""
-    for cb in _compaction_callbacks:
-        try:
-            cb(event, data)
-        except Exception as e:
-            _log.warning(f"compaction callback error: {e}")
+    """Notify the registered callback (if any) about compaction events."""
+    cb = _compaction_callback
+    if cb is None:
+        return
+    try:
+        cb(event, data)
+    except Exception as e:
+        _log.warning(f"compaction callback error: {e}")
 
 
 # Token budget settings
@@ -1163,22 +1172,34 @@ def _get_thread_model(tid: str | None) -> str | None:
 
 
 def run(user_input: str, thread_id: str | None = None,
-        source: str = "cli", image_b64: str | None = None) -> TurnResult:
+        source: str = "cli", image_b64: str | None = None,
+        abort_event: "threading.Event | None" = None) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response.
 
     Args:
         source: "cli", "web", or "telegram" — tells the agent where it's running
         image_b64: optional base64-encoded image for vision
+        abort_event: per-request abort event. When None, falls back to the
+            module-level ``_abort_event`` for backwards compatibility (but
+            callers that serve concurrent sources — web, telegram — should
+            pass a fresh Event so one client's Stop doesn't abort another's).
     """
     # Thread-specific model override (local variable, not global state mutation)
     model_override = _get_thread_model(thread_id)
-    return _run_inner(user_input, thread_id, source, image_b64, model_override)
+    return _run_inner(user_input, thread_id, source, image_b64, model_override,
+                       abort_event=abort_event)
 
 
 def _run_inner(user_input: str, thread_id: str | None,
                source: str, image_b64: str | None,
-               model_override: str | None = None) -> TurnResult:
+               model_override: str | None = None,
+               abort_event: "threading.Event | None" = None) -> TurnResult:
     """Inner agent loop."""
+    # Per-request abort event — callers passing None keep the old behaviour
+    # (shared module-level event). Callers serving concurrent sources pass a
+    # fresh Event so Stop in one source doesn't kill another.
+    if abort_event is None:
+        abort_event = _abort_event
     client = providers.get_client()
     _model = model_override or providers.get_model()  # thread-safe local
     result = TurnResult()
@@ -1300,7 +1321,7 @@ def _run_inner(user_input: str, thread_id: str | None,
             tool_executor=tools.execute,
             json_repair_fn=_repair_tool_json,
             extra_kwargs={"extra_body": {"options": {"num_ctx": config.get("ollama_num_ctx")}}} if providers.get_active_name() == "ollama" else {},
-            abort_event=_abort_event,
+            abort_event=abort_event,
         )
 
         result.reply = _clean_response(loop_result["reply"])
@@ -1354,7 +1375,7 @@ def _run_inner(user_input: str, thread_id: str | None,
             _nudge_cleanup = False
 
         # Check abort
-        if hasattr(sys.modules[__name__], '_abort_event') and _abort_event.is_set():
+        if abort_event is not None and abort_event.is_set():
             result.reply = "⏹ Stopped."
             break
 
@@ -1634,7 +1655,19 @@ def _run_inner(user_input: str, thread_id: str | None,
                     _log.info(f"lazy-injected instruction for skill tool: {tc['name']}")
 
                 tool_start = time.time()
-                tool_result = tools.execute(tc["name"], args)
+                # Propagate per-request abort event into the tool via
+                # threading.local — mirrors agent_loop._run_tool.
+                try:
+                    tools._set_abort_event(abort_event)
+                except Exception:
+                    pass
+                try:
+                    tool_result = tools.execute(tc["name"], args)
+                finally:
+                    try:
+                        tools._set_abort_event(None)
+                    except Exception:
+                        pass
                 tool_ms = int((time.time() - tool_start) * 1000)
 
                 # Emit tool call with result to UI (Claude Code style)

@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.17.18"
+VERSION = "0.17.19"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -161,6 +161,7 @@ EDITABLE_SETTINGS = {
     "synthesis_time":       ("setting:synthesis_time",        str, "03:00", "Night synthesis time (HH:MM)", "", ""),
     "synthesis_max_per_run": ("setting:synthesis_max_per_run", int, 50,    "Max items per synthesis run", 1, None),
     "rag_chunk_overlap":    ("setting:rag_chunk_overlap",     int, 100,    "RAG chunk overlap in chars", 0, 500),
+    "tz_name":              ("setting:tz_name",               str, "",     "IANA timezone name (e.g. Europe/Moscow, America/New_York). When set, scheduler uses it via zoneinfo and honours DST. Empty = use fixed TZ_OFFSET.", "", ""),
     "fallback_provider":    ("setting:fallback_provider",     str, "",     "Fallback provider for complex tasks (e.g. openrouter)", "", ""),
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),

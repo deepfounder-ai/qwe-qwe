@@ -47,45 +47,53 @@ MAX_SCAN_FILES = 1000
 # Lazy imports
 _qclient = None
 
+# Lazy-init locks (double-checked locking) — prevent two concurrent threads
+# from building duplicate singletons. Especially important for the Qdrant
+# client (disk mode rejects concurrent storage-folder open).
+_qclient_lock = threading.Lock()
+_markitdown_lock = threading.Lock()
+
 
 def _get_qdrant():
     """Get shared Qdrant client from memory module (avoids duplicate connections)."""
     global _qclient
     if _qclient is None:
-        import memory
-        _qclient = memory._get_qdrant()
-        # Ensure RAG collection exists with v2 schema (named dense + sparse)
-        from qdrant_client.models import (
-            VectorParams, Distance, PayloadSchemaType, Datatype,
-            SparseVectorParams,
-        )
-        cols = [c.name for c in _qclient.get_collections().collections]
-        if RAG_COLLECTION not in cols:
-            _qclient.create_collection(
-                RAG_COLLECTION,
-                vectors_config={
-                    "dense": VectorParams(
-                        size=memory.EMBED_DIM,
-                        distance=Distance.COSINE,
-                        datatype=Datatype.FLOAT16,
-                    ),
-                },
-                sparse_vectors_config={
-                    "sparse": SparseVectorParams(),
-                },
-            )
-        # Ensure payload indexes
-        try:
-            info = _qclient.get_collection(RAG_COLLECTION)
-            existing = set(info.payload_schema.keys()) if info.payload_schema else set()
-            if "file_path" not in existing:
-                _qclient.create_payload_index(RAG_COLLECTION, "file_path", PayloadSchemaType.KEYWORD)
-                _log.info("created payload index: file_path")
-            if "tags" not in existing:
-                _qclient.create_payload_index(RAG_COLLECTION, "tags", PayloadSchemaType.KEYWORD)
-                _log.info("created payload index: tags")
-        except Exception as e:
-            _log.debug(f"RAG payload index creation skipped: {e}")
+        with _qclient_lock:
+            if _qclient is None:
+                import memory
+                _qclient = memory._get_qdrant()
+                # Ensure RAG collection exists with v2 schema (named dense + sparse)
+                from qdrant_client.models import (
+                    VectorParams, Distance, PayloadSchemaType, Datatype,
+                    SparseVectorParams,
+                )
+                cols = [c.name for c in _qclient.get_collections().collections]
+                if RAG_COLLECTION not in cols:
+                    _qclient.create_collection(
+                        RAG_COLLECTION,
+                        vectors_config={
+                            "dense": VectorParams(
+                                size=memory.EMBED_DIM,
+                                distance=Distance.COSINE,
+                                datatype=Datatype.FLOAT16,
+                            ),
+                        },
+                        sparse_vectors_config={
+                            "sparse": SparseVectorParams(),
+                        },
+                    )
+                # Ensure payload indexes
+                try:
+                    info = _qclient.get_collection(RAG_COLLECTION)
+                    existing = set(info.payload_schema.keys()) if info.payload_schema else set()
+                    if "file_path" not in existing:
+                        _qclient.create_payload_index(RAG_COLLECTION, "file_path", PayloadSchemaType.KEYWORD)
+                        _log.info("created payload index: file_path")
+                    if "tags" not in existing:
+                        _qclient.create_payload_index(RAG_COLLECTION, "tags", PayloadSchemaType.KEYWORD)
+                        _log.info("created payload index: tags")
+                except Exception as e:
+                    _log.debug(f"RAG payload index creation skipped: {e}")
     return _qclient
 
 
@@ -112,26 +120,31 @@ def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
+_MARKITDOWN_UNSET = object()  # sentinel — distinct from "tried and failed" (None)
+_markitdown_cache = _MARKITDOWN_UNSET
+
+
 def _get_markitdown():
     """Lazy-load a MarkItDown instance. Cached on first call.
 
     Returns None if the package is missing (graceful fallback to stdlib readers).
     """
     global _markitdown_cache
-    try:
+    if _markitdown_cache is not _MARKITDOWN_UNSET:
         return _markitdown_cache
-    except NameError:
-        pass
-    try:
-        from markitdown import MarkItDown
-        _markitdown_cache = MarkItDown(enable_plugins=False)
-        _log.info("markitdown loaded — advanced document conversion enabled")
-    except ImportError:
-        _log.warning("markitdown not installed — falling back to stdlib readers")
-        _markitdown_cache = None
-    except Exception as e:
-        _log.warning(f"markitdown init failed: {e} — using stdlib fallbacks")
-        _markitdown_cache = None
+    with _markitdown_lock:
+        if _markitdown_cache is not _MARKITDOWN_UNSET:
+            return _markitdown_cache
+        try:
+            from markitdown import MarkItDown
+            _markitdown_cache = MarkItDown(enable_plugins=False)
+            _log.info("markitdown loaded — advanced document conversion enabled")
+        except ImportError:
+            _log.warning("markitdown not installed — falling back to stdlib readers")
+            _markitdown_cache = None
+        except Exception as e:
+            _log.warning(f"markitdown init failed: {e} — using stdlib fallbacks")
+            _markitdown_cache = None
     return _markitdown_cache
 
 
