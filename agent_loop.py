@@ -147,9 +147,69 @@ def _cap_tool_result(result: str) -> str:
     return result[:_TOOL_RESULT_MAX_CHARS] + f"\n... [truncated at {_TOOL_RESULT_MAX_CHARS} chars, {n} total]"
 
 
-def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats, abort_event=None) -> str:
+def _pre_dispatch_safety_check(tool_name: str, args: dict, self_check_fn=None) -> str | None:
+    """Gate-check a tool call before dispatch — returns a rejection message
+    if the call should NOT execute, or None to allow.
+
+    Applied to both native (``delta.tool_calls``) and text-extracted tool
+    calls so the extraction path can't bypass the shell/write_file safety
+    checks that the native path goes through.
+
+    Checks, in order:
+    1. ``self_check_fn`` (if provided) — same function the native path uses.
+       A returned ``(False, None)`` means hard-reject; ``(False, fixed)`` is
+       returned for the caller to swap args.
+    2. For ``shell``: route through ``tools._check_shell_safety`` on the
+       ``command`` argument.
+    3. For ``write_file``: route through ``tools._resolve_path(raw, for_write=True)``
+       so the workspace whitelist catches writes outside ~/.qwe-qwe/ / cwd.
+
+    Returns None on allow, str on reject. Never raises.
+    """
+    if not isinstance(args, dict):
+        return "Blocked: arguments must be a JSON object."
+    # Shell pre-check — speed-bump against obviously-dangerous commands.
+    if tool_name == "shell":
+        cmd = args.get("command") or ""
+        if not isinstance(cmd, str) or not cmd.strip():
+            return "Blocked: missing shell command."
+        try:
+            import tools as _tools
+            reason = _tools._check_shell_safety(cmd)
+        except Exception as e:
+            _log.warning(f"shell safety check crashed: {e}")
+            reason = None
+        if reason:
+            return reason
+    # write_file pre-check — enforce workspace whitelist.
+    if tool_name == "write_file":
+        try:
+            import tools as _tools
+            raw = _tools._get_path_arg(args)
+            if not raw:
+                return "Blocked: write_file missing path argument."
+            # Raises PermissionError if outside whitelist.
+            _tools._resolve_path(str(raw), for_write=True)
+        except PermissionError as e:
+            return f"Blocked: {e}"
+        except Exception as e:
+            # Don't fail-closed on unrelated path errors — let the tool
+            # itself surface the real error message.
+            _log.warning(f"write_file pre-check skipped: {e}")
+    return None
+
+
+def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats,
+                          abort_event=None, self_check_fn=None) -> str:
     """Execute a tool call that was detected from text/intent (not native function calling).
     Injects proper messages into the conversation and returns the tool result.
+
+    Text-extracted tool calls are routed through the SAME safety gate as
+    native tool calls (``_pre_dispatch_safety_check``) before dispatch so
+    the extraction path can't be used to bypass shell-safety / write
+    whitelisting. A blocked call still produces a synthetic assistant+tool
+    message pair so the conversation stays well-formed and the model sees
+    a clear "rejected" status to react to.
     """
     import uuid
     call_id = f"synth_{uuid.uuid4().hex[:8]}"
@@ -164,6 +224,33 @@ def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: l
             "function": {"name": tool_name, "arguments": json.dumps(args)},
         }],
     })
+
+    # Gate: run the shared pre-dispatch safety check first.
+    block_reason = _pre_dispatch_safety_check(tool_name, args, self_check_fn=self_check_fn)
+    # Self-check hook — mirrors the native-tool-call path in run_loop().
+    if block_reason is None and self_check_fn:
+        try:
+            ok, fixed = self_check_fn(tool_name, args)
+        except Exception as e:
+            _log.warning(f"self-check hook raised: {e}")
+            ok, fixed = True, None  # fail open on errors, as native path does
+        if not ok:
+            if fixed and isinstance(fixed, dict):
+                args = fixed
+                # Re-run safety checks on the corrected args — a self-check
+                # fix must not relax the shell/write_file gate.
+                block_reason = _pre_dispatch_safety_check(tool_name, args, self_check_fn=None)
+            else:
+                block_reason = "Self-check rejected this action."
+
+    if block_reason:
+        _log.warning(f"text-extracted {tool_name} rejected: {block_reason}")
+        emitter.tool_start(tool_name, str(args)[:80])
+        result = f"Rejected (extracted-tool safety gate): {block_reason}"
+        emitter.tool_end(tool_name, result[:150], 0)
+        stats.add_error()
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+        return result
 
     # Execute
     emitter.tool_start(tool_name, str(args)[:80])
@@ -494,6 +581,19 @@ def run_loop(
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
                             continue
 
+                    # Pre-dispatch safety gate — same checks text-extracted
+                    # calls go through. Catches dangerous shell commands and
+                    # out-of-whitelist write_file paths that a faulty or
+                    # prompt-injected ``self_check_fn`` might have let
+                    # through (or that ran with no self_check_fn at all).
+                    _block = _pre_dispatch_safety_check(tc["name"], args, self_check_fn=None)
+                    if _block:
+                        _log.warning(f"native {tc['name']} rejected by pre-dispatch: {_block}")
+                        tool_result = f"Rejected: {_block}"
+                        stats.add_error()
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        continue
+
                     # Track per-tool call count (for logging only — no hard limit)
                     _tool_name_counts[tc["name"]] = _tool_name_counts.get(tc["name"], 0) + 1
 
@@ -554,8 +654,17 @@ def run_loop(
             extracted = _extract_tool_from_text(full_content, _tool_names)
             if extracted:
                 _log.info(f"extracted tool from text: {extracted[0]}({str(extracted[1])[:60]})")
-                # Don't add the hedge text as final reply — execute the tool instead
-                _synthesize_tool_call(extracted[0], extracted[1], tool_executor, messages, emitter, stats, abort_event=abort_event)
+                # Don't add the hedge text as final reply — execute the tool
+                # instead. Route through the pre-dispatch safety gate so a
+                # ``<tool_call>`` regex hit can't bypass shell-safety /
+                # write-whitelisting, AND pass the per-request abort_event so
+                # Stop works mid-blocking-tool.
+                _synthesize_tool_call(
+                    extracted[0], extracted[1],
+                    tool_executor, messages, emitter, stats,
+                    abort_event=abort_event,
+                    self_check_fn=self_check_fn,
+                )
                 all_tool_calls.append(extracted[0])
                 continue  # Let LLM summarize the result
 

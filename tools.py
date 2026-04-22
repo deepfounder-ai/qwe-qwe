@@ -1,6 +1,6 @@
 """Tool definitions and execution — optimized for small models."""
 
-import json, subprocess, os, re, shutil, sys, threading, time
+import json, subprocess, os, re, shutil, sys, threading, time, unicodedata
 from pathlib import Path
 import config
 import memory
@@ -113,6 +113,18 @@ def _resolve_path(raw: str, for_write: bool = False) -> Path:
 
 
 # ── Shell safety ──
+#
+# IMPORTANT: `_check_shell_safety` is a *best-effort speed bump*, NOT a trust
+# boundary. The qwe-qwe agent runs the shell with the full privileges of the
+# user who launched it, so a determined attacker (or a sufficiently creative
+# language model) can always find a way around pattern-based filtering — shell
+# is a full programming language with indirection through `eval`, `$(...)`,
+# process substitution, `printf \x..`, base64 decode, `python -c`, etc.
+#
+# The goal is simply: "model accidentally pastes a suggested curl|sh from some
+# random website" > "silently blocked with a clear message in the tool result".
+# If you need a real sandbox, run the agent inside a container with a
+# read-only rootfs and no network — not a regex.
 
 _SHELL_BLOCKED_PATTERNS = re.compile(
     r"(?:^|[\s;|&])\s*(?:"
@@ -133,19 +145,135 @@ _SHELL_BLOCKED_EXACT = [
     ":(){ :|:& };:", # fork bomb variant
 ]
 
+# Additional hardening patterns — applied to the NORMALIZED command (after
+# NFKC folding, empty-quote stripping, and bounded hex unescaping) so the
+# obvious obfuscations below are caught alongside the plain forms.
+_SHELL_HARDENED_PATTERNS = re.compile(
+    r"(?:"
+    r"\$\(\s*(?:curl|wget)\b"                  # $(curl ...) — command substitution to fetch
+    r"|<\(\s*(?:curl|wget)\b"                  # <(curl ...) — bash process substitution
+    r"|\beval\b[^\n]*\$\("                     # eval ... $(...) — double indirection
+    r"|\beval\b[^\n]*`"                         # eval ... `...` — backtick variant
+    r"|\bpython[23]?\s+-c\b[^\n]*(?:os\.system|subprocess\.|__import__|exec\s*\()"
+    r"|\bperl\s+-e\b[^\n]*(?:system|exec|`)"   # perl one-liner shelling out
+    r"|\bruby\s+-e\b[^\n]*(?:system|exec|`)"   # ruby one-liner shelling out
+    r"|\bnode\s+-e\b[^\n]*(?:child_process|execSync|spawnSync)"
+    r"|\bbase64\s+(?:-d|--decode)\b[^\n]*\|\s*(?:sh|bash|zsh|python)"
+    # Dynamic command word producing rm-flags: ``$(echo rm) -rf /`` — the
+    # regex keyword check can't see "rm", but the ``-rf /`` (or ``-rf ~``)
+    # argument is already a strong signal by itself.
+    r"|\$\([^)]{1,40}\)\s+-[rRf]+\s+[/~]"
+    r"|`[^`]{1,40}`\s+-[rRf]+\s+[/~]"           # backtick variant
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _normalize_for_safety_check(cmd: str) -> str:
+    """Fold obfuscation so regex patterns catch common bypasses.
+
+    Applies, in order:
+    1. NFKC unicode normalisation — folds compat forms AND strips some
+       lookalikes (but NOT all; Cyrillic letters with distinct codepoints
+       survive, which we handle in step 4).
+    2. Remove empty-string quoting: ``rm""`` / ``rm''`` / ``rm""`` /
+       ``rm""`` all become ``rm``. Bash treats these as a no-op
+       concatenation, so an attacker uses them to split a keyword across
+       what the regex thinks are token boundaries.
+    3. Bounded hex/octal unescape of ``\\xNN`` / ``\\NNN`` sequences — decode
+       up to 256 occurrences (plenty for ``\\x72\\x6d -rf /``-style tricks,
+       but won't loop forever on adversarial input).
+    4. Transliterate known Cyrillic/Greek lookalikes (ѕ→s, а→a, е→e, о→o,
+       р→p, с→c, и→n, ԁ→d) so ``ѕudo`` matches the ``sudo`` pattern.
+
+    Returned string is used ONLY for the safety check — the original
+    (untransformed) command is still what's passed to the shell.
+    """
+    if not cmd:
+        return ""
+    # 1. NFKC
+    out = unicodedata.normalize("NFKC", cmd)
+    # 2. Empty-string quote pairs — ASCII and smart-quote variants. Do this
+    # in a bounded loop because removing one pair may abut another.
+    _empty_quotes = ('""', "''", "\u201c\u201d", "\u2018\u2019", "\u00ab\u00bb")
+    for _ in range(8):
+        before = out
+        for q in _empty_quotes:
+            out = out.replace(q, "")
+        if out == before:
+            break
+    # 3. Hex unescape (\xNN). Bounded count guards against pathological input.
+    def _hex_sub(m):
+        try:
+            return chr(int(m.group(1), 16))
+        except Exception:
+            return m.group(0)
+    out = re.sub(r"\\x([0-9a-fA-F]{2})", _hex_sub, out, count=256)
+    # Octal (\NNN) — common in printf. Bounded.
+    def _oct_sub(m):
+        try:
+            return chr(int(m.group(1), 8))
+        except Exception:
+            return m.group(0)
+    out = re.sub(r"\\([0-3][0-7]{2})", _oct_sub, out, count=256)
+    # 4. Known Cyrillic/Greek lookalikes — transliterate to ASCII so the
+    # downstream patterns (which are ASCII) catch ``ѕudo``, ``rе``, etc.
+    _lookalikes = str.maketrans({
+        "\u0455": "s",  # Cyrillic dze ѕ → s
+        "\u0430": "a",  # Cyrillic а → a
+        "\u0435": "e",  # Cyrillic е → e
+        "\u043e": "o",  # Cyrillic о → o
+        "\u0440": "p",  # Cyrillic р → p
+        "\u0441": "c",  # Cyrillic с → c
+        "\u0445": "x",  # Cyrillic х → x
+        "\u0443": "y",  # Cyrillic у → y (visually; used in ``уm``)
+        "\u03bf": "o",  # Greek omicron ο → o
+        "\u03b1": "a",  # Greek alpha α → a
+        "\u03c1": "p",  # Greek rho ρ → p
+        "\u03c5": "u",  # Greek upsilon υ → u (visually close)
+        "\u0456": "i",  # Cyrillic і → i
+    })
+    out = out.translate(_lookalikes)
+    return out
+
 
 def _check_shell_safety(cmd: str) -> str | None:
-    """Returns error message if command is blocked, None if safe."""
-    # Exact substring matches
+    """Returns a block reason string if the command looks dangerous, else None.
+
+    Speed bump, not a sandbox — see the module-level comment above.
+
+    Checks, in order:
+    1. Exact-substring match of known-bad commands (``rm -rf /`` etc.).
+    2. Regex against the raw command (catches plain forms).
+    3. Regex against the *normalized* command (NFKC-folded, empty-quote-
+       stripped, hex-unescaped, Cyrillic-transliterated).
+    4. Piped-download-to-shell match (``curl ... | sh``) against normalized.
+    5. Hardened patterns (``$(curl ...)``, ``<(curl ...)``, ``eval $(...)``,
+       ``python -c ... os.system``, etc.) against normalized.
+    """
+    if not isinstance(cmd, str):
+        return None
+    # Exact substring matches (raw — NFKC might mangle them)
     for b in _SHELL_BLOCKED_EXACT:
         if b in cmd:
-            return f"Blocked: dangerous command pattern."
-    # Regex pattern matches
-    if _SHELL_BLOCKED_PATTERNS.search(cmd):
+            return "Blocked: dangerous command pattern."
+
+    # Normalize for the remaining checks so obfuscation doesn't slip past.
+    norm = _normalize_for_safety_check(cmd)
+
+    # Original patterns — check both raw and normalized so (a) nothing that
+    # used to be blocked is silently unblocked by normalization, and (b)
+    # obfuscated forms are now caught.
+    if _SHELL_BLOCKED_PATTERNS.search(cmd) or _SHELL_BLOCKED_PATTERNS.search(norm):
         return "Blocked: potentially dangerous command."
-    # Block curl/wget piped to shell (remote code execution)
-    if re.search(r"(?:curl|wget)\s.*\|\s*(?:sh|bash|zsh|python)", cmd, re.IGNORECASE):
+    # Block curl/wget piped to shell (remote code execution) — normalized so
+    # ``curl ""foo"" | sh`` (with empty strings inserted) is caught.
+    if re.search(r"(?:curl|wget)\s.*\|\s*(?:sh|bash|zsh|python)", norm, re.IGNORECASE):
         return "Blocked: piping downloads to shell not allowed."
+    # Hardened checks — command substitution, process substitution, eval,
+    # python/perl/ruby/node indirection, base64-decode-pipe.
+    if _SHELL_HARDENED_PATTERNS.search(norm):
+        return "Blocked: obfuscated or indirect dangerous command."
     return None
 
 
