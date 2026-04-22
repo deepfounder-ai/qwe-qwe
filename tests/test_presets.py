@@ -1,9 +1,14 @@
 """Tests for presets.py — load, validate, install, activate, uninstall.
 
 Each test uses a fresh tempdir as QWE_DATA_DIR so we never touch the user's
-real ~/.qwe-qwe. Modules are reloaded per-test-class to pick up the temp path.
+real ~/.qwe-qwe. The module-scoped ``_preset_env`` fixture points the data
+dir at a tempdir and reloads the core modules; it's autouse so every test
+in this file picks it up automatically. All env and module-state changes
+are reverted via ``monkeypatch`` at end of module, so sibling test files
+see pristine state.
 """
 
+import importlib
 import json
 import os
 import shutil
@@ -12,7 +17,57 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
+
+
+# ── Environment isolation (autouse module-scoped fixture) ──────────────
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _preset_env():
+    """Point QWE_DATA_DIR at a fresh tempdir, reload core modules, clean up."""
+    original_data_dir = os.environ.get("QWE_DATA_DIR")
+    tmp_root = Path(tempfile.mkdtemp(prefix="qwe_preset_test_"))
+    os.environ["QWE_DATA_DIR"] = str(tmp_root)
+    _reload_modules()
+    try:
+        yield tmp_root
+    finally:
+        _close_db()
+        if original_data_dir is not None:
+            os.environ["QWE_DATA_DIR"] = original_data_dir
+        else:
+            os.environ.pop("QWE_DATA_DIR", None)
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        _reload_modules()
+
+
+def _close_db():
+    """Drop any stale db connection before config reload."""
+    db_mod = sys.modules.get("db")
+    if db_mod is None:
+        return
+    try:
+        _local = getattr(db_mod, "_local", None)
+        conn = getattr(_local, "conn", None) if _local else None
+        if conn is not None:
+            conn.close()
+        if _local is not None:
+            _local.conn = None
+        db_mod._migrated = False
+    except Exception:
+        pass
+
+
+def _reload_modules():
+    """Fresh config + db + presets + soul import. Clears db connection state."""
+    _close_db()
+    for mod in ("config", "db", "soul", "presets"):
+        if mod in sys.modules:
+            importlib.reload(sys.modules[mod])
+        else:
+            importlib.import_module(mod)
 
 
 # ── Fixture helpers ─────────────────────────────────────────────────────
@@ -72,55 +127,6 @@ def _zip_fixture(preset_dir: Path, archive_path: Path) -> Path:
             if f.is_file():
                 zf.write(f, f.relative_to(preset_dir))
     return archive_path
-
-
-# ── Environment isolation ──────────────────────────────────────────────
-
-_original_data_dir = None
-_tmp_root: Path | None = None
-
-
-def setup_module(module):
-    """Point QWE_DATA_DIR at a fresh tempdir and reload config/db/presets."""
-    global _original_data_dir, _tmp_root
-    _original_data_dir = os.environ.get("QWE_DATA_DIR")
-    _tmp_root = Path(tempfile.mkdtemp(prefix="qwe_preset_test_"))
-    os.environ["QWE_DATA_DIR"] = str(_tmp_root)
-    _reload_modules()
-
-
-def teardown_module(module):
-    global _tmp_root
-    if _original_data_dir is not None:
-        os.environ["QWE_DATA_DIR"] = _original_data_dir
-    else:
-        os.environ.pop("QWE_DATA_DIR", None)
-    if _tmp_root and _tmp_root.exists():
-        shutil.rmtree(_tmp_root, ignore_errors=True)
-    # Reload modules back to normal data dir so other tests don't see stale state
-    _reload_modules()
-
-
-def _reload_modules():
-    """Fresh config + db + presets + soul import. Clears db connection state."""
-    import importlib
-    # Close + drop stale db connection if present
-    if "db" in sys.modules:
-        try:
-            conn = getattr(sys.modules["db"]._local, "conn", None)
-            if conn is not None:
-                conn.close()
-            sys.modules["db"]._local.conn = None
-            sys.modules["db"]._migrated = False
-        except Exception:
-            pass
-    # Explicit order: config → db → soul → presets
-    # (soul imports db at module load; presets imports soul lazily)
-    for mod in ("config", "db", "soul", "presets"):
-        if mod in sys.modules:
-            importlib.reload(sys.modules[mod])
-        else:
-            importlib.import_module(mod)
 
 
 def _reset_db():
@@ -974,8 +980,33 @@ def test_add_trusted_pubkey_rejects_garbage():
 
 # ── Manual runner (we lack pytest in the venv) ─────────────────────────
 
+def _run_manually():
+    """Kept for historical manual-runner invocations.
+
+    The fixture-based version runs under pytest; when invoked standalone we
+    replicate the old setup/teardown inline.
+    """
+    original = os.environ.get("QWE_DATA_DIR")
+    tmp_root = Path(tempfile.mkdtemp(prefix="qwe_preset_test_"))
+    os.environ["QWE_DATA_DIR"] = str(tmp_root)
+    _reload_modules()
+
+
+def _cleanup_manually(tmp_root, original):
+    if original is not None:
+        os.environ["QWE_DATA_DIR"] = original
+    else:
+        os.environ.pop("QWE_DATA_DIR", None)
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    _reload_modules()
+
+
 if __name__ == "__main__":
-    setup_module(None)
+    _original = os.environ.get("QWE_DATA_DIR")
+    _tmp_root = Path(tempfile.mkdtemp(prefix="qwe_preset_test_"))
+    os.environ["QWE_DATA_DIR"] = str(_tmp_root)
+    _reload_modules()
     tests = [
         test_load_directory,
         test_load_archive,
@@ -1029,6 +1060,6 @@ if __name__ == "__main__":
             print(f"  FAIL {fn.__name__}: {e}")
             import traceback
             traceback.print_exc()
-    teardown_module(None)
+    _cleanup_manually(_tmp_root, _original)
     print(f"\n{len(tests) - failures}/{len(tests)} passed")
     sys.exit(1 if failures else 0)

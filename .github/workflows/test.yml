@@ -64,18 +64,4 @@ jobs:
           "
 
       - name: Run tests
-        # Run each test file in its own pytest process. Several legacy test
-        # files (test_config, test_experience, test_presets, test_reliability,
-        # test_server_presets) inject mock modules into sys.modules at import
-        # time. pytest collects every test file up front, so those mocks leak
-        # to sibling files when they do `from memory import X` at test-function
-        # scope, breaking 60+ tests. Running file-by-file gives each one a
-        # fresh Python process with clean sys.modules.
-        run: |
-          fail=0
-          for t in tests/test_*.py; do
-            echo "::group::$t"
-            pytest "$t" -v || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
+        run: pytest tests/ -v
