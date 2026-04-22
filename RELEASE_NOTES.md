@@ -1,46 +1,39 @@
-# v0.17.8 — Context Window panel shows real numbers
+# v0.17.9 — Recalled memories panel now shows the real recall
 
-Before: the big gauge in the right Inspector said "108 / 24k, 0.4%" while the model was actually receiving **3 452** prompt tokens per turn. That's the number that matters — not the thread-history estimate. You couldn't tell from the UI how close you were to actually running out of context.
+Before: the Inspector's "Recalled memories" panel claimed to show what the agent remembered to answer you. In practice it ran a **separate** query against the RAG knowledge base (uploaded files) using the last user message as a string — a speculative preview, not what the agent actually saw. The WebSocket handler had a `recall` event wired, but no code on the server ever emitted it.
+
+Now the panel shows the exact items the agent's `_build_context()` injected into the system prompt this turn.
 
 ## 🔧 What changed
 
-The **Context Window** panel is now a real gauge of model capacity.
+### Server side
 
-### New numerator: `prompt_tokens` from the last API call
+- `agent._recall_callback` + `_emit_recall(list)` helper — same pattern as `_content_callback` / `_thinking_callback`.
+- `agent._auto_context()` rewritten to collect a structured list alongside the text lines it builds for the prompt. Items carry `{tag, text, score, source}` where `source` ∈ `thread / wiki / entity / cross_thread / experience`. Emitted via `_emit_recall()` right before the text is returned, so the UI sees the same slice the model is about to see.
+- Dedup is shared between text and structured list — one can't drift from the other.
+- `server.py` WS handler wires `_queue_recall` that pushes `{type: "recall", memories: [...]}` onto the stream queue.
 
-Pulled from `usage.prompt_tokens` on the OpenAI-compatible response. This is the **actual** size of the prompt that left your machine — system prompt + tool schemas + soul + memory recalls + conversation history + recent tool results, all combined. This is what determines whether the model has room to keep going.
+### UI side
 
-### New denominator: the model's real context window
+- WS `recall` handler now normalizes `score → relevance` + preserves `source` + sets `state.memoryPillsReal = true` so the panel knows the data is authoritative.
+- `fetchRecalledMemories()` (the knowledge-base fallback) only runs when `memoryPillsReal` is false or the user explicitly clicks refresh. No more clobbering live data with a speculative KB search.
+- Panel badge:
+  - **`live`** (green) when the data came from the agent's actual recall.
+  - **`preview`** (muted) when it's a knowledge-base preview from the fallback.
+  - Tooltip on both explains what it means.
+- Each memory pill shows the source (`thread` / `wiki` / `entity` / `cross_thread` / `experience`) so you can see *where* the agent found it.
+- Empty state text rewritten to explain what the panel actually does.
+- `memoryPillsReal` is reset on thread switch / new chat so a stale "live" badge doesn't carry over.
 
-Priority chain in `/api/status`:
+## What the sources mean
 
-1. **Manual override** — `Settings → Inference → model_context` (new setting, 0 = auto).
-2. **Auto-detected** — polled from the active provider:
-   - **LM Studio** (`/api/v0/models`) — reads `loaded_context_length` per model.
-   - **Ollama** (`/api/show`) — reads `*.context_length` from modelinfo.
-3. **`ollama_num_ctx`** fallback when provider is Ollama.
-4. **Unknown** — panel shows `?` with a tooltip pointing to the setting.
-
-Cached for 60s per (provider, model) to avoid hitting the provider every render.
-
-### Colour coding
-
-| % of context | Colour |
-|---|---|
-| <50% | green |
-| 50–75% | accent |
-| 75–90% | warn |
-| ≥90% | error |
-
-### Mini-stats reshuffled
-
-The bottom cards used to show `INPUT` + `OUTPUT`. `INPUT` was redundant with the new top gauge, so it's gone. Cards now show:
-
-| OUTPUT | TOK/SEC | HISTORY |
+| Source | Where it comes from | Scope |
 |---|---|---|
-| completion tokens last turn | decode speed | thread history estimate (for reference) |
-
-Auto-sizing grid (1-3 cells via CSS `auto-fit`).
+| `thread` | Qdrant hybrid search scoped to **this** thread | Highest priority — local context |
+| `wiki` | Synthesized markdown pages from night synthesis | High quality — cross-thread |
+| `entity` | Graph nodes with typed relations (`rel→target`) | Structured knowledge |
+| `cross_thread` | Synthesized tags (`fact`, `knowledge`, `user`, `project`, `decision`, `idea`) | Never raw messages from other threads |
+| `experience` | Proven task patterns (success-weighted) | Only when `experience_learning` is on |
 
 ## 📦 Upgrade
 
@@ -49,6 +42,6 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-If you see `?` in the gauge: your provider didn't report context length. Go to **Settings → Inference → model_context** and punch in the value manually (e.g. 32768 for most Qwen/Llama finetunes, 131072 for Gemma 3 27B IT, etc.).
+Send a message — the panel should tag **live** and show items as the agent's `_build_context()` picked them. Hover any pill to see the source.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

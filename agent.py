@@ -77,6 +77,22 @@ def _emit_tool_call(name: str, args_preview: str, result_preview: str = ""):
             pass
 
 
+_recall_callback = None  # set by server.py — receives list[{tag,text,score,source}]
+
+
+def _emit_recall(memories: list[dict]):
+    """Emit the memories that were auto-injected into the system prompt.
+
+    UI uses this to render the real 'Recalled memories' panel — the items
+    the agent actually saw, not a speculative knowledge-base search.
+    """
+    if _recall_callback and memories:
+        try:
+            _recall_callback(memories)
+        except Exception:
+            pass
+
+
 def _resize_image_b64(b64: str, max_area: int = 49152, quality: int = 80) -> str:
     """Resize image to fit within *max_area* pixels and re-encode as JPEG."""
     try:
@@ -641,6 +657,28 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
     try:
         seen_texts = set()
         lines = ["[Relevant context from memory:]"]
+        # Structured recall list for UI streaming (mirrors `lines` 1:1 but with
+        # metadata). Each item: {tag, text, score, source}. Emitted via
+        # _emit_recall() right before we return so the Inspector panel shows
+        # the exact memories the agent is about to see.
+        recalled: list[dict] = []
+
+        def _add(r: dict, source: str, tag: str | None = None, extra: str = ""):
+            """Append to both the text prompt and the structured recall list."""
+            t = tag or r.get("tag", "memory")
+            text = r["text"]
+            if text in seen_texts:
+                return False
+            seen_texts.add(text)
+            display = f"{text}{extra}" if extra else text
+            lines.append(f"- [{t}] {display}")
+            recalled.append({
+                "tag": t,
+                "text": text[:400],  # cap for WS payload
+                "score": round(float(r.get("score") or 0), 3),
+                "source": source,
+            })
+            return True
 
         # Compute embedding once (FastEmbed, no network)
         try:
@@ -656,9 +694,7 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                 score_threshold=MEMORY_SCORE_MIN,
             )
             for r in thread_results:
-                if r["text"] not in seen_texts:
-                    lines.append(f"- [{r['tag']}] {r['text']}")
-                    seen_texts.add(r["text"])
+                _add(r, source="thread")
 
         # Wiki/entity search first (synthesized knowledge = higher quality)
         wiki_results = memory.search_by_vector(
@@ -667,9 +703,7 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
             score_threshold=MEMORY_SCORE_MIN,
         )
         for r in wiki_results:
-            if r["text"] not in seen_texts:
-                lines.append(f"- [wiki] {r['text']}")
-                seen_texts.add(r["text"])
+            _add(r, source="wiki", tag="wiki")
 
         # Relation expansion: if entity found, follow links to related wiki
         entity_results = memory.search_by_vector(
@@ -679,17 +713,15 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         )
         for e in entity_results:
             relations = e.get("relations", [])
-            if relations and e["text"] not in seen_texts:
+            if relations:
                 rel_names = ", ".join(f"{r['rel']}→{r['to']}" for r in relations[:5])
-                lines.append(f"- [entity] {e['text']} ({rel_names})")
-                seen_texts.add(e["text"])
+                _add(e, source="entity", tag="entity", extra=f" ({rel_names})")
 
         # Global search (fill remaining slots).
         # Session isolation: only cross-thread SYNTHESIZED knowledge (fact/knowledge/user/project/decision/idea) —
         # NOT raw messages from other threads.
         max_memory = config.get("max_memory_results")
-        remaining = max_memory - (len(lines) - 1)
-        if remaining > 0:
+        if (max_memory - (len(lines) - 1)) > 0:
             _CROSS_THREAD_TAGS = ("fact", "knowledge", "user", "project", "decision", "idea")
             for _tag in _CROSS_THREAD_TAGS:
                 if len(lines) - 1 >= max_memory:
@@ -702,9 +734,7 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                 for r in tag_results:
                     if len(lines) - 1 >= max_memory:
                         break
-                    if r["text"] not in seen_texts:
-                        lines.append(f"- [{r['tag']}] {r['text']}")
-                        seen_texts.add(r["text"])
+                    _add(r, source="cross_thread")
 
         # Experience cases (higher threshold — only proven patterns)
         if config.get("experience_learning"):
@@ -723,6 +753,12 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                 if effective > 0.4 and r["text"] not in seen_texts:
                     exp_lines.append(f"- {r['text']}")
                     seen_texts.add(r["text"])
+                    recalled.append({
+                        "tag": "experience",
+                        "text": r["text"][:400],
+                        "score": round(float(effective), 3),
+                        "source": "experience",
+                    })
             if exp_lines:
                 lines.append("")
                 lines.append("[Relevant past experiences:]")
@@ -731,6 +767,8 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         hits = sum(1 for l in lines if l.startswith("- "))
         if hits > 0:
             _log.info(f"auto_context: {hits} items injected (thread={thread_id or 'global'})")
+        # Stream the structured list to the UI (no-op if no callback wired)
+        _emit_recall(recalled)
         if len(lines) == 1:
             return ""
         return "\n".join(lines)

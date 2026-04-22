@@ -1763,7 +1763,20 @@ const handleWsMessage = (msg) => {
     if (tool) { tool.status = msg.error ? 'err' : 'ok'; tool.result = msg.result || msg.output || ''; }
   }
   else if (t === 'memory_recall' || t === 'recall') {
-    if (msg.memories) state.memoryPills = msg.memories.slice(0, 12);
+    if (msg.memories) {
+      // Normalize server shape {tag,text,score,source} → UI shape
+      // {relevance, tag, text, source}. Mark as authoritative so the
+      // /api/knowledge/search fallback stops clobbering it.
+      state.memoryPills = msg.memories.slice(0, 12).map(m => ({
+        relevance: typeof m.relevance === 'number' ? m.relevance
+                 : (typeof m.score === 'number' ? m.score : 0.5),
+        tag: m.tag || 'memory',
+        text: m.text || '',
+        source: m.source || '',
+        age: m.age || '',
+      }));
+      state.memoryPillsReal = true;  // from agent._build_context
+    }
   }
   else if (t === 'reply' || t === 'done' || t === 'end' || t === 'finish') {
     if (s) {
@@ -2252,6 +2265,7 @@ function hydrateInspectorFromHistory() {
   state.tokenTimeline = [];
   state.lastTurn = null;
   state.memoryPills = [];
+  state.memoryPillsReal = false;  // live recall only arrives on fresh turns
   for (const m of state.messages) {
     const meta = m._meta || {};
     if (m.role !== 'assistant') continue;
@@ -2282,6 +2296,7 @@ async function switchThread(id) {
   state.lastTurn = null;
   state.tokenTimeline = [];
   state.memoryPills = [];
+  state.memoryPillsReal = false;
   state.kbRecallSessionTotal = 0;
   render();
   try { await api('/api/threads/' + id + '/switch', { method: 'POST' }); } catch {}
@@ -2311,6 +2326,12 @@ async function loadStatus(opts) {
 }
 
 async function fetchRecalledMemories(opts) {
+  // WS 'recall' event is the source of truth — it contains what the agent
+  // actually saw in the system prompt. Only run this fallback when no real
+  // recall has arrived yet (e.g. a reload hit a thread with pre-WS history,
+  // or the user clicked refresh manually) AND not forced by caller.
+  const forced = opts && opts.force;
+  if (state.memoryPillsReal && !forced) return;
   const lastUser = [...state.messages].reverse().find(m => m.role === 'user');
   if (!lastUser || !lastUser.content) return;
   const query = lastUser.content.slice(0, 200);
@@ -2322,9 +2343,10 @@ async function fetchRecalledMemories(opts) {
       tag: (x.tags && x.tags[0]) || x.tag || 'memory',
       age: x.indexed_at ? fmtTime(x.indexed_at) : '',
       text: (x.text || x.content || x.name || '').slice(0, 200),
+      source: 'knowledge_base',
     }));
     state.kbRecallSessionTotal = (state.kbRecallSessionTotal || 0) + state.memoryPills.length;
-    // Silent path: let callers decide how to surface (e.g. via surgical inspector update)
+    state.memoryPillsReal = false;  // this is a KB preview, not the real recall
     if (opts && opts.silent) return;
     render();
   } catch {}
@@ -3104,8 +3126,14 @@ function renderInspector() {
           '</div>') +
     '</div>' +
 
-    // Recalled memories — real data from /api/knowledge/search
+    // Recalled memories — live from agent._build_context() via WS 'recall'
+    // event. Shows the EXACT items the agent saw in its system prompt this
+    // turn (thread-scoped + wiki + entity + cross-thread synthesized +
+    // experience). Fallback is a knowledge-base preview (marked as such).
     '<div class="insp-section"><div class="insp-section-hdr"><h3>Recalled memories</h3><span class="count">' + pills.length + '</span>' +
+      (state.memoryPillsReal
+        ? '<span class="tag" style="font-size:9px;color:var(--ok);border-color:var(--ok)" title="What the agent actually recalled in this turn\'s system prompt">live</span>'
+        : (pills.length ? '<span class="tag" style="font-size:9px;color:var(--fg-4)" title="Preview from knowledge-base index — not what the agent itself saw. A real recall will show when the agent next runs.">preview</span>' : '')) +
       '<button class="icon-btn" data-act="recall-refresh" title="Refresh">' + ico('refresh', 11) + '</button></div>' +
       (pills.length
         ? pills.map(m =>
@@ -3113,9 +3141,10 @@ function renderInspector() {
               '<span class="rel">' + Math.round((m.relevance || 0.5) * 100) + '%</span>' +
               '<span style="width:1px;height:9px;background:var(--line-2)"></span>' +
               '<span class="tag-sm">' + esc(m.tag || 'memory') + '</span>' +
+              (m.source ? '<span class="age" title="Recall source" style="font-family:var(--font-mono);font-size:9px;opacity:0.7">' + esc(m.source) + '</span>' : '') +
               (m.age ? '<span class="age">' + esc(m.age) + '</span>' : '') +
             '</div><div class="txt">' + esc(m.text || '') + '</div></div>').join('')
-        : '<div style="font-size:11px;color:var(--fg-4);line-height:1.5">No indexed knowledge matches the last turn. Upload files on the <a href="#" data-nav="memory" style="color:var(--accent)">Memory</a> tab.</div>') +
+        : '<div style="font-size:11px;color:var(--fg-4);line-height:1.5">Send a message — the agent\'s live recall (from thread + wiki + entity + synthesized knowledge) will stream here. Or upload files on the <a href="#" data-nav="memory" style="color:var(--accent)">Memory</a> tab to seed the knowledge base.</div>') +
     '</div>' +
 
     // Active tools — chips
