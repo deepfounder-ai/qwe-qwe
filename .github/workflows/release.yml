@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout the exact commit that passed CI
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0  # need full history + tags for comparison
