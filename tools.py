@@ -1,17 +1,39 @@
 """Tool definitions and execution — optimized for small models."""
 
-import subprocess
+import base64
+import math
 import os
 import re
 import shutil
+import socket
+import ssl
+import subprocess
 import sys
 import threading
 import time
 import unicodedata
+import urllib.error
+import urllib.request
+import uuid
 from pathlib import Path
+from urllib.parse import urlparse, quote
 import config
 import memory
 import logger
+# Hoisted from former per-call imports — keeps SyntaxErrors at startup instead
+# of first-use, and prevents UnboundLocalError when a branch does a local
+# `import X` while another references the same `X` (see v0.17.7 subprocess bug).
+import db
+import mcp_client
+import providers
+import rag
+import scheduler
+import skills
+import telegram_bot
+import vault
+# NOTE: `tasks` and `server` intentionally NOT hoisted — both create circular
+# imports (tasks.py imports tools at module level; server.py imports tools at
+# module level). They stay as lazy imports inside functions.
 
 # Thread-local abort event for the currently-running tool call.
 # The agent loop sets `_current_abort_event` before each tool_executor call;
@@ -300,9 +322,9 @@ def _camera_grab_frame() -> str | None:
     Returns base64 JPEG or None.
     """
     global _camera_cap, _camera_last_frame, _camera_last_ts
-    import time as _time
 
     # Try 1: WebSocket (browser camera)
+    # lazy: `server` imports `tools` at module top — hoisting would be circular.
     try:
         from server import request_camera_frame_sync
         frame = request_camera_frame_sync(timeout=3.0)
@@ -315,7 +337,7 @@ def _camera_grab_frame() -> str | None:
     # Try 2: OpenCV persistent camera
     with _camera_lock:
         try:
-            import cv2
+            import cv2  # lazy: opencv-python is an optional heavy dep
         except ImportError:
             _log.warning("camera: opencv-python not installed")
             return None
@@ -329,7 +351,7 @@ def _camera_grab_frame() -> str | None:
                 _camera_cap = cv2.VideoCapture(cam_setting)
                 if _camera_cap.isOpened():
                     for _ in range(5): _camera_cap.read()
-                    _time.sleep(0.3)
+                    time.sleep(0.3)
                 else:
                     _log.warning(f"camera: index {cam_setting} not available")
                     _camera_cap = None
@@ -342,7 +364,7 @@ def _camera_grab_frame() -> str | None:
                     if not cap.isOpened():
                         continue
                     for _ in range(5): cap.read()
-                    _time.sleep(0.3)
+                    time.sleep(0.3)
                     ret, test_frame = cap.read()
                     if ret and test_frame.mean() > 3:
                         _camera_cap = cap
@@ -362,18 +384,16 @@ def _camera_grab_frame() -> str | None:
             return None
 
         # Resize to ~49K pixels
-        import math
         h, w = img.shape[:2]
         max_area = 49152
         if w * h > max_area:
             scale = math.sqrt(max_area / (w * h))
             img = cv2.resize(img, (int(w * scale), int(h * scale)))
 
-        import base64 as _b64
         _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        frame = _b64.b64encode(buf).decode()
+        frame = base64.b64encode(buf).decode()
         _camera_last_frame = frame
-        _camera_last_ts = _time.time()
+        _camera_last_ts = time.time()
         _log.info(f"camera: frame via OpenCV ({len(frame)} chars)")
         return frame
 
@@ -861,7 +881,6 @@ _TOOL_SEARCH_INDEX = {
 
 def _do_self_config(args: dict) -> str:
     """Read or change qwe-qwe's own settings."""
-    import db
     action = args.get("action", "list")
     key = args.get("key", "")
     value = args.get("value", "")
@@ -907,7 +926,6 @@ def _do_self_config(args: dict) -> str:
         # Auto-restart telegram bot when token changes
         if key == "telegram:bot_token" and value:
             try:
-                import telegram_bot
                 telegram_bot.stop()
                 telegram_bot.set_token(value)
                 telegram_bot.start()
@@ -921,10 +939,9 @@ def _do_self_config(args: dict) -> str:
 
 def _do_tool_search(query: str) -> str:
     """Search for tools by keyword. Returns matching tool names and activates them."""
-    import re as _re
     # Sanitize: strip hallucinated tool_call syntax, XML tags, etc.
-    query = _re.sub(r'[<>{}|"\']', ' ', query)
-    query = _re.sub(r'tool_call|call:|function', '', query, flags=_re.IGNORECASE)
+    query = re.sub(r'[<>{}|"\']', ' ', query)
+    query = re.sub(r'tool_call|call:|function', '', query, flags=re.IGNORECASE)
     query_lower = query.lower().strip().split()[0] if query.strip() else ""  # take first word only
     found = set()
 
@@ -969,11 +986,9 @@ def _do_tool_search(query: str) -> str:
 
 def _get_all_tools_full() -> list[dict]:
     """Get ALL tools (core + extended + skills + MCP) without filtering."""
-    import skills
     all_tools = list(TOOLS)
     all_tools += skills.get_tools(compact=True)
     try:
-        import mcp_client
         all_tools += mcp_client.get_all_mcp_tools()
     except Exception:
         pass
@@ -987,7 +1002,6 @@ def execute(name: str, args: dict) -> str:
     try:
         # MCP tools: mcp__servername__toolname
         if name.startswith("mcp__"):
-            import mcp_client
             return mcp_client.execute_mcp_tool(name, args)
 
         if name == "tool_search":
@@ -1068,8 +1082,7 @@ def execute(name: str, args: dict) -> str:
             if size > 50 * 1024 * 1024:
                 return f"Error: file too large ({size // 1024 // 1024} MB). Max 50 MB."
             # Copy to uploads for serving via HTTP
-            import uuid as _uuid
-            file_id = _uuid.uuid4().hex[:8]
+            file_id = uuid.uuid4().hex[:8]
             dest = Path(config.UPLOADS_DIR) / f"{file_id}_{p.name}"
             shutil.copy2(str(p), str(dest))
             url = f"/uploads/{dest.name}"
@@ -1103,11 +1116,9 @@ def execute(name: str, args: dict) -> str:
             if not frame:
                 return "Error: no camera available. Connect a webcam or enable camera in web UI."
             # Save frame to uploads so user can see it in chat
-            import uuid as _uuid
-            import base64 as _b64
-            img_id = _uuid.uuid4().hex[:8]
+            img_id = uuid.uuid4().hex[:8]
             img_path = Path(config.UPLOADS_DIR) / f"cam_{img_id}.jpg"
-            img_path.write_bytes(_b64.b64decode(frame))
+            img_path.write_bytes(base64.b64decode(frame))
             img_url = f"/uploads/cam_{img_id}.jpg"
             _pending_files.append({
                 "path": str(img_path), "name": f"cam_{img_id}.jpg",
@@ -1117,7 +1128,6 @@ def execute(name: str, args: dict) -> str:
 
             # Send frame to LLM for vision analysis — uses current active model
             prompt = args.get("prompt") or "Describe what you see in detail."
-            import providers
             try:
                 resp = providers.get_client().chat.completions.create(
                     model=providers.get_model(),
@@ -1248,7 +1258,6 @@ def execute(name: str, args: dict) -> str:
             return output.strip() or "(no output)"
 
         elif name == "schedule_task":
-            import scheduler
             result = scheduler.add(
                 args["name"], args["task"], args["schedule"],
                 skip_dry_run=args.get("skip_dry_run", False),
@@ -1267,7 +1276,6 @@ def execute(name: str, args: dict) -> str:
             return msg
 
         elif name == "list_cron":
-            import scheduler
             tasks_list = scheduler.list_tasks()
             if not tasks_list:
                 return "No scheduled tasks."
@@ -1278,50 +1286,43 @@ def execute(name: str, args: dict) -> str:
             return "\n".join(lines)
 
         elif name == "remove_cron":
-            import scheduler
             return scheduler.remove(args["task_id"])
 
         elif name == "switch_model":
-            import providers as prov
             result_parts = []
             if args.get("provider"):
-                r = prov.switch(args["provider"])
+                r = providers.switch(args["provider"])
                 result_parts.append(r)
-            r = prov.set_model(args["model"])
+            r = providers.set_model(args["model"])
             result_parts.append(r)
             return " | ".join(result_parts)
 
         elif name == "spawn_task":
+            # lazy: tasks.py imports tools at module level — hoisting is circular.
             import tasks
             task_id = tasks.spawn(args["task"])
             return f"Task #{task_id} queued: {args['task'][:60]}"
 
         elif name == "secret_save":
-            import vault
             return vault.save(args["key"], args["value"])
 
         elif name == "secret_get":
-            import vault
             val = vault.get(args["key"])
             return val if val else f"Secret '{args['key']}' not found"
 
         elif name == "secret_list":
-            import vault
             keys = vault.list_keys()
             return ", ".join(keys) if keys else "No secrets stored"
 
         elif name == "secret_delete":
-            import vault
             return vault.delete(args["key"])
 
         elif name == "user_profile_update":
-            import db
             key = args["key"].strip().lower().replace(" ", "_")
             db.kv_set(f"user:{key}", args["value"])
             return f"Profile updated: {key} = {args['value']}"
 
         elif name == "user_profile_get":
-            import db
             profile = db.kv_get_prefix("user:")
             if not profile:
                 return "No profile data yet."
@@ -1329,10 +1330,6 @@ def execute(name: str, args: dict) -> str:
             return "\n".join(lines)
 
         elif name == "http_request":
-            import urllib.request
-            import urllib.error
-            import socket
-            from urllib.parse import urlparse, quote
             url = args["url"]
             # Encode non-ASCII characters in URL (e.g. Cyrillic)
             url = quote(url, safe=':/?#[]@!$&\'()*+,;=-._~%')
@@ -1352,10 +1349,9 @@ def execute(name: str, args: dict) -> str:
             # For localhost HTTPS, skip SSL verification (self-signed certs are normal)
             ssl_ctx = None
             if parsed.scheme == "https" and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
-                import ssl as _ssl
-                ssl_ctx = _ssl.create_default_context()
+                ssl_ctx = ssl.create_default_context()
                 ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = _ssl.CERT_NONE
+                ssl_ctx.verify_mode = ssl.CERT_NONE
             # Short timeout so aborts aren't blocked for 15s.
             # urllib.request.urlopen has no built-in abort hook — we rely on the
             # 5s socket timeout plus abort-event checks before and after.
@@ -1386,7 +1382,6 @@ def execute(name: str, args: dict) -> str:
                 return f"HTTP error: {e}"
 
         elif name == "rag_index":
-            import rag
             raw_path = _get_path_arg(args)
             if not raw_path:
                 return "Error: missing required argument 'path'"
@@ -1401,7 +1396,6 @@ def execute(name: str, args: dict) -> str:
                 return f"{result['path']}: {result['status']} ({result['chunks']} chunks)"
 
         elif name == "rag_search":
-            import rag
             results = rag.search(args["query"], limit=args.get("limit", 5))
             if not results:
                 return "No results found. Try indexing files first with rag_index."
@@ -1413,13 +1407,11 @@ def execute(name: str, args: dict) -> str:
             return "\n".join(lines)
 
         elif name == "rag_status":
-            import rag
             s = rag.get_status()
             return f"RAG index: {s['files']} files, {s['chunks']} chunks"
 
         else:
             # Try skills
-            import skills
             result = skills.execute(name, args)
             if result is not None:
                 return result
@@ -1451,8 +1443,7 @@ def get_all_tools(compact: bool = False) -> list[dict]:
     # Check if hidden skills are active — their tools bypass tool_search
     global _spicy_duck_on
     if _spicy_duck_on is None:
-        import db as _db
-        _spicy_duck_on = _db.kv_get("spicy_duck") == "quack"
+        _spicy_duck_on = db.kv_get("spicy_duck") == "quack"
     _always_on = set()
     if _spicy_duck_on:
         _always_on.update({"lovense_connect", "lovense_vibrate", "lovense_pattern",

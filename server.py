@@ -17,15 +17,43 @@ signal.signal(signal.SIGINT, _signal_handler)
 
 import asyncio
 import base64
+import functools
 import hashlib
 import hmac
+import ipaddress
 import json
+import re
+import shutil
+import socket
+import subprocess
 import time
 import os
 import threading
+import urllib.request
+import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
+
+import requests
+# Hoisted from former per-route imports. Keeps SyntaxErrors/ImportErrors at
+# startup rather than on the first API call, prevents UnboundLocalError from
+# half-shadowed names (see v0.17.7 `subprocess` bug), and trims first-hit
+# latency. `rag`, `tasks`, `presets`, `skills`, `mcp_client`, `scheduler`,
+# `stt`, `tts`, `updater`, `discovery`, `vault` are all light at module load
+# (heavy init is lazy inside their own functions).
+import discovery
+import mcp_client
+import presets
+import rag
+import scheduler
+import skills
+import stt
+import tasks
 import tools
+import tts
+import updater
+import vault
 
 # Global abort flag — used by legacy REST callers of _run_agent_sync() that
 # don't supply their own per-request event (e.g. the /api/abort endpoint).
@@ -56,8 +84,7 @@ _knowledge_history: _deque = _deque(maxlen=20)
 
 def _push_history(entry: dict):
     """Record a completed indexing run for /api/knowledge/recent."""
-    import time as _t
-    entry.setdefault("ts", _t.time())
+    entry.setdefault("ts", time.time())
     _knowledge_history.appendleft(entry)
 
 # Camera frame request/response system — allows agent tools to capture frames on demand
@@ -274,17 +301,14 @@ async def lifespan(app: FastAPI):
         _log.warning(f"uploads sweep error: {e}")
     # Restore preset workspace + thread if a preset was active before restart
     try:
-        import presets as _presets
-        active_preset = _presets.get_active()
+        active_preset = presets.get_active()
         if active_preset:
-            _presets.ensure_preset_workspace(active_preset)
+            presets.ensure_preset_workspace(active_preset)
     except Exception:
         pass
-    import scheduler
     scheduler.start()
     # Start MCP servers
     try:
-        import mcp_client
         mcp_client.start_all()
     except Exception as e:
         _log.warning(f"MCP startup: {e}")
@@ -302,7 +326,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
-        import mcp_client
         mcp_client.stop_all()
     except Exception:
         pass
@@ -436,7 +459,6 @@ def _safe_print(text: str) -> None:
 
 def _get_lan_ip() -> str | None:
     """Discover this machine's LAN IP via a UDP connect to 8.8.8.8."""
-    import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -462,9 +484,6 @@ async def _stage_upload(request: Request, subdir: str, default_name: str = "file
     returns, no Starlette form or UploadFile objects remain reachable, so
     their temp files are released promptly.
     """
-    import uuid as _uuid
-    import re as _re
-
     content_type = request.headers.get("content-type", "")
     if "multipart" not in content_type:
         return JSONResponse({"error": "multipart/form-data required"}, status_code=400)
@@ -484,13 +503,13 @@ async def _stage_upload(request: Request, subdir: str, default_name: str = "file
 
         fname_raw = getattr(file, "filename", None) or default_name
         # Path(fname_raw).name strips directory traversal from browser-supplied names.
-        fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:100] or default_name
+        fname_safe = re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:100] or default_name
         stem = Path(fname_safe).stem
         ext = Path(fname_safe).suffix or ""
 
         target_dir = UPLOADS_DIR / subdir
         target_dir.mkdir(parents=True, exist_ok=True)
-        doc_id = _uuid.uuid4().hex[:8]
+        doc_id = uuid.uuid4().hex[:8]
         save_path = target_dir / f"{doc_id}_{stem}{ext}"
         save_path.write_bytes(data)
 
@@ -545,8 +564,6 @@ def _extract_file_text(filepath: Path, max_chars: int = 8000) -> str:
 @app.post("/api/upload")
 async def upload_image(request: Request):
     """Upload an image file. Returns image_id for use in chat."""
-    import base64
-    import uuid
     content_type = request.headers.get("content-type", "")
 
     if "multipart" in content_type:
@@ -585,7 +602,6 @@ async def upload_image(request: Request):
 @app.post("/api/transcribe")
 async def transcribe_audio(request: Request):
     """Transcribe audio to text via STT."""
-    import stt
     if not stt.is_available():
         return JSONResponse({"error": "STT not available. Install: pip install faster-whisper"}, status_code=503)
 
@@ -607,7 +623,6 @@ async def transcribe_audio(request: Request):
         filename = f"audio.{body.get('format', 'webm')}"
 
     fmt = Path(filename).suffix.lstrip(".") or "webm"
-    import functools
     loop = asyncio.get_event_loop()
     try:
         text = await loop.run_in_executor(
@@ -625,7 +640,6 @@ async def transcribe_audio(request: Request):
 @app.post("/api/tts")
 async def text_to_speech(request: Request):
     """Synthesize text to audio via Fish Audio TTS."""
-    import tts
     if not tts.is_available():
         return JSONResponse({"error": "TTS not configured"}, status_code=503)
 
@@ -634,7 +648,6 @@ async def text_to_speech(request: Request):
     if not text:
         return JSONResponse({"error": "empty text"}, status_code=400)
 
-    import functools
     loop = asyncio.get_event_loop()
     audio = await loop.run_in_executor(
         None, functools.partial(tts.synthesize, text, format="wav")
@@ -649,15 +662,12 @@ async def text_to_speech(request: Request):
 @app.get("/api/voice/status")
 async def voice_status():
     """Check STT/TTS availability with details."""
-    import stt
-    import tts
     # Check faster-whisper
     has_whisper = stt._check_faster_whisper()
     # Check audio decoder (ffmpeg CLI or bundled PyAV)
-    import shutil
     has_ffmpeg_cli = shutil.which("ffmpeg") is not None
     try:
-        import av  # noqa: F401
+        import av  # noqa: F401  # lazy: PyAV is optional, only used for ffmpeg fallback
         has_pyav = True
     except ImportError:
         has_pyav = False
@@ -688,7 +698,6 @@ async def voice_status():
 @app.post("/api/voice/install-whisper")
 async def install_whisper():
     """Install faster-whisper via pip."""
-    import subprocess
     try:
         proc = await asyncio.get_event_loop().run_in_executor(
             None, lambda: subprocess.run(
@@ -698,9 +707,8 @@ async def install_whisper():
         )
         if proc.returncode == 0:
             # Reset cached import check
-            import stt as _stt_mod
-            _stt_mod._HAS_FASTER_WHISPER = None
-            _stt_mod._check_faster_whisper()
+            stt._HAS_FASTER_WHISPER = None
+            stt._check_faster_whisper()
             return {"ok": True, "message": "faster-whisper installed successfully"}
         return {"ok": False, "error": proc.stderr[:500]}
     except Exception as e:
@@ -717,7 +725,6 @@ async def get_voice_mode():
 @app.post("/api/voice/mode")
 async def toggle_voice_mode():
     """Toggle voice mode for web UI."""
-    import tts
     current = db.kv_get("voice_mode:web") == "1"
     new_val = not current
     if new_val and not tts.is_available():
@@ -747,12 +754,10 @@ async def status():
     except Exception:
         pass
 
-    import skills
     active_skills = sorted(skills.get_active())
 
     # Ground-truth core tools from tools.TOOLS — don't let the UI hardcode a
     # different list that drifts from reality.
-    import tools
     core_tools = sorted(t["function"]["name"] for t in tools.TOOLS)
 
     active_thread = threads.get(threads.get_active_id())
@@ -801,8 +806,7 @@ def _check_version_sync() -> dict:
     """Check current version vs latest GitHub release (sync, for thread pool)."""
     # Read version from pyproject.toml (not importlib.metadata which caches stale values)
     try:
-        from updater import _current_version
-        current = _current_version()
+        current = updater._current_version()
     except Exception:
         try:
             import importlib.metadata
@@ -819,7 +823,6 @@ def _check_version_sync() -> dict:
     # Re-check every 6 hours
     if not cached or not cached_at or (now - float(cached_at)) > 21600:
         try:
-            import urllib.request
             req = urllib.request.Request(
                 "https://api.github.com/repos/deepfounder-ai/qwe-qwe/releases/latest",
                 headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "qwe-qwe"}
@@ -837,6 +840,8 @@ def _check_version_sync() -> dict:
     update_available = False
     if latest and current:
         try:
+            # lazy: `packaging` isn't a declared dep — fall through to string
+            # compare if missing.
             from packaging.version import Version
             update_available = Version(latest) > Version(current)
         except Exception:
@@ -859,7 +864,6 @@ _update_status = {"running": False, "result": None}
 @app.get("/api/update/check")
 async def update_check():
     """Check if update is available (uses git fetch)."""
-    import updater
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, updater.check)
 
@@ -869,8 +873,6 @@ async def trigger_update():
     """Trigger a full update. Progress broadcast via WebSocket."""
     if _update_status["running"]:
         return JSONResponse({"error": "Update already in progress"}, status_code=409)
-
-    import updater
 
     def _run():
         _update_status["running"] = True
@@ -902,7 +904,6 @@ async def trigger_update():
             except Exception:
                 pass
 
-    import threading
     threading.Thread(target=_run, daemon=True).start()
     return {"started": True}
 
@@ -916,8 +917,6 @@ async def update_status():
 @app.post("/api/update/restart")
 async def trigger_restart():
     """Restart the server process after update."""
-    import updater
-
     async def _delayed_restart():
         await asyncio.sleep(1)  # let response reach client
         updater.restart_process()
@@ -980,7 +979,6 @@ async def get_heartbeat():
 @app.post("/api/heartbeat")
 async def update_heartbeat(request: Request):
     """Manage heartbeat: add/remove items, toggle on/off."""
-    import scheduler
     req = await request.json()
     action = req.get("action", "")
 
@@ -1020,7 +1018,6 @@ async def update_heartbeat(request: Request):
 @app.get("/api/discover")
 async def discover_servers():
     """Auto-discover LLM servers on localhost."""
-    import discovery
     loop = asyncio.get_event_loop()
     results = await loop.run_in_executor(None, discovery.discover)
     return {"servers": results}
@@ -1064,10 +1061,9 @@ async def setup_save(request: Request):
         if req.get("api_key"):
             providers.set_key(prov, req["api_key"])
         if req.get("endpoint"):
-            import json as _j
             p = providers.get_provider(prov)
             p["url"] = req["endpoint"]
-            db.kv_set(f"provider:config:{prov}", _j.dumps(p))
+            db.kv_set(f"provider:config:{prov}", json.dumps(p))
         # Now switch (key is already set)
         result = providers.switch(prov)
         logger.event("provider_switch", provider=prov, result=result)
@@ -1140,14 +1136,12 @@ async def logs(file: str = "qwe-qwe.log", lines: int = 50):
 @app.get("/api/secrets")
 async def list_secrets():
     """List secret keys (no values!)."""
-    import vault
     return vault.list_keys()
 
 
 @app.post("/api/secrets")
 async def put_secret(data: dict):
     """Encrypt and store a secret. Body: ``{"key": "name", "value": "token"}``."""
-    import vault
     key = (data.get("key") or "").strip()
     value = data.get("value", "")
     if not key:
@@ -1160,7 +1154,6 @@ async def put_secret(data: dict):
 @app.delete("/api/secrets/{key}")
 async def delete_secret(key: str):
     """Delete a secret."""
-    import vault
     return {"result": vault.delete(key)}
 
 
@@ -1202,8 +1195,9 @@ async def list_cameras():
     def _scan_sync():
         cameras = []
         try:
+            # lazy: cv2 is a heavy optional dep (opencv-python). base64 is
+            # at module top.
             import cv2
-            import base64
             for i in range(5):
                 cap = cv2.VideoCapture(i)
                 if not cap.isOpened():
@@ -1211,7 +1205,7 @@ async def list_cameras():
                 # Warm up
                 for _ in range(5):
                     cap.read()
-                import time; time.sleep(0.2)
+                time.sleep(0.2)
                 ret, frame = cap.read()
                 cap.release()
                 if not ret:
@@ -1260,8 +1254,7 @@ async def request_camera_frame(timeout: float = 5.0) -> str | None:
     Returns base64 JPEG or None if no client/camera available.
     Called by agent tools (camera_capture) from background thread.
     """
-    import uuid as _uuid
-    req_id = _uuid.uuid4().hex[:8]
+    req_id = uuid.uuid4().hex[:8]
     event = asyncio.Event()
     _pending_frame_requests[req_id] = {"event": event, "image_b64": None}
 
@@ -1393,7 +1386,6 @@ async def kv_set(request: Request):
 @app.get("/api/config/export")
 async def export_config_endpoint():
     """Export all settings as downloadable JSON."""
-    import time
     data = config.export_config()
     filename = f"qwe-qwe-config-{time.strftime('%Y%m%d')}.json"
     return Response(
@@ -1465,14 +1457,12 @@ async def add_provider(data: dict):
 @app.get("/api/cron")
 async def list_cron():
     """List scheduled tasks."""
-    import scheduler
     return scheduler.list_tasks()
 
 
 @app.post("/api/cron")
 async def add_cron(data: dict):
     """Add a scheduled task."""
-    import scheduler
     result = scheduler.add(data.get("name",""), data.get("task",""), data.get("schedule",""))
     return result
 
@@ -1480,15 +1470,13 @@ async def add_cron(data: dict):
 @app.delete("/api/cron/{task_id}")
 async def remove_cron(task_id: int):
     """Remove a scheduled task."""
-    import scheduler
     return {"result": scheduler.remove(task_id)}
 
 
 @app.get("/api/tasks")
 async def list_tasks():
     """Get background task results."""
-    import tasks as t
-    return {"pending": t.pending_count(), "results": t.get_results(clear=False)}
+    return {"pending": tasks.pending_count(), "results": tasks.get_results(clear=False)}
 
 
 # ── Knowledge Upload endpoints ──
@@ -1506,7 +1494,6 @@ def _emit_knowledge(data: dict):
 def _run_knowledge_index(task_id: int, files: list[dict], tags: list[str] | None = None):
     """Background knowledge indexing thread."""
     global _knowledge_task
-    import rag
 
     errors = []
     results = []
@@ -1557,14 +1544,12 @@ def _run_knowledge_index(task_id: int, files: list[dict], tags: list[str] | None
     })
 
     # Update tasks registry
-    import tasks as t
-    t.update(task_id, "done", f"Indexed {len(results)} files, {total_chunks} chunks")
+    tasks.update(task_id, "done", f"Indexed {len(results)} files, {total_chunks} chunks")
 
     # Record in recent-activity history
-    import time as _t
     started = 0
     with _knowledge_lock:
-        started = (_knowledge_task or {}).get("started_at", _t.time()) if _knowledge_task else _t.time()
+        started = (_knowledge_task or {}).get("started_at", time.time()) if _knowledge_task else time.time()
     _push_history({
         "kind": "batch" if len(files) > 1 else "file",
         "label": (files[0].get("path") or files[0].get("url", ""))[:120] if files else "(batch)",
@@ -1572,14 +1557,13 @@ def _run_knowledge_index(task_id: int, files: list[dict], tags: list[str] | None
         "chunks": total_chunks,
         "files": len(results),
         "errors_count": len(errors),
-        "duration_sec": round(_t.time() - started, 2),
+        "duration_sec": round(time.time() - started, 2),
         "converter": "markitdown",
     })
 
     # Keep result visible for polling clients, then clear after 10s
     def _clear_task():
-        import time as _t
-        _t.sleep(10)
+        time.sleep(10)
         with _knowledge_lock:
             global _knowledge_task
             _knowledge_task = None
@@ -1591,8 +1575,6 @@ def _run_knowledge_index(task_id: int, files: list[dict], tags: list[str] | None
 @app.get("/api/files/browse")
 async def file_browse(request: Request):
     """Browse directory contents for Knowledge file picker."""
-    import rag
-
     params = request.query_params
     home = str(Path.home())
     raw_path = params.get("path", home)
@@ -1677,7 +1659,6 @@ async def file_browse(request: Request):
 @app.get("/api/presets")
 async def presets_list():
     """List all installed presets."""
-    import presets
     return {"items": presets.list_installed(), "active": presets.get_active()}
 
 
@@ -1689,7 +1670,6 @@ async def presets_list():
 @app.get("/api/presets/onboarding")
 async def presets_onboarding():
     """Get onboarding content for the active preset."""
-    import presets
     if not presets.should_show_onboarding():
         return {"show": False}
     text = presets.get_onboarding()
@@ -1703,7 +1683,6 @@ async def presets_onboarding():
 @app.post("/api/presets/deactivate")
 async def presets_deactivate():
     """Deactivate the current preset (restores the soul backup)."""
-    import presets
     current = presets.get_active()
     if not current:
         return {"ok": True, "was_active": None}
@@ -1714,8 +1693,6 @@ async def presets_deactivate():
 @app.post("/api/presets/install")
 async def presets_install(request: Request):
     """Upload and install a .qwp archive from the user's computer."""
-    import presets
-
     _log.info("preset install: upload started")
     staged = await _stage_upload(request, "presets", default_name="preset.qwp")
     if isinstance(staged, JSONResponse):
@@ -1759,7 +1736,6 @@ async def presets_install(request: Request):
 @app.post("/api/presets/{preset_id}/activate")
 async def presets_activate(preset_id: str):
     """Activate a preset. Deactivates the current one first."""
-    import presets
     try:
         return presets.activate(preset_id)
     except Exception as e:
@@ -1771,7 +1747,6 @@ async def presets_activate(preset_id: str):
 async def presets_info(preset_id: str):
     """Get full manifest of an installed preset. (Catch-all — must be after
     literal `/api/presets/onboarding` etc.)"""
-    import presets
     info = presets.get_info(preset_id)
     if not info:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1781,7 +1756,6 @@ async def presets_info(preset_id: str):
 @app.delete("/api/presets/{preset_id}")
 async def presets_delete(preset_id: str):
     """Uninstall a preset. Deactivates it first if active."""
-    import presets
     try:
         presets.uninstall(preset_id)
     except Exception as e:
@@ -1814,7 +1788,6 @@ async def knowledge_upload(request: Request):
 @app.post("/api/knowledge/scan")
 async def knowledge_scan(data: dict):
     """Scan a path and return file preview for indexing."""
-    import rag
     path = data.get("path", "").strip()
     if not path:
         return JSONResponse({"error": "Path required"}, status_code=400)
@@ -1836,10 +1809,6 @@ def _url_resolves_to_private(url: str) -> str | None:
     address (or unspecified 0.0.0.0 / ::), else None. Uses ``socket.getaddrinfo``
     so DNS rebinding to a private IP is caught too, not just literal IPs.
     """
-    import socket
-    import ipaddress
-    from urllib.parse import urlparse
-
     try:
         host = urlparse(url).hostname
     except Exception:
@@ -1876,7 +1845,6 @@ async def knowledge_url(data: dict):
     Body: {"url": "https://…", "tags": ["optional","list"]}
     """
     global _knowledge_task
-    import rag
     url = (data.get("url") or "").strip()
     if not url:
         return JSONResponse({"error": "URL required"}, status_code=400)
@@ -1898,8 +1866,7 @@ async def knowledge_url(data: dict):
         if _knowledge_task and _knowledge_task.get("status") == "running":
             return JSONResponse({"error": "Indexing already in progress"}, status_code=409)
 
-    import tasks as t
-    task_id = t.register("knowledge_url", f"Fetching {url}")
+    task_id = tasks.register("knowledge_url", f"Fetching {url}")
     with _knowledge_lock:
         _knowledge_task = {
             "task_id": task_id, "status": "running",
@@ -1908,8 +1875,7 @@ async def knowledge_url(data: dict):
         }
 
     def _run_url():
-        import time as _t
-        start = _t.time()
+        start = time.time()
         result: dict = {}
         ok = False
         try:
@@ -1932,14 +1898,14 @@ async def knowledge_url(data: dict):
                 _knowledge_task.update({"status": "done", "current": 1, "phase": "done"})
             result = {"status": f"error: {e}"}
         finally:
-            duration = round(_t.time() - start, 2)
+            duration = round(time.time() - start, 2)
             chunks = result.get("chunks", 0) if isinstance(result, dict) else 0
             converter = result.get("converter", "") if isinstance(result, dict) else ""
             label = result.get("title") if isinstance(result, dict) and result.get("title") else url
             # Mark the task row completed so it stops leaking as "running"
             try:
-                t.update(task_id, "done" if ok else "error",
-                         f"{chunks} chunks via {converter}" if ok else result.get("status", "failed"))
+                tasks.update(task_id, "done" if ok else "error",
+                             f"{chunks} chunks via {converter}" if ok else result.get("status", "failed"))
             except Exception:
                 pass
             has_t = result.get("has_transcript") if isinstance(result, dict) else None
@@ -1998,8 +1964,7 @@ async def knowledge_index(data: dict):
         if _knowledge_task and _knowledge_task.get("status") == "running":
             return JSONResponse({"error": "Indexing already in progress"}, status_code=409)
 
-    import tasks as t
-    task_id = t.register("knowledge_index", f"Indexing {len(files)} files")
+    task_id = tasks.register("knowledge_index", f"Indexing {len(files)} files")
 
     with _knowledge_lock:
         _knowledge_task = {
@@ -2080,11 +2045,9 @@ async def knowledge_graph_clear():
 @app.get("/api/knowledge/list")
 async def knowledge_list():
     """List indexed files. When preset active, show only preset's files."""
-    import rag
     files = rag.list_indexed_files()
     try:
-        import presets as _presets
-        active = _presets.get_active()
+        active = presets.get_active()
         if active:
             tag = f"preset:{active}"
             files = [f for f in files if tag in (f.get("tags") or [])]
@@ -2096,7 +2059,6 @@ async def knowledge_list():
 @app.post("/api/knowledge/search")
 async def knowledge_search(data: dict):
     """Search indexed knowledge base."""
-    import rag
     query = data.get("query", "").strip()
     if not query:
         return JSONResponse({"error": "Query required"}, status_code=400)
@@ -2116,7 +2078,6 @@ async def knowledge_search(data: dict):
 @app.delete("/api/knowledge/file")
 async def knowledge_delete(request: Request):
     """Delete a file from the index."""
-    import rag
     path = request.query_params.get("path", "").strip()
     if not path:
         return JSONResponse({"error": "Path required"}, status_code=400)
@@ -2137,14 +2098,12 @@ async def knowledge_delete(request: Request):
 @app.get("/api/skills")
 async def list_skills():
     """List all skills with status."""
-    import skills
     return skills.list_all()
 
 
 @app.post("/api/skills/{name}")
 async def toggle_skill(name: str, data: dict):
     """Enable or disable a skill."""
-    import skills
     if data.get("active"):
         return {"result": skills.enable(name)}
     else:
@@ -2159,11 +2118,10 @@ async def list_threads(include_archived: bool = False):
     all_threads = threads.list_all(include_archived=include_archived)
     # Preset isolation: bidirectional filtering
     try:
-        import presets as _presets
-        active_preset = _presets.get_active()
+        active_preset = presets.get_active()
         if active_preset:
             # Preset active → show ONLY this preset's threads
-            info = _presets.get_info(active_preset)
+            info = presets.get_info(active_preset)
             prefix = f"Preset: {info['name']}" if info else "Preset:"
             all_threads = [t for t in all_threads if t["name"].startswith(prefix)]
         else:
@@ -2245,8 +2203,7 @@ async def set_thread_model(thread_id: str, request: Request):
         meta["model"] = model
     else:
         meta.pop("model", None)  # clear override
-    import json as _j
-    db.execute("UPDATE threads SET meta=? WHERE id=?", (_j.dumps(meta), thread_id))
+    db.execute("UPDATE threads SET meta=? WHERE id=?", (json.dumps(meta), thread_id))
     return {"ok": True, "model": model or None}
 
 
@@ -2396,8 +2353,7 @@ async def websocket_chat(ws: WebSocket):
             image_path = None
             if image_b64:
                 try:
-                    import uuid as _uuid
-                    img_id = str(_uuid.uuid4())[:8]
+                    img_id = str(uuid.uuid4())[:8]
                     img_file = UPLOADS_DIR / f"{img_id}.png"
                     img_file.write_bytes(base64.b64decode(image_b64))
                     image_path = f"/uploads/{img_id}.png"
@@ -2411,12 +2367,10 @@ async def websocket_chat(ws: WebSocket):
             file_size = 0
             if document:
                 try:
-                    import uuid as _uuid
-                    import re as _re
-                    doc_id = str(_uuid.uuid4())[:8]
+                    doc_id = str(uuid.uuid4())[:8]
                     fname_raw = document.get("filename", "file.txt")
                     # Sanitize filename — keep original name for readability, strip paths
-                    fname_safe = _re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:80] or "file.txt"
+                    fname_safe = re.sub(r'[^\w.\-]+', '_', Path(fname_raw).name)[:80] or "file.txt"
                     ext = Path(fname_safe).suffix or ".txt"
                     stem = Path(fname_safe).stem
                     doc_file = UPLOADS_DIR / f"{doc_id}_{stem}{ext}"
@@ -2447,12 +2401,11 @@ async def websocket_chat(ws: WebSocket):
             # Check if model needs loading
             loading_msg = None
             if providers.get_active_name() in ("lmstudio", "ollama"):
-                import requests as _req
                 try:
                     p = providers.get_provider()
                     api_base = p.get("url", "").rstrip("/").replace("/v1", "")
                     model = providers.get_model()
-                    r = _req.get(f"{api_base}/api/v1/models", timeout=5)
+                    r = requests.get(f"{api_base}/api/v1/models", timeout=5)
                     if r.ok:
                         models_data = r.json().get("models", [])
                         model_loaded = any(
@@ -2471,7 +2424,6 @@ async def websocket_chat(ws: WebSocket):
             try:
                 # Run agent in thread pool with streaming via queue
                 loop = asyncio.get_event_loop()
-                import functools
                 stream_queue: asyncio.Queue = asyncio.Queue()
 
                 async def _drain_stream_queue():
@@ -2540,14 +2492,12 @@ async def websocket_chat(ws: WebSocket):
                 audio_url = None
                 voice_mode = db.kv_get("voice_mode:web") == "1"
                 try:
-                    import tts
                     if (voice_mode or live_mode) and tts.is_available() and result["reply"]:
                         audio_data = await loop.run_in_executor(
                             None, functools.partial(tts.synthesize, result["reply"], format="mp3")
                         )
                         if audio_data:
-                            import uuid as _uuid
-                            audio_id = str(_uuid.uuid4())[:8]
+                            audio_id = str(uuid.uuid4())[:8]
                             audio_file = UPLOADS_DIR / f"{audio_id}.mp3"
                             audio_file.write_bytes(audio_data)
                             audio_url = f"/uploads/{audio_id}.mp3"
@@ -2660,8 +2610,7 @@ def _cron_callback(name: str, task: str, result: str):
                 telegram_bot.send_message(owner, f"⏰ **{name}**\n{truncated}")
 
 
-# Register cron callback
-import scheduler
+# Register cron callback (scheduler is hoisted at module top)
 scheduler.on_complete(_cron_callback)
 
 
@@ -2747,28 +2696,24 @@ def _telegram_handler(chat_id: int, text: str, user_id: int, username: str,
 @app.get("/api/mcp/presets")
 async def mcp_presets():
     """Return the built-in MCP server preset catalogue for the UI picker."""
-    import mcp_client
     return {"presets": mcp_client.get_presets()}
 
 
 @app.get("/api/mcp/health")
 async def mcp_health():
     """Fast MCP health summary: configured / running / tripped / tools_total."""
-    import mcp_client
     return mcp_client.health_check()
 
 
 @app.get("/api/mcp/servers")
 async def mcp_list_servers():
     """List all configured MCP servers with status."""
-    import mcp_client
     return mcp_client.list_servers()
 
 
 @app.post("/api/mcp/servers")
 async def mcp_add_server(request: Request):
     """Add or update an MCP server."""
-    import mcp_client
     data = await request.json()
     name = data.get("name", "").strip()
     if not name:
@@ -2792,14 +2737,12 @@ async def mcp_add_server(request: Request):
 @app.delete("/api/mcp/servers/{name}")
 async def mcp_remove_server(name: str):
     """Remove an MCP server."""
-    import mcp_client
     return {"ok": True, "message": mcp_client.remove_server(name)}
 
 
 @app.post("/api/mcp/servers/{name}/restart")
 async def mcp_restart_server(name: str):
     """Restart an MCP server connection."""
-    import mcp_client
     result = mcp_client.start_server(name)
     return {"ok": True, "message": result}
 
@@ -2807,7 +2750,6 @@ async def mcp_restart_server(name: str):
 @app.post("/api/mcp/servers/{name}/toggle")
 async def mcp_toggle_server(name: str, request: Request):
     """Enable or disable an MCP server."""
-    import mcp_client
     data = await request.json()
     enabled = bool(data.get("enabled", True))
     config = mcp_client.load_config()
@@ -2913,12 +2855,13 @@ def _ensure_ssl_cert() -> tuple[str, str]:
 
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # lazy: `cryptography` is a heavy dep that's only needed the first time
+        # SSL is enabled (once per install, then cert is cached on disk).
         from cryptography import x509
         from cryptography.x509.oid import NameOID
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
         from datetime import datetime
-        import ipaddress
 
         # Generate RSA key
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -2976,14 +2919,13 @@ def start(host: str = "0.0.0.0", port: int = 7860, ssl: bool = False):
     """
     global _current_port
     _current_port = port
+    # lazy: uvicorn boots a lot of machinery; only the `start` entrypoint needs it
     import uvicorn
 
     # Suppress noisy Windows asyncio socket-shutdown errors during WS/subprocess cleanup.
     # These are purely cosmetic — the connection has already closed, we just can't call
     # shutdown() on a socket the peer already reset. See: https://bugs.python.org/issue39010
-    import sys
     if sys.platform == "win32":
-        import asyncio
         _BENIGN = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 
         def _quiet_exception_handler(loop, context):
@@ -3014,6 +2956,7 @@ def start(host: str = "0.0.0.0", port: int = 7860, ssl: bool = False):
         # Monkey-patch the proactor transport to swallow the shutdown OSError directly —
         # belt & braces: the exception handler catches most cases, this catches the rest.
         try:
+            # lazy: Windows-only internals; only patched on the win32 branch.
             from asyncio.proactor_events import _ProactorBasePipeTransport
             _orig = _ProactorBasePipeTransport._call_connection_lost
 
