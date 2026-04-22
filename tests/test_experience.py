@@ -149,7 +149,8 @@ def test_1_1_basic_case_format():
     mock_memory.save = save_fn
 
     result = make_result(tools=["weather_get"], reply="Погода: 15°C, дождь")
-    agent._save_experience("проверь погоду", result, rounds=1, fail_count=0, _sync=True)
+    # rounds=2 — v0.17.12 filter skips single-round trivial turns (reply<80ch)
+    agent._save_experience("проверь погоду", result, rounds=2, fail_count=0, _sync=True)
     # _sync=True used above — no sleep needed
 
     assert calls, "memory.save was not called"
@@ -190,7 +191,8 @@ def test_1_4_long_input_truncated():
 
     long_input = "а" * 120
     result = make_result(tools=["shell"])
-    agent._save_experience(long_input, result, rounds=1, fail_count=0, _sync=True)
+    # rounds=2 — single-round trivial skip in v0.17.12 filter
+    agent._save_experience(long_input, result, rounds=2, fail_count=0, _sync=True)
 
     assert calls
     # Extract Task: field
@@ -245,8 +247,12 @@ def test_1_8_tag_experience_and_no_thread():
     save_fn, calls = capture_save()
     mock_memory.save = save_fn
 
-    result = make_result(tools=["memory_save"])
-    agent._save_experience("запомни это", result, rounds=1, fail_count=0, _sync=True)
+    # v0.17.12 filter skips (a) memory-keyword user inputs (запомни /
+    # remember etc.) and (b) turns using only meta tools like memory_save.
+    # This test's original "запомни это" + tools=["memory_save"] triggered
+    # both filters. Swap to a substantive task that exercises the save path.
+    result = make_result(tools=["write_file"])
+    agent._save_experience("напиши конфиг в config.yml", result, rounds=2, fail_count=0, _sync=True)
 
     assert calls
     assert calls[0]["tag"] == "experience"
@@ -399,9 +405,9 @@ def test_3_1_save_then_retrieve():
     mock_memory.save = _save
     _mock_vector_search(_search)
 
-    # Save a case
+    # Save a case. rounds=2 — single-round trivial skip in v0.17.12 filter.
     result = make_result(tools=["weather_get"], reply="Погода: 20°C")
-    agent._save_experience("проверь погоду в Москве", result, rounds=1, fail_count=0, _sync=True)
+    agent._save_experience("проверь погоду в Москве", result, rounds=2, fail_count=0, _sync=True)
 
     assert saved_cases, "Case was not saved"
 
@@ -419,7 +425,8 @@ def test_4_1_outcome_score_saved_in_meta():
     mock_memory.save = save_fn
 
     result = make_result(tools=["shell"], reply="Done")
-    agent._save_experience("запусти скрипт", result, rounds=1, fail_count=0, _sync=True)
+    # rounds=2 — single-round trivial skip in v0.17.12 filter
+    agent._save_experience("запусти скрипт", result, rounds=2, fail_count=0, _sync=True)
 
     assert calls
     assert calls[0]["meta"] is not None

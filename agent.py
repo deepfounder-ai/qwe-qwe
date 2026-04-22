@@ -165,19 +165,54 @@ def _repair_json(raw: str) -> dict:
     except Exception:
         pass
 
-    # Try to close unclosed brackets/braces
-    opens = s.count("{") - s.count("}")
-    s += "}" * max(0, opens)
-    brackets = s.count("[") - s.count("]")
-    s += "]" * max(0, brackets)
-
-    # Close unclosed string (odd number of unescaped quotes)
+    # Close unclosed string FIRST — if we close braces/brackets before the
+    # string, the added } or ] land INSIDE the incomplete string instead of
+    # after it, corrupting the structure. Example: `{"command": "ls -la`
+    # must become `{"command": "ls -la"}`, not `{"command": "ls -la}"`.
     quote_count = len(re.findall(r'(?<!\\)"', s))
     if quote_count % 2 == 1:
         s += '"'
-        # Re-close brackets that might now be inside the string
-        opens = s.count("{") - s.count("}")
-        s += "}" * max(0, opens)
+
+    # Now close any remaining unclosed brackets/braces. Smarter than a plain
+    # count: we do a positional scan-and-insert so a premature `}` before a
+    # pending `[` (e.g. `{"items": [1, 2, 3}`) gets a `]` inserted BEFORE the
+    # `}` rather than appended at the end, which still wouldn't parse.
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in s:
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            continue
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+            out.append(ch)
+            continue
+        if ch in "}]":
+            # Close any mismatched openers underneath first.
+            expected = stack[-1] if stack else None
+            if expected and expected != ch:
+                # Premature close — emit the pending closer first.
+                out.append(stack.pop())
+            if stack and stack[-1] == ch:
+                stack.pop()
+            out.append(ch)
+            continue
+        out.append(ch)
+    # Append any openers still unmatched at end of input.
+    out.extend(reversed(stack))
+    s = "".join(out)
 
     try:
         return json.loads(s)
