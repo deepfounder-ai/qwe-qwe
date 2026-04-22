@@ -1,0 +1,168 @@
+name: Release
+
+# Fires after the Tests workflow finishes on main. Using workflow_run gates
+# us on CI success: if Tests didn't conclude "success" we exit immediately,
+# so a red build on main never produces a tag or release.
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write  # needed to push tags + create releases with GITHUB_TOKEN
+
+jobs:
+  release:
+    # Gate 1: only run when the upstream Tests workflow succeeded on main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # SHA of the commit that the Tests run used — we pin everything to it so
+      # a later push to main doesn't sneak into this release.
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Checkout the exact commit that passed CI
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0  # need full history + tags for comparison
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read VERSION from config.py and verify pyproject.toml matches
+        id: version
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re, sys, tomllib, pathlib
+          cfg = pathlib.Path("config.py").read_text(encoding="utf-8")
+          m = re.search(r'VERSION\s*=\s*"([^"]+)"', cfg)
+          if not m:
+              print("ERROR: VERSION not found in config.py", file=sys.stderr)
+              sys.exit(1)
+          cfg_version = m.group(1)
+          pyproject = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          )
+          toml_version = pyproject["project"]["version"]
+          if cfg_version != toml_version:
+              print(
+                  f"ERROR: version mismatch — config.py={cfg_version!r} "
+                  f"pyproject.toml={toml_version!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print(f"version={cfg_version}")
+          print(f"tag=v{cfg_version}")
+          PY
+          echo "Resolved VERSION: $(grep ^version= "$GITHUB_OUTPUT" | cut -d= -f2)"
+
+      - name: No-op if tag already exists (idempotent re-run protection)
+        id: tagcheck
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          # Look for the tag both locally (it came with fetch-depth: 0) and
+          # on the remote. Either one existing means this release is already
+          # shipped — exit cleanly, do not fail the job.
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+              echo "Tag $TAG already exists locally — skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+          HTTP_STATUS=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${{ github.repository }}/git/refs/tags/$TAG" \
+              --silent -i 2>/dev/null | head -n 1 | awk '{print $2}' || true)
+          if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Tag $TAG already exists on remote — skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+          # Sanity check: if VERSION equals the most recent existing tag but
+          # the lookup above somehow missed it, no-op rather than fail.
+          LATEST_TAG=$(git tag --sort=-v:refname | head -n 1 || true)
+          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" = "$TAG" ]; then
+              echo "VERSION matches latest tag $LATEST_TAG — nothing to release."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+          echo "Tag $TAG is new — proceeding."
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Verify RELEASE_NOTES.md exists and is non-empty
+        if: steps.tagcheck.outputs.skip != 'true'
+        id: notes
+        run: |
+          set -euo pipefail
+          if [ ! -f RELEASE_NOTES.md ]; then
+              echo "::error::RELEASE_NOTES.md is missing. Write release notes before bumping VERSION." >&2
+              exit 1
+          fi
+          if [ ! -s RELEASE_NOTES.md ]; then
+              echo "::error::RELEASE_NOTES.md is empty. Write release notes before bumping VERSION." >&2
+              exit 1
+          fi
+          # First non-blank, non-heading-marker line becomes the release title suffix.
+          FIRST_LINE=$(grep -m1 -E '.' RELEASE_NOTES.md | sed -E 's/^#+\s*//' | tr -d '\r')
+          if [ -z "$FIRST_LINE" ]; then
+              echo "::error::RELEASE_NOTES.md has no readable first line." >&2
+              exit 1
+          fi
+          # GITHUB_OUTPUT: use delimiter form for values that may contain special chars.
+          {
+              echo "first_line<<__EOF__"
+              echo "$FIRST_LINE"
+              echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure git identity for the tag
+        if: steps.tagcheck.outputs.skip != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push annotated tag
+        if: steps.tagcheck.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          git tag -a "$TAG" -m "$TAG" "$COMMIT_SHA"
+          git push origin "$TAG"
+
+      - name: Create GitHub release
+        if: steps.tagcheck.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          TITLE="$TAG — ${{ steps.notes.outputs.first_line }}"
+          # --verify-tag ensures we only release against a tag that actually
+          # exists on the remote. Re-running the job after a release was
+          # already created will hit "already exists" and we tolerate it to
+          # keep the workflow idempotent.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG already exists — nothing to do."
+              exit 0
+          fi
+          gh release create "$TAG" \
+              --target "$COMMIT_SHA" \
+              --title "$TITLE" \
+              --notes-file RELEASE_NOTES.md \
+              --verify-tag
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "VERSION: ${{ steps.version.outputs.version }}"
+          echo "TAG:     ${{ steps.version.outputs.tag }}"
+          echo "COMMIT:  $COMMIT_SHA"
+          echo "SKIPPED: ${{ steps.tagcheck.outputs.skip }}"
