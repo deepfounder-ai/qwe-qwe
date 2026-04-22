@@ -77,21 +77,43 @@ def _clear_old_tool_results(messages: list[dict]):
     """Replace old tool results with one-line summaries (keep last N intact).
     This prevents context overflow during long multi-step tasks.
     Claude Code calls this Tier 1 clearing — runs before every API call.
+
+    The summary carries *no* bytes of the original tool output — just a length
+    and a tool name — so a tool that accidentally printed a secret can't leak
+    it back to the model via the cleared stub. To recover the tool name we walk
+    back to the preceding assistant message and map ``tool_call_id`` → function
+    name. If a ``name`` field was attached to the tool message directly (some
+    clients do), we prefer that.
     """
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if len(tool_indices) <= _KEEP_RECENT_TOOL_RESULTS:
         return  # nothing to clear
+
+    # Build tool_call_id -> function name map from assistant messages
+    id_to_name: dict[str, str] = {}
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            tcid = tc.get("id")
+            fname = ((tc.get("function") or {}).get("name")) or tc.get("name")
+            if tcid and fname:
+                id_to_name[tcid] = fname
 
     # Clear all but the last N
     to_clear = tool_indices[:-_KEEP_RECENT_TOOL_RESULTS]
     for idx in to_clear:
         m = messages[idx]
         content = m.get("content", "")
-        if content.startswith("[cleared"):
+        if isinstance(content, str) and content.startswith("[cleared"):
             continue  # already cleared
-        # Create one-line summary
-        first_line = content.split("\n")[0][:120].strip()
-        m["content"] = f"[cleared — {first_line}]"
+        tool_name = (
+            m.get("name")
+            or id_to_name.get(m.get("tool_call_id", ""))
+            or "tool"
+        )
+        n = len(content) if isinstance(content, str) else 0
+        m["content"] = f"[cleared — {n} chars of {tool_name} output]"
 
 
 def _cap_tool_result(result: str) -> str:

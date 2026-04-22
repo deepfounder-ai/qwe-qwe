@@ -183,6 +183,57 @@ def _run_agent_sync(user_input: str, thread_id: str | None = None,
 
 # ── Lifespan ──
 
+def _sweep_uploads(max_age_days: int = 14, max_files: int = 10000) -> tuple[int, int]:
+    """Delete files under config.UPLOADS_DIR older than ``max_age_days``.
+
+    Protects ``uploads/kb/`` — those files back indexed knowledge sources and
+    must live until the user deletes them from the KB list. Bounded at
+    ``max_files`` inspected files so a pathological uploads dir can't stall
+    startup. Returns (files_deleted, bytes_freed).
+    """
+    upl = config.UPLOADS_DIR
+    if not upl.exists():
+        return 0, 0
+    cutoff = time.time() - (max_age_days * 86400)
+    deleted = 0
+    bytes_freed = 0
+    inspected = 0
+    kb_dir = (upl / "kb").resolve()
+
+    try:
+        for p in upl.rglob("*"):
+            inspected += 1
+            if inspected > max_files:
+                _log.warning(f"uploads sweep: hit {max_files}-file cap, stopping")
+                break
+            if not p.is_file():
+                continue
+            # Skip knowledge-base source files — those live until the user
+            # removes the KB entry.
+            try:
+                rp = p.resolve()
+                if kb_dir in rp.parents or rp == kb_dir:
+                    continue
+            except Exception:
+                pass
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_mtime >= cutoff:
+                continue
+            try:
+                size = st.st_size
+                p.unlink()
+                deleted += 1
+                bytes_freed += size
+            except OSError as e:
+                _log.warning(f"uploads sweep: could not delete {p}: {e}")
+    except Exception as e:
+        _log.warning(f"uploads sweep failed: {e}")
+    return deleted, bytes_freed
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup — load timezone before anything else
@@ -192,6 +243,13 @@ async def lifespan(app: FastAPI):
             config.TZ_OFFSET = int(tz_val)
         except (ValueError, TypeError):
             pass
+    # Sweep stale uploads (> 14 days old). Runs once at startup, cheap.
+    try:
+        n, b = _sweep_uploads()
+        if n:
+            _log.info(f"uploads sweep: deleted {n} file(s), freed {b} bytes")
+    except Exception as e:
+        _log.warning(f"uploads sweep error: {e}")
     # Restore preset workspace + thread if a preset was active before restart
     try:
         import presets as _presets
@@ -1266,14 +1324,38 @@ async def kv_get(key: str):
     return {"key": key, "value": value}
 
 
+# Prefixes that the raw /api/kv POST endpoint MUST NOT overwrite. These are
+# populated by dedicated endpoints (or by the installer) and accepting a bare
+# {key, value} blob for them lets an authed user corrupt internal state —
+# e.g. reassigning the Telegram owner, faking `version:latest`, poisoning
+# provider credentials. Each entry is a startswith() match.
+_KV_WRITE_BLOCKLIST: tuple[str, ...] = (
+    "telegram:owner_id",
+    "version:",
+    "setup_",
+    "_migrated_",
+    "provider:config:",
+    "setting:",
+    "soul:",
+)
+
+
 @app.post("/api/kv")
 async def kv_set(request: Request):
     """Set a raw key-value pair in DB."""
     data = await request.json()
     key = data.get("key", "")
     value = data.get("value", "")
-    if not key:
+    if not isinstance(key, str) or not key:
         return JSONResponse({"error": "key required"}, status_code=400)
+    if len(key) > 200:
+        return JSONResponse({"error": "key too long (max 200 chars)"}, status_code=400)
+    for prefix in _KV_WRITE_BLOCKLIST:
+        if key.startswith(prefix):
+            return JSONResponse(
+                {"error": f"key '{key}' is protected (prefix '{prefix}' reserved for internal state)"},
+                status_code=403,
+            )
     db.kv_set(key, value)
     return {"ok": True, "key": key}
 
@@ -1719,6 +1801,44 @@ async def knowledge_scan(data: dict):
     return result
 
 
+def _url_resolves_to_private(url: str) -> str | None:
+    """Return an error message if the URL resolves to a private/loopback/link-local
+    address (or unspecified 0.0.0.0 / ::), else None. Uses ``socket.getaddrinfo``
+    so DNS rebinding to a private IP is caught too, not just literal IPs.
+    """
+    import socket
+    import ipaddress
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return "Invalid URL"
+    if not host:
+        return "URL is missing a hostname"
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception as e:
+        return f"Could not resolve hostname: {e}"
+
+    for info in infos:
+        addr = info[4][0]
+        # Strip IPv6 zone id if present (e.g. "fe80::1%eth0")
+        if "%" in addr:
+            addr = addr.split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+            return (
+                f"Private/loopback URLs not allowed (resolved to {addr}). "
+                "Set QWE_ALLOW_PRIVATE_URLS=1 to override."
+            )
+    return None
+
+
 @app.post("/api/knowledge/url")
 async def knowledge_url(data: dict):
     """Fetch a URL, extract readable text, and index it. Runs in the background.
@@ -1732,6 +1852,14 @@ async def knowledge_url(data: dict):
         return JSONResponse({"error": "URL required"}, status_code=400)
     if not url.startswith(("http://", "https://")):
         return JSONResponse({"error": "URL must start with http:// or https://"}, status_code=400)
+
+    # SSRF guard — reject URLs that resolve to private/loopback/link-local ranges.
+    # Opt out by setting QWE_ALLOW_PRIVATE_URLS=1 (e.g. for self-hosted wikis on
+    # a LAN).
+    if os.environ.get("QWE_ALLOW_PRIVATE_URLS", "").strip() != "1":
+        err = _url_resolves_to_private(url)
+        if err:
+            return JSONResponse({"error": err}, status_code=403)
     tags_raw = data.get("tags", [])
     tags = [t.strip() for t in tags_raw if isinstance(t, str) and t.strip()] if tags_raw else []
 

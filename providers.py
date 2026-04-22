@@ -396,10 +396,16 @@ def switch(name: str) -> str:
 
 
 def _reset_structured_output_cache():
-    """Reset agent's structured output failure cache on provider switch."""
+    """Reset agent's structured output failure cache on provider switch.
+
+    The cache is a ``set[str]`` of provider names that returned 400 on
+    ``response_format``. Previously this reassigned it to ``False``, which
+    then blew up on the next ``provider in agent._structured_output_failed``
+    check with ``TypeError: argument of type 'bool' is not iterable``.
+    """
     try:
         import agent
-        agent._structured_output_failed = False
+        agent._structured_output_failed.clear()
     except (ImportError, AttributeError):
         pass
 

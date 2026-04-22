@@ -1,6 +1,6 @@
 """Qdrant-backed semantic memory — hybrid search (dense + sparse via FastEmbed), recommendations, grouping."""
 
-import atexit, uuid, time
+import atexit, re, uuid, time
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter,
@@ -17,6 +17,56 @@ _log = logger.get("memory")
 _qclient: QdrantClient | None = None
 _dense_model = None
 _sparse_model = None
+
+
+# ── Secret scrubbing ──
+# Ordered: most-specific prefixes first (sk-ant- before sk-, github_pat_ before ghp_)
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]{30,}"), "anthropic_key"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{50,}"), "github_pat"),
+    (re.compile(r"ghp_[A-Za-z0-9]{36}"), "github_token"),
+    (re.compile(r"gsk_[A-Za-z0-9]{20,}"), "groq_key"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "aws_access_key"),
+    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "slack_token"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "jwt"),
+    # Generic sk- last so it doesn't eat the more specific sk-ant- above
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "openai_key"),
+]
+
+# Dotenv-style KEY=value lines (e.g. `OPENAI_API_KEY=foo`). Multiline-capable.
+_ENV_LINE_RE = re.compile(
+    r"^([A-Z_][A-Z0-9_]{2,}_(?:KEY|TOKEN|SECRET|PASSWORD|PASS))(\s*=\s*)(.+)$",
+    re.MULTILINE,
+)
+
+
+def _scrub_secrets(text: str) -> tuple[str, bool]:
+    """Strip common secret patterns from text.
+
+    Returns (scrubbed_text, was_scrubbed). When a match is found it is replaced
+    with ``[REDACTED:<type>]`` (or ``[REDACTED]`` for env-style lines, which keep
+    the variable name so the redaction is traceable).
+    """
+    if not text:
+        return text, False
+    scrubbed = text
+    hit = False
+
+    for pat, label in _SECRET_PATTERNS:
+        new_text, n = pat.subn(f"[REDACTED:{label}]", scrubbed)
+        if n:
+            hit = True
+            scrubbed = new_text
+
+    def _env_sub(m: re.Match[str]) -> str:
+        return f"{m.group(1)}{m.group(2)}[REDACTED]"
+
+    new_text, n = _ENV_LINE_RE.subn(_env_sub, scrubbed)
+    if n:
+        hit = True
+        scrubbed = new_text
+
+    return scrubbed, hit
 
 # Schema version — bump to force migration
 _SCHEMA_VERSION = 2  # v1: unnamed vector, v2: named dense+sparse, float16, full-text
@@ -645,6 +695,13 @@ def save(text: str, tag: str = "general", dedup: bool = True,
     Returns:
         point ID (or first chunk ID for chunked saves)
     """
+    # Scrub well-known secret patterns before persistence. Counting matches with
+    # a second pass is fine — the payloads are already small and this runs once.
+    text, scrubbed = _scrub_secrets(text)
+    if scrubbed:
+        hits = text.count("[REDACTED")
+        _log.warning(f"scrubbed {hits} secret-like pattern(s) from memory save (tag={tag})")
+
     # Auto-chunk long texts
     if len(text) > _CHUNK_THRESHOLD and tag not in ("experience", "compaction"):
         return _save_chunked(text, tag, thread_id, meta)
