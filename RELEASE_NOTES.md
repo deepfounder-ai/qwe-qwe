@@ -1,83 +1,67 @@
-# v0.17.25 — TurnContext: per-request state isolation
+# v0.17.26 — Integration tests, slimmer install, schema migrations, dev docs
 
-The big structural fix from the tech-debt plan. Eliminates cross-source contamination between concurrent turns (web + Telegram + CLI running in the same Python process).
+Four more tech-debt items off the priority list, landing in parallel. Pure structural work — no user-visible behavior changes, but the codebase is materially more resilient.
 
-## 🐛 What was broken (silent)
+## ✅ C1. Integration tests (16 new)
 
-Several per-turn pieces of state lived as **module-level globals** in `agent.py`:
+`tests/test_integration.py` — the layer missing between unit tests and manual QA. Uses `TestClient(server.app)` + mocked LLM to exercise real endpoints end-to-end.
 
-- `_pending_image_path`, `_pending_file` — the image/document attached to "the current turn"
-- `_content_callback`, `_thinking_callback`, `_status_callback`, `_tool_call_callback`, `_recall_callback` — where to send streaming tokens / tool events
+Covers:
 
-When a web turn and a Telegram turn ran concurrently, whichever one set these last won. Result: Telegram would sometimes get the web client's tool-call events, web would get Telegram's thinking, pending images from turn A leaked into turn B. Rarely caught because 99% of installs have one active user, but structurally wrong — and the pattern was going to bite harder as soon as any user ran web + Telegram simultaneously.
+- Server boots + serves SPA
+- `/api/status`, `/api/soul`, `/api/settings`, `/api/threads`, `/api/knowledge/list` (the v0.17.23 regression guard)
+- `/api/knowledge/url` — empty / non-http / private-IP SSRF / well-formed all behave correctly
+- `/api/knowledge/search` on empty corpus doesn't crash
+- `/api/knowledge/recent` round-trips synthetic history
+- `/api/kv` allowlist / blocklist enforced
+- WebSocket handshake
+- **Agent turn smoke** — mocks `providers.get_client()` with a `FakeStreamingClient` that yields deterministic chunks. Runs `agent.run("hello", ctx=...)`, verifies `on_content` fires and messages land in SQLite.
+- **Concurrent turn isolation** — two threads, two TurnContexts, separate replies, zero cross-contamination via the public HTTP surface.
 
-v0.17.19 already fixed `_abort_event` with per-request `threading.Event`. This release does the same treatment for everything else.
+If any of these had existed before, the v0.17.23 3.11 SyntaxError wouldn't have shipped.
 
-## 🔧 The fix
+## 📦 C3. `markitdown[all]` → `markitdown[docx,pptx,pdf,outlook]`
 
-### New: `turn_context.py` + `TurnContext` dataclass
+`[all]` was dragging ~115 MB of dead weight: `pandas` (xlsx — covered by our `openpyxl`), `speech_recognition` (we use faster-whisper), `azure-ai-documentintelligence` (Azure OCR — never called), `youtube-transcript-api` (broken by YT bot-detection — already replaced with `yt-dlp` in v0.17.13).
 
-```python
-@dataclass
-class TurnContext:
-    abort_event: threading.Event = field(default_factory=threading.Event)
-    on_content: Callable[[str], None] | None = None
-    on_thinking: Callable[[str], None] | None = None
-    on_status: Callable[[str], None] | None = None
-    on_tool_call: Callable[[str, str, str], None] | None = None
-    on_recall: Callable[[list[dict]], None] | None = None
-    image_path: str | None = None
-    file_meta: dict | None = None
-    source: str = "cli"          # "web" | "telegram" | "cli"
-    session_id: str | None = None
+```toml
+# before
+"markitdown[all]>=0.1.0",
+# after
+"markitdown[docx,pptx,pdf,outlook]>=0.1.0",
 ```
 
-### Context propagation via `ContextVar`
+**Measured install size**: 361 MB → **241 MB** (33% reduction). XLSX still works via our `openpyxl` fallback in `rag._read_xlsx`. Smoke-tested DOCX/PPTX/PDF/HTML/XLSX ingestion end-to-end in a fresh venv — all non-empty output.
 
-Rather than thread `ctx` through every helper in `agent.py`, the current context lives in a `contextvars.ContextVar`:
+## 🗃️ C4. SQLite migrations
 
-```python
-_current_turn_ctx: ContextVar[TurnContext | None] = ContextVar("...", default=None)
-```
+`migrations/` directory + versioned SQL files. Replaces ad-hoc `CREATE TABLE IF NOT EXISTS` + `try/except ALTER TABLE` scattered across `db.py`.
 
-`_run_inner` sets it at the top of each run. `_emit_content` / `_emit_thinking` / etc. read it. Each OS thread (or asyncio task) gets its own isolated copy — no leak between concurrent turns.
+- `migrations/001_initial.sql` — baseline: `messages`, `kv`, `presets`, `threads`, `scheduled_tasks`, `secrets`, FTS5 virtual tables, primary indexes.
+- `migrations/002_message_thread_ts_index.sql` — first real migration (composite `(thread_id, ts)` index).
+- `migrations/README.md` — convention: `NNN_snake_case.sql`, monotonically increasing. Runner applies in order, transactional per-file, tracks `schema_version` in kv.
 
-### Wire-up
+**Back-compat heuristic** for existing installs: if `schema_version` is missing AND `messages` table exists, stamp `schema_version=1` without re-running baseline. Fresh installs apply every file.
 
-- `agent.run(..., ctx=...)` accepts an optional `TurnContext`. If omitted, creates a fresh one (CLI compat).
-- `agent_loop.run_loop()` extended to take `ctx` + reads callbacks from it.
-- `server.py` WS handler builds `TurnContext` per connection, installs `on_content → WS queue`, passes to `agent.run(..., ctx=my_ctx)`. On `WebSocketDisconnect`, `my_ctx.abort_event.set()`.
-- `telegram_bot.py` stashes ctx on `threading.local`; `server._telegram_handler` retrieves + passes to agent.
+5 new tests in `tests/test_migrations.py` covering fresh-apply, idempotency, back-compat stamping, rollback on invalid SQL.
 
-### Back-compat shim
+## 📖 C5. `ARCHITECTURE.md` + `CONTRIBUTING.md`
 
-Old code that sets `agent._content_callback = fn` still works. `_harvest_legacy_slots(ctx)` runs at the top of every `agent.run()`, copies any present legacy attributes onto the freshly built ctx, and emits a one-shot `DeprecationWarning` per slot. Explicit `ctx=...` callers keep their own values (the harvester only fills `None` fields).
+- **`ARCHITECTURE.md`** (113 lines) — system diagram, core modules one-liner each, request lifecycle, memory 3-way hybrid (corrected vs CLAUDE.md's 2-way claim), state locations, extension points.
+- **`CONTRIBUTING.md`** (93 lines) — setup, test commands, branching, commit style, CI guardrails, release flow, Dependabot.
 
-## ✅ Verification
-
-New test: `tests/test_turn_context.py`:
-
-```
-test_cross_source_isolation_two_threads — PASS
-```
-
-Two threads, each with its own `TurnContext` and `on_content` callback. Emit 100 labelled events per thread concurrently. Callback A sees only A-labelled events, callback B only B's. Zero cross-contamination. Six more tests cover the harvester / back-compat / ContextVar reset / deprecation warning.
+Agent caught and corrected two outdated claims while grepping:
+1. Memory search is **3-way hybrid** (dense + sparse + BM25 FTS5), not 2-way.
+2. Core tools count is **28**, not ~18.
 
 ## 📊 Totals
 
 ```
-ruff check .         — 0 errors
-pytest tests/        — 165 passed (was 158 — +7 new turn_context tests)
-import smoke         — `from agent import TurnContext` exports visible
-Python 3.11 AST      — 0 findings
+ruff check .                  — 0 errors
+pytest tests/                 — 186 passed (was 165 → +16 integration + 5 migrations)
+import smoke                  — all modules load, TurnContext exported
+Python 3.11 AST               — 0 findings
 ```
-
-## 🔍 Module globals deliberately kept
-
-- `_structured_output_failed` — provider capability tracking, not per-turn
-- `_compaction_lock` — cross-turn serialisation of DB writes
-- `_compaction_callback` — background subsystem hook, not per-turn
-- `agent._last_tools` — pre-existing stash read by Telegram bot; separate refactor
 
 ## 📦 Upgrade
 
@@ -86,6 +70,6 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-No user-visible change if you use only one client at a time. If you run Web + Telegram concurrently, you'll notice events stop getting crossed.
+First upgrade: `_apply_migrations()` will stamp existing DBs at `schema_version=1` without re-running baseline. `pip install` downloads ~120 MB less. Your existing data is untouched.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
