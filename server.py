@@ -663,9 +663,19 @@ async def status():
 
     active_thread = threads.get(threads.get_active_id())
 
-    # Model context window — manual override beats auto-detect; otherwise
-    # probe the provider (LM Studio / Ollama), falling back to 0 when unknown
-    # (the UI treats 0 as "budget unknown" and shows only the absolute number).
+    # Effective context limit is whichever is tighter:
+    #   - context_budget: AGENT-side ceiling. Triggers compaction + tool-result
+    #     truncation. Once you pass this, the agent starts summarizing old
+    #     messages / clipping tool output. This is the PRACTICAL limit for
+    #     "when does context run out".
+    #   - model_context:  MODEL-side hard cap. Going past this means the
+    #     provider errors out. Usually much bigger than context_budget.
+    #
+    # The UI gauge uses context_budget as the primary denominator. We also
+    # expose model_context (override > auto-detect > unknown) so the UI can
+    # show a secondary number + warn when misconfigured (budget > model).
+    context_budget = int(config.get("context_budget") or 24000)
+
     override = int(config.get("model_context") or 0)
     detected = 0
     if override <= 0:
@@ -687,6 +697,7 @@ async def status():
         "memories": mem_count,
         "skills": active_skills,
         "core_tools": core_tools,
+        "context_budget": context_budget,
         "model_context": model_ctx,
         "model_context_source": "override" if override else ("detected" if detected else "unknown"),
     }

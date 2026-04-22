@@ -3031,20 +3031,26 @@ function renderInspector() {
   const threadTokens = (t && t.est_tokens) || 0;
   const threadMsgs = (t && (t.messages || 0)) || state.messages.length;
 
-  // Context Window — REAL: the actual prompt_tokens of the last turn vs the
-  // model's real context window. Denominator priority:
-  //   1. /api/status.model_context  (auto-detected from LM Studio / Ollama)
-  //   2. settings.model_context     (manual override, 0 = use auto)
-  //   3. settings.ollama_num_ctx    (Ollama-specific)
-  //   4. 0                          (unknown — UI shows "?" instead of a %)
-  const modelCtx = (st.model_context)
+  // Context Window — the PRACTICAL limit is context_budget (agent-side
+  // ceiling that triggers compaction + tool-result truncation), not the
+  // model's raw context length. If context_budget=24k and model_context=128k,
+  // the agent will compact at ~24k regardless. So:
+  //   - Gauge denominator = context_budget (what actually governs the agent).
+  //   - model_context shown alongside as reference + a warning if
+  //     context_budget > model_context (misconfiguration — agent would try
+  //     to pack more tokens than the model can accept).
+  const budget = st.context_budget
+    || (state.settings && state.settings.context_budget)
+    || 24000;
+  const modelCtx = st.model_context
     || (state.settings && (state.settings.model_context || state.settings.ollama_num_ctx))
     || 0;
   const ctxSource = st.model_context_source || (modelCtx ? 'setting' : 'unknown');
+  const budgetOverflow = modelCtx > 0 && budget > modelCtx;  // misconfig warning
   // Numerator: actual prompt tokens that went into the model on the last turn.
   // Fall back to thread-history estimate only when no turn has happened yet.
   const lastPrompt = (lt && lt.prompt_tokens) || threadTokens || 0;
-  const pct = modelCtx > 0 ? Math.min(100, (lastPrompt / modelCtx) * 100) : 0;
+  const pct = budget > 0 ? Math.min(100, (lastPrompt / budget) * 100) : 0;
   const pctColor = pct >= 90 ? 'var(--err)' : pct >= 75 ? 'var(--warn)' : pct >= 50 ? 'var(--accent)' : 'var(--ok)';
 
   // Sparkbars from real per-turn token counts
@@ -3089,24 +3095,28 @@ function renderInspector() {
         '<span class="k">Messages</span><span class="v">' + threadMsgs.toLocaleString() + '</span>' +
       '</div></div>' +
 
-    // Context window — BIG gauge. Shows last turn's actual prompt_tokens vs
-    // the model's real context window. This is what "am I about to run out"
-    // actually depends on.
+    // Context window — BIG gauge. Denominator = context_budget (agent-side
+    // compaction trigger — the PRACTICAL ceiling). Model context shown as
+    // reference below. Over-budget = agent will start compacting / truncating
+    // tool results. Over-model-ctx = provider would error (we warn).
     '<div class="insp-section">' +
       '<div class="insp-section-hdr"><h3>Context window</h3>' +
-        (modelCtx > 0
-          ? '<span class="tag" style="font-size:9px;color:' + pctColor + ';border-color:' + pctColor + '">' + pct.toFixed(1) + '%</span>'
-          : '<span class="tag" style="font-size:9px" title="Model context unknown — set model_context in Settings → Inference">?</span>') +
+        '<span class="tag" style="font-size:9px;color:' + pctColor + ';border-color:' + pctColor + '" title="Last prompt tokens / agent context_budget. Compaction triggers at ~100%.">' + pct.toFixed(1) + '%</span>' +
       '</div>' +
       '<div class="token-gauge">' +
         '<div class="row"><div><span class="used">' + lastPrompt.toLocaleString() + '</span>' +
-          '<span class="total">/ ' + (modelCtx > 0 ? (modelCtx/1000).toFixed(0) + 'k' : '? ') + '</span></div>' +
-          '<span class="pct" style="color:' + pctColor + '">' + (modelCtx > 0 ? pct.toFixed(1) + '%' : '—') + '</span></div>' +
+          '<span class="total">/ ' + (budget/1000).toFixed(0) + 'k</span></div>' +
+          '<span class="pct" style="color:' + pctColor + '">' + pct.toFixed(1) + '%</span></div>' +
         '<div class="bar"><div class="fill" style="width:' + pct + '%;background:' + pctColor + '"></div></div>' +
-        '<div style="font-size:9px;color:var(--fg-4);margin-top:4px;font-family:var(--font-mono);display:flex;justify-content:space-between">' +
-          '<span>prompt tokens, last turn</span>' +
-          '<span title="Where the context limit came from">' + (ctxSource === 'detected' ? 'auto' : ctxSource === 'override' ? 'manual' : ctxSource === 'setting' ? 'setting' : 'unknown') + '</span>' +
+        '<div style="font-size:9px;color:var(--fg-4);margin-top:4px;font-family:var(--font-mono);display:flex;justify-content:space-between;gap:8px">' +
+          '<span title="Prompt tokens from last API call / context_budget (agent-side limit, triggers compaction). Change in Settings → Model.">prompt tokens · agent budget</span>' +
+          (modelCtx > 0
+            ? '<span title="Model\'s native context limit (' + (ctxSource === 'detected' ? 'auto-detected' : ctxSource === 'override' ? 'manually set' : 'from setting') + '). The agent stays below context_budget so it never hits this.">model ' + (modelCtx/1000).toFixed(0) + 'k</span>'
+            : '<span title="Model context unknown — set model_context in Settings → Inference">model ?</span>') +
         '</div>' +
+        (budgetOverflow
+          ? '<div style="font-size:10px;color:var(--err);margin-top:6px;padding:5px 8px;background:rgba(255,80,80,0.08);border:1px solid var(--err);border-radius:4px;line-height:1.4">⚠ context_budget (' + (budget/1000).toFixed(0) + 'k) exceeds the model\'s actual context (' + (modelCtx/1000).toFixed(0) + 'k). Lower context_budget in Settings → Model to avoid provider errors.</div>'
+          : '') +
       '</div>' +
       // Sparkline — prompt_tokens per turn history (shows growth trajectory)
       '<div style="margin-top:14px"><div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:10px;font-family:var(--font-mono);color:var(--fg-4)">' +
