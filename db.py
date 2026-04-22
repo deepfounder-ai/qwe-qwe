@@ -2,8 +2,10 @@
 
 import sqlite3
 import json
+import re
 import time
 import threading
+from pathlib import Path
 import config
 import logger
 
@@ -12,6 +14,14 @@ _log = logger.get("db")
 _local = threading.local()
 _migrated = False
 _migrate_lock = threading.Lock()
+
+# --- Migration runner -------------------------------------------------------
+# Schema changes live in ``migrations/NNN_name.sql``. See migrations/README.md
+# for the full convention. A single kv key, ``schema_version``, tracks the
+# highest migration number that has been applied.
+
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+_MIGRATION_RE = re.compile(r"^(\d+)_.+\.sql$")
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -26,65 +36,127 @@ def _get_conn() -> sqlite3.Connection:
         # Migrate once across all threads
         with _migrate_lock:
             if not _migrated:
-                _migrate(conn)
+                _apply_migrations(conn)
                 _migrated = True
                 _log.info(f"database connected: {config.DB_PATH}")
     return conn
 
 
-def _migrate(conn: sqlite3.Connection):
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_calls TEXT,       -- JSON array of tool calls (assistant)
-            tool_call_id TEXT,     -- for tool results
-            name TEXT,             -- tool name (for tool results)
-            ts REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS kv (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            ts REAL NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
-        CREATE TABLE IF NOT EXISTS presets (
-            id TEXT PRIMARY KEY,
-            version TEXT NOT NULL,
-            name TEXT NOT NULL,
-            category TEXT NOT NULL,
-            author_name TEXT,
-            license_type TEXT,
-            manifest_json TEXT NOT NULL,
-            installed_at REAL NOT NULL,
-            source_path TEXT
-        );
-    """)
+def _read_schema_version(conn: sqlite3.Connection) -> int:
+    """Return the currently-applied schema version (0 if never applied)."""
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key='schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        # kv table doesn't exist yet — brand new DB.
+        return 0
+    if not row:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO kv (key, value, ts) VALUES ('schema_version', ?, ?)",
+        (str(version), time.time()),
+    )
+
+
+def _has_baseline_tables(conn: sqlite3.Connection) -> bool:
+    """Heuristic: does this DB already have the pre-migration baseline?
+
+    If ``messages`` exists, assume 001_initial.sql is already effectively
+    applied (the ad-hoc CREATE TABLE IF NOT EXISTS code that used to live
+    in ``_migrate`` has run at some point in this DB's history).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+    ).fetchone()
+    return row is not None
+
+
+def _list_migrations() -> list[tuple[int, Path]]:
+    """Return [(version, path)] sorted ascending by version."""
+    if not MIGRATIONS_DIR.is_dir():
+        return []
+    out: list[tuple[int, Path]] = []
+    for p in MIGRATIONS_DIR.iterdir():
+        if not p.is_file():
+            continue
+        m = _MIGRATION_RE.match(p.name)
+        if not m:
+            continue
+        out.append((int(m.group(1)), p))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _apply_one(conn: sqlite3.Connection, path: Path) -> None:
+    """Run one migration file inside a single transaction."""
+    sql = path.read_text(encoding="utf-8")
+    # We control the outer transaction explicitly so that the whole file
+    # is atomic — if any statement raises, nothing sticks.
+    conn.execute("BEGIN")
+    try:
+        conn.executescript(sql)
+    except Exception:
+        conn.rollback()
+        raise
     conn.commit()
 
-    # FTS5 tables for BM25 keyword search (hybrid with Qdrant vector search)
-    try:
-        conn.executescript("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS fts_rag USING fts5(
-                chunk_id, file_path, text,
-                tokenize='porter unicode61'
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS fts_memory USING fts5(
-                point_id, tag, text,
-                tokenize='porter unicode61'
-            );
-        """)
-        conn.commit()
-    except Exception as e:
-        _log.warning(f"FTS5 tables not created (may not be supported): {e}")
 
-    # Add meta column (JSON) for assistant message metadata: tools, duration, etc.
-    try:
-        conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Bring the database up to the latest migration version.
+
+    Behaviour:
+    * Fresh DB → applies every migration in order, bumping schema_version.
+    * Existing install with tables but no schema_version → stamp to 1
+      without re-running 001_initial.sql, then apply 002+ normally.
+    * Already up-to-date → no-op.
+    """
+    migs = _list_migrations()
+    if not migs:
+        return
+    latest = migs[-1][0]
+
+    current = _read_schema_version(conn)
+
+    # Back-compat stamp: a pre-migration DB that already has the baseline
+    # schema is treated as already at version 1.
+    if current == 0 and _has_baseline_tables(conn):
+        # Ensure kv exists before writing (baseline creates it, but be safe).
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS kv ("
+            " key TEXT PRIMARY KEY, value TEXT NOT NULL, ts REAL NOT NULL);"
+        )
+        _write_schema_version(conn, 1)
         conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+        current = 1
+        _log.info("stamped existing DB as schema_version=1 (backward-compat)")
+
+    for version, path in migs:
+        if version <= current:
+            continue
+        try:
+            _apply_one(conn, path)
+        except Exception as e:
+            _log.error(f"migration {path.name} failed: {e}")
+            raise
+        _write_schema_version(conn, version)
+        conn.commit()
+        current = version
+        _log.info(f"applied migration {path.name}")
+
+    if current != latest:  # pragma: no cover — defensive
+        _log.warning(f"schema_version={current} but latest migration is {latest}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Legacy entry point kept for backward compatibility with callers/tests
+    that imported the old helper. Delegates to the migration runner."""
+    _apply_migrations(conn)
 
 
 # --- Public query helpers (use these instead of _get_conn() directly) ---

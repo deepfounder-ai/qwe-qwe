@@ -61,7 +61,7 @@ packages = ["skills"]
 py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "config", "db", "discovery", "inference_setup", "logger", "mcp_client", "memory", "presets", "providers", "rag", "scheduler", "server", "soul", "stt", "synthesis", "tasks", "telegram_bot", "threads", "tools", "tts", "turn_context", "updater", "utils", "vault"]
 
 [tool.setuptools.package-data]
-"*" = ["static/**/*", "schemas/*.yaml"]
+"*" = ["static/**/*", "schemas/*.yaml", "migrations/*.sql", "migrations/*.md"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["tests", "tests/*"]
