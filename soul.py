@@ -1,7 +1,6 @@
 """Soul — agent personality as compact config with low/moderate/high levels."""
 
 import json
-from pathlib import Path
 import os
 import db
 import config
@@ -185,7 +184,8 @@ def get_temperature() -> float:
 
 
 def _system_info() -> str:
-    import platform, shutil
+    import platform
+    import shutil
     parts = [f"{platform.system()} {platform.release()} {platform.machine()}"]
     # WSL detection
     if "microsoft" in platform.release().lower():

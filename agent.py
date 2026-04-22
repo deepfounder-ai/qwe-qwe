@@ -1,9 +1,19 @@
 """Core agent loop — the brain of qwe-qwe."""
 
-import json, re, sys, time, threading, base64, io
-from openai import OpenAI
+import json
+import re
+import time
+import threading
+import base64
+import io
 from rich.console import Console
-import config, db, tools, memory, soul, providers, threads
+import config
+import db
+import tools
+import memory
+import soul
+import providers
+import threads
 import logger
 
 _log = logger.get("agent")
@@ -1087,7 +1097,7 @@ def _maybe_compact(thread_id: str | None = None):
     # Split: old messages to compact, recent to keep
     # all_msgs is already in chronological order
     to_compact_msgs = all_msgs[:len(all_msgs) - keep_count]
-    
+
     if len(to_compact_msgs) < 3:
         return
 

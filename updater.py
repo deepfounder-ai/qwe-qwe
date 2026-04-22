@@ -5,7 +5,6 @@ Usage:
     result = updater.perform_update(on_progress=print)
 """
 
-import json
 import os
 import shutil
 import subprocess

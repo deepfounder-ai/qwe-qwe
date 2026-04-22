@@ -224,7 +224,9 @@ def set(key: str, value) -> str:
 
 def export_config() -> dict:
     """Export all settings, provider, soul, heartbeat as JSON-serializable dict."""
-    import db, json, time
+    import db
+    import json
+    import time
 
     # Settings
     settings = {}
@@ -276,7 +278,8 @@ def export_config() -> dict:
 
 def import_config(data: dict) -> list[str]:
     """Import settings from exported dict. Returns list of applied changes."""
-    import db, json
+    import db
+    import json
     results = []
 
     # Settings

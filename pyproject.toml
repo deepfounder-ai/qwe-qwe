@@ -60,3 +60,45 @@ py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "con
 
 [tool.setuptools.exclude-package-data]
 "*" = ["tests", "tests/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".venv", "build", "dist", "uploads", "memory", "wiki"]
+
+[tool.ruff.lint]
+# Pragmatic selection: catch real bugs (F = pyflakes undefined/unused,
+# B = bugbear likely-bugs, E/W = critical pycodestyle) without style-rule noise.
+# Intentionally NOT enabling: UP (pyupgrade churn), I (import sorting churn),
+# PL/N/D (pedantic style/naming/docstring).
+select = ["E", "F", "W", "B"]
+ignore = [
+    # Line length: project has long readable SQL, prompt strings, URLs, and
+    # prompt literals by design — reformatting would hurt readability.
+    "E501",
+    # f-strings without placeholders are used extensively as visual markers
+    # (e.g. f"[DEBUG] something") — harmless and intentional stylistic choice.
+    "F541",
+    # Ambiguous single-letter variable names (l, I, O) — used in comprehensions
+    # and short local scopes where context makes them clear.
+    "E741",
+    # Module-level imports after statements: intentional across server.py
+    # (signal handler installed at top before heavy imports), agent.py /
+    # agent_loop.py / tasks.py (deferred utils imports to dodge circular deps),
+    # and vault.py (config import after crypto guards). Not a bug class here.
+    "E402",
+    # Compact `if cond: do()` / `x; y` style used in doctor checks and nonlocal
+    # counters — readable and intentional, not a bug.
+    "E701", "E702",
+    # Bugbear rules that flag patterns used widely across the codebase and
+    # aren't real bugs: loop-var-in-closure (B007/B023), default-factory-call
+    # (B008, required by FastAPI Depends), raise-from (B904, noisy on wrapped
+    # exceptions in legacy code paths).
+    "B007", "B008", "B023", "B904",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Legacy test files do sys.path.insert(...) before importing the modules under
+# test, keep unused fixture imports, and use `assert False` for branches that
+# should never execute — all intentional test idioms.
+"tests/*" = ["E402", "F401", "F841", "B011"]

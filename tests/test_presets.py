@@ -945,7 +945,8 @@ def test_remove_trusted_pubkey_refuses_ambiguous_match():
     _reset_db()
     # Synthesize two fake trust entries with the same starting fingerprint.
     # We can't really make ed25519 collide, so inject into KV directly.
-    import db, json as _json
+    import db
+    import json as _json
     _priv, pub = presets.generate_keypair()
     pub_norm = presets._normalize_pem(pub)
     fake_pem = pub_norm  # same PEM twice would dedupe, so use two entries

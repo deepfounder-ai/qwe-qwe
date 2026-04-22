@@ -1,8 +1,13 @@
 """Scheduler — cron-like task runner with SQLite storage."""
 
-import threading, time, json, re
+import threading
+import time
+import json
+import re
 from datetime import datetime, timezone, timedelta
-import db, config, providers
+import db
+import config
+import providers
 import logger
 
 _log = logger.get("scheduler")
@@ -378,7 +383,8 @@ def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
         task_desc: task description or special name (e.g. __heartbeat__).
         max_rounds: maximum tool call rounds (default 10, dry-run uses 5).
     """
-    import config, tools
+    import config
+    import tools
 
     # Heartbeat tasks — special handling
     if task_desc == HEARTBEAT_TASK_NAME:
