@@ -526,6 +526,10 @@ skills/           Pluggable skill modules
 static/           Web UI (single-file HTML/CSS/JS)
 ```
 
+## Contributing
+
+Dependencies are tracked by [Dependabot](.github/dependabot.yml) — weekly grouped PRs for pip (minor + patch bundled) and monthly PRs for GitHub Actions land in the inbox. Security updates bypass the grouping and open their own PR immediately.
+
 ## Community
 
 Join our Telegram community: **[@qwe_qwe_ai](https://t.me/qwe_qwe_ai)**
