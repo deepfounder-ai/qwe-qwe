@@ -1,63 +1,83 @@
-# v0.17.24 — Tech-debt Phase A: lint, hoisted imports, clean tests, dependabot
+# v0.17.25 — TurnContext: per-request state isolation
 
-Four parallel fixes landing together from the tech-debt audit. No user-visible features — the goal is structural reliability so future releases don't hide bugs behind blind spots (like v0.17.23's 3.11 SyntaxError that pytest never touched).
+The big structural fix from the tech-debt plan. Eliminates cross-source contamination between concurrent turns (web + Telegram + CLI running in the same Python process).
 
-## 🧹 A. Ruff lint in CI + 7 real bugs caught
+## 🐛 What was broken (silent)
 
-`ruff` was in `[dev]` deps but never run. First run surfaced **199 findings**, split into:
+Several per-turn pieces of state lived as **module-level globals** in `agent.py`:
 
-- **7 genuine bugs fixed**:
-  1. `cli.py` — missing `import os` in `/preset list` branch → `NameError` on execution
-  2. `server.py` `_broadcast()` — `_ws_clients -= dead` inside closure made `_ws_clients` local → `UnboundLocalError`. Swapped to `.difference_update()`
-  3. `telegram_bot.py` — dropped `-> "Path"` annotation referencing unimported `Path`
-  4. `cli.py` — removed dead `r = _req.get(...)` in TTS doctor check
-  5. `memory.py` — removed unused `result = qc.delete(...)`
-  6. `telegram_bot.py` — removed dead `loading_notified` flag + `thinking_text` buffer
-  7. `server.py` — removed unused `import math` in camera scan
+- `_pending_image_path`, `_pending_file` — the image/document attached to "the current turn"
+- `_content_callback`, `_thinking_callback`, `_status_callback`, `_tool_call_callback`, `_recall_callback` — where to send streaming tokens / tool events
 
-- **68 auto-fixed** (unused imports, comma-split imports — safe cosmetic).
-- **Ignore rules** documented in `pyproject.toml` with justification (long prompt strings, E402 for circular-dep deferrals, f-strings as markers).
+When a web turn and a Telegram turn ran concurrently, whichever one set these last won. Result: Telegram would sometimes get the web client's tool-call events, web would get Telegram's thinking, pending images from turn A leaked into turn B. Rarely caught because 99% of installs have one active user, but structurally wrong — and the pattern was going to bite harder as soon as any user ran web + Telegram simultaneously.
 
-CI now runs `ruff check .` before the syntax check + import smoke + pytest.
+v0.17.19 already fixed `_abort_event` with per-request `threading.Event`. This release does the same treatment for everything else.
 
-## 🔌 B. Lazy imports hoisted
+## 🔧 The fix
 
-v0.17.7 (`subprocess` UnboundLocalError) and v0.17.23 (rag.py f-string SyntaxError) both hit because imports lived inside function bodies and didn't trigger on startup. Hoisting them to module top catches these at import time.
+### New: `turn_context.py` + `TurnContext` dataclass
 
-- **`tools.py`**: 35 local imports → 3 kept lazy (cv2, request_camera_frame_sync, tasks — all circular or heavy). 32 hoisted. Removed duplicate aliased re-imports (`_time`, `_b64`, `_uuid`, `_re`).
-- **`server.py`**: 107 local imports → 20 kept lazy (cv2, pypdf, av, cryptography — all heavy optional deps, documented with `# lazy: ...` comments). 87 hoisted.
-- **Shadowing risks flagged**: `knowledge_url` had `import tasks as t` alongside `[t.strip() for t in tags_raw]`. Comprehensions have their own scope so it didn't collide, but the aliasing was a tripwire. Rewrote to use `tasks.` directly.
-
-Agent.py + agent_loop.py deferred to Phase B (TurnContext refactor touches them heavily).
-
-## 🧪 C. Test `sys.modules` pollution eliminated
-
-**Problem from v0.17.22**: 5 legacy test files (`test_config`, `test_experience`, `test_presets`, `test_reliability`, `test_server_presets`) mutated `sys.modules` at import time. pytest collects everything up front → mocks leaked → 68 cross-file failures. Workaround was running each file in its own pytest process.
-
-**Fix**: refactored all 5 files to use pytest fixtures + `monkeypatch` (auto-reverts). Added `tests/conftest.py` with shared `qwe_temp_data_dir` + `mock_llm` fixtures. Zero `sys.modules[X] = ...` assignments remain.
-
-**CI reverted**: single `pytest tests/ -v` again. Faster and saner.
-
-Result: **158 tests pass in one process in 4.8 seconds** (was: file-by-file loop with ~15 s overhead).
-
-## 📦 D. Dependabot enabled
-
-`.github/dependabot.yml` added:
-- Weekly pip scan of `pyproject.toml`, minor+patch grouped into one PR per week.
-- Monthly github-actions scan.
-- Majors ignored for `fastapi`, `openai`, `qdrant-client`, `pydantic` (need hands-on review).
-- Security updates ALWAYS get their own PR (dependabot default).
-
-## ✅ Result
-
-```
-ruff check .           — 0 errors
-pytest tests/          — 158 passed in 4.8s
-import smoke           — all modules load cleanly
-Python 3.11 AST check  — 0 findings
+```python
+@dataclass
+class TurnContext:
+    abort_event: threading.Event = field(default_factory=threading.Event)
+    on_content: Callable[[str], None] | None = None
+    on_thinking: Callable[[str], None] | None = None
+    on_status: Callable[[str], None] | None = None
+    on_tool_call: Callable[[str, str, str], None] | None = None
+    on_recall: Callable[[list[dict]], None] | None = None
+    image_path: str | None = None
+    file_meta: dict | None = None
+    source: str = "cli"          # "web" | "telegram" | "cli"
+    session_id: str | None = None
 ```
 
-CI now has 4 guardrails before pytest: **ruff → 3.11 syntax → import smoke → pytest**. The class of bugs that slipped through earlier this week (UnboundLocalError, 3.12-only f-strings, unused-import NameError) can no longer ship.
+### Context propagation via `ContextVar`
+
+Rather than thread `ctx` through every helper in `agent.py`, the current context lives in a `contextvars.ContextVar`:
+
+```python
+_current_turn_ctx: ContextVar[TurnContext | None] = ContextVar("...", default=None)
+```
+
+`_run_inner` sets it at the top of each run. `_emit_content` / `_emit_thinking` / etc. read it. Each OS thread (or asyncio task) gets its own isolated copy — no leak between concurrent turns.
+
+### Wire-up
+
+- `agent.run(..., ctx=...)` accepts an optional `TurnContext`. If omitted, creates a fresh one (CLI compat).
+- `agent_loop.run_loop()` extended to take `ctx` + reads callbacks from it.
+- `server.py` WS handler builds `TurnContext` per connection, installs `on_content → WS queue`, passes to `agent.run(..., ctx=my_ctx)`. On `WebSocketDisconnect`, `my_ctx.abort_event.set()`.
+- `telegram_bot.py` stashes ctx on `threading.local`; `server._telegram_handler` retrieves + passes to agent.
+
+### Back-compat shim
+
+Old code that sets `agent._content_callback = fn` still works. `_harvest_legacy_slots(ctx)` runs at the top of every `agent.run()`, copies any present legacy attributes onto the freshly built ctx, and emits a one-shot `DeprecationWarning` per slot. Explicit `ctx=...` callers keep their own values (the harvester only fills `None` fields).
+
+## ✅ Verification
+
+New test: `tests/test_turn_context.py`:
+
+```
+test_cross_source_isolation_two_threads — PASS
+```
+
+Two threads, each with its own `TurnContext` and `on_content` callback. Emit 100 labelled events per thread concurrently. Callback A sees only A-labelled events, callback B only B's. Zero cross-contamination. Six more tests cover the harvester / back-compat / ContextVar reset / deprecation warning.
+
+## 📊 Totals
+
+```
+ruff check .         — 0 errors
+pytest tests/        — 165 passed (was 158 — +7 new turn_context tests)
+import smoke         — `from agent import TurnContext` exports visible
+Python 3.11 AST      — 0 findings
+```
+
+## 🔍 Module globals deliberately kept
+
+- `_structured_output_failed` — provider capability tracking, not per-turn
+- `_compaction_lock` — cross-turn serialisation of DB writes
+- `_compaction_callback` — background subsystem hook, not per-turn
+- `agent._last_tools` — pre-existing stash read by Telegram bot; separate refactor
 
 ## 📦 Upgrade
 
@@ -66,6 +86,6 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-No behavior change. Doctor output unchanged. Just a harder-to-break codebase.
+No user-visible change if you use only one client at a time. If you run Web + Telegram concurrently, you'll notice events stop getting crossed.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
