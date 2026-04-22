@@ -1,58 +1,123 @@
-# v0.17.17 — Provider picker: key input modal + visual cues
+# v0.17.18 — Security hardening pass
 
-User clicked the `openrouter` provider card in **Settings → Model** and nothing happened — no way to enter an API key. The picker was silently switching the active provider, model discovery was failing (no key), and the UI gave no surface to recover.
+Six focused fixes across memory, server, and the agent loop. No new features;
+the goal is to close gaps an authed user (or a mis-behaving tool) could use to
+exfiltrate secrets, pivot to localhost, or corrupt internal state.
 
-## 🔧 Fixes
+## A. memory.save() scrubs secrets before persistence
 
-### 1. "NEEDS KEY" badge on cloud providers without a saved key
+Common key shapes (OpenAI, Anthropic, Groq, GitHub, AWS, Slack, JWT) and
+dotenv-style `NAME_KEY=value` lines are redacted before the text hits Qdrant.
 
-Provider cards now show a small amber chip in the top-right corner when `!has_key && !local`. You can see at a glance which providers are ready to use vs. which need credentials:
+```python
+# memory.py
+def _scrub_secrets(text: str) -> tuple[str, bool]:
+    ...  # returns (scrubbed, was_scrubbed)
 
+def save(text, tag="general", ...):
+    text, scrubbed = _scrub_secrets(text)
+    if scrubbed:
+        hits = text.count("[REDACTED")
+        _log.warning(f"scrubbed {hits} secret-like pattern(s) ...")
+    ...
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│ 🟢 lmstudio   │    │ ollama        │    │ openrouter   │
-│ localhost:1234│    │ localhost:11434│    │ openrouter.ai│
-│              │    │              │    │    NEEDS KEY │
-└──────────────┘    └──────────────┘    └──────────────┘
-   (online)           (no ping)         (amber badge)
+
+The anthropic pattern is ordered before the generic `sk-` pattern so
+`sk-ant-…` correctly labels as `anthropic_key`, not `openai_key`. Covered by
+`tests/test_secret_scrub.py` (11 cases).
+
+## B. /api/knowledge/url refuses private/loopback targets
+
+Before registering the background fetch, resolve the URL's hostname and reject
+it if any resolved address is private, loopback, link-local, or unspecified.
+Escape hatch: `QWE_ALLOW_PRIVATE_URLS=1`.
+
+```python
+# server.py
+if os.environ.get("QWE_ALLOW_PRIVATE_URLS", "").strip() != "1":
+    err = _url_resolves_to_private(url)
+    if err:
+        return JSONResponse({"error": err}, status_code=403)
 ```
 
-Local providers also show a green dot when the health ping succeeds.
+`_url_resolves_to_private` uses `socket.getaddrinfo` + `ipaddress.ip_address`
+so DNS rebinding to a private IP is caught too, not just literal IPs.
 
-### 2. Clicking a "NEEDS KEY" card opens a key-input modal
+## C. Cleared tool-result stubs no longer carry raw bytes
 
-Instead of silently switching (and failing), the card click checks `data-needs-key` and routes to a new `openProviderKeyModal(name)` that:
+`_clear_old_tool_results` previously stored the first 120 chars of content as a
+summary — if a tool printed a key, the stub leaked it back to the model. Now
+the stub is length + tool name only.
 
-- Pre-fills the base URL from the provider preset (e.g. `https://openrouter.ai/api/v1` for openrouter) — read-only-looking but editable if you use a proxy.
-- Password-masked key input with `autofocus`.
-- **Built-in hints** pointing to the right key-management page for common providers:
-  - `openai` → platform.openai.com/api-keys
-  - `openrouter` → openrouter.ai/keys
-  - `groq` → console.groq.com/keys
-  - `anthropic` → console.anthropic.com/settings/keys
-  - `together` → api.together.xyz/settings/api-keys
-  - `deepseek` → platform.deepseek.com/api_keys
-  - `mistral` → console.mistral.ai/api-keys
+```python
+# agent_loop.py — before
+first_line = content.split("\n")[0][:120].strip()
+m["content"] = f"[cleared — {first_line}]"
 
-On **Save + switch**:
+# after
+n = len(content) if isinstance(content, str) else 0
+m["content"] = f"[cleared — {n} chars of {tool_name} output]"
+```
 
-1. `POST /api/provider` — persists the config (same endpoint used by "add custom provider")
-2. `POST /api/model {provider: name}` — switches active provider
-3. Refreshes `/api/status` + `/api/providers` so the card loses the amber badge and becomes active.
+Tool name is looked up via `tool_call_id` → preceding assistant's `tool_calls`.
 
-If either step fails, the modal stays open so you can fix and retry.
+## D. Startup sweeps stale uploads (>14 days)
 
-### 3. Once a key is saved, next click switches directly
+On FastAPI `lifespan` startup, delete files in `config.UPLOADS_DIR` older than
+14 days. Bounded at 10k inspected files. `uploads/kb/` is skipped — those back
+indexed knowledge sources and live until the user removes the KB entry.
 
-No modal the second time — the server reports `has_key: true` on that provider, so the click goes straight through the normal switch path.
+```python
+# server.py
+def _sweep_uploads(max_age_days=14, max_files=10000) -> tuple[int, int]:
+    ...
+    kb_dir = (upl / "kb").resolve()
+    for p in upl.rglob("*"):
+        ...
+        if kb_dir in rp.parents or rp == kb_dir:
+            continue  # KB sources are user-managed
+        if st.st_mtime >= cutoff:
+            continue
+        p.unlink(); deleted += 1; bytes_freed += size
+```
 
-## 📦 Upgrade
+## E. providers._reset_structured_output_cache no longer nukes the set
+
+Line 402 used to do `agent._structured_output_failed = False`, replacing the
+`set[str]` with a bool. The next `provider in agent._structured_output_failed`
+then crashed with `TypeError: argument of type 'bool' is not iterable`.
+
+```python
+# providers.py — before
+agent._structured_output_failed = False
+# after
+agent._structured_output_failed.clear()
+```
+
+Only one call site; nothing else does the same assignment.
+
+## F. /api/kv POST rejects writes to reserved prefixes
+
+Any authed user could previously overwrite `telegram:owner_id`,
+`version:latest`, `provider:config:<name>`, or any internal setting via a plain
+`{key, value}` POST. Now those prefixes 403 and the key length is capped at
+200 chars.
+
+```python
+# server.py
+_KV_WRITE_BLOCKLIST: tuple[str, ...] = (
+    "telegram:owner_id", "version:", "setup_", "_migrated_",
+    "provider:config:", "setting:", "soul:",
+)
+
+for prefix in _KV_WRITE_BLOCKLIST:
+    if key.startswith(prefix):
+        return JSONResponse({"error": ...}, status_code=403)
+```
+
+## Upgrade
 
 ```bash
 git pull && pip install -e . --upgrade
 # Restart the server
 ```
-
-Open **Settings → Model** and the cloud providers you haven't configured will show an amber **NEEDS KEY** chip. Click one and the modal appears.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
