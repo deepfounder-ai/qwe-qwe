@@ -27,9 +27,14 @@ dependencies = [
     "jsonschema>=4.0",
     # Universal document → Markdown converter (Microsoft). Drives knowledge-base
     # ingestion: URL scraping, PDF / DOCX / PPTX / XLSX / HTML / EPUB / images.
-    # The [all] extra covers Office + audio; we also pin the critical siblings
-    # directly so a fresh `pip install` never ships a degraded KB pipeline.
-    "markitdown[all]>=0.1.0",
+    # We deliberately avoid the [all] extra — it pulls ~115 MB of dead weight we
+    # never use: pandas (xlsx — we have an openpyxl fallback in rag._read_xlsx),
+    # speech_recognition (we use faster-whisper), azure-ai-documentintelligence
+    # (Azure OCR — never called), youtube-transcript-api (broken by YT bot
+    # detection — replaced with yt-dlp in v0.17.13). Enumerate the extras we
+    # actually need and pin the critical siblings directly so a fresh install
+    # never ships a degraded KB pipeline.
+    "markitdown[docx,pptx,pdf,outlook]>=0.1.0",
     "python-docx>=1.0",
     "python-pptx>=1.0",
     "openpyxl>=3.1",
