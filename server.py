@@ -663,6 +663,18 @@ async def status():
 
     active_thread = threads.get(threads.get_active_id())
 
+    # Model context window — manual override beats auto-detect; otherwise
+    # probe the provider (LM Studio / Ollama), falling back to 0 when unknown
+    # (the UI treats 0 as "budget unknown" and shows only the absolute number).
+    override = int(config.get("model_context") or 0)
+    detected = 0
+    if override <= 0:
+        try:
+            detected = providers.detect_context_length()
+        except Exception:
+            detected = 0
+    model_ctx = override or detected
+
     return {
         "agent": s["name"],
         "model": providers.get_model(),
@@ -675,6 +687,8 @@ async def status():
         "memories": mem_count,
         "skills": active_skills,
         "core_tools": core_tools,
+        "model_context": model_ctx,
+        "model_context_source": "override" if override else ("detected" if detected else "unknown"),
     }
 
 

@@ -650,8 +650,8 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
   max-height: calc(1.5em * 4);
 }
 
-/* Inspector mini-stats grid (INPUT / OUTPUT cards) */
-.mini-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+/* Inspector mini-stats grid — auto-fits 1-3 cells */
+.mini-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 8px; margin-top: 12px; }
 .mini-stat { padding: 8px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
 .mini-stat .lbl { font-family: var(--font-mono); font-size: 9.5px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.05em; }
 .mini-stat .v { font-family: var(--font-mono); font-size: 15px; color: var(--fg); font-weight: 500; margin-top: 2px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3009,9 +3009,21 @@ function renderInspector() {
   const threadTokens = (t && t.est_tokens) || 0;
   const threadMsgs = (t && (t.messages || 0)) || state.messages.length;
 
-  // Context budget (real, from config). Fallback to ollama ctx if set.
-  const budget = (state.settings && (state.settings.context_budget || state.settings.ollama_num_ctx)) || 24000;
-  const pct = Math.min(100, (threadTokens / budget) * 100);
+  // Context Window — REAL: the actual prompt_tokens of the last turn vs the
+  // model's real context window. Denominator priority:
+  //   1. /api/status.model_context  (auto-detected from LM Studio / Ollama)
+  //   2. settings.model_context     (manual override, 0 = use auto)
+  //   3. settings.ollama_num_ctx    (Ollama-specific)
+  //   4. 0                          (unknown — UI shows "?" instead of a %)
+  const modelCtx = (st.model_context)
+    || (state.settings && (state.settings.model_context || state.settings.ollama_num_ctx))
+    || 0;
+  const ctxSource = st.model_context_source || (modelCtx ? 'setting' : 'unknown');
+  // Numerator: actual prompt tokens that went into the model on the last turn.
+  // Fall back to thread-history estimate only when no turn has happened yet.
+  const lastPrompt = (lt && lt.prompt_tokens) || threadTokens || 0;
+  const pct = modelCtx > 0 ? Math.min(100, (lastPrompt / modelCtx) * 100) : 0;
+  const pctColor = pct >= 90 ? 'var(--err)' : pct >= 75 ? 'var(--warn)' : pct >= 50 ? 'var(--accent)' : 'var(--ok)';
 
   // Sparkbars from real per-turn token counts
   const timeline = state.tokenTimeline.length ? state.tokenTimeline : [0];
@@ -3055,27 +3067,41 @@ function renderInspector() {
         '<span class="k">Messages</span><span class="v">' + threadMsgs.toLocaleString() + '</span>' +
       '</div></div>' +
 
-    // Context window — big gauge
-    '<div class="insp-section"><div class="insp-section-hdr"><h3>Context window</h3>' +
-      '<span class="tag accent" style="font-size:9px">' + pct.toFixed(1) + '%</span></div>' +
-      '<div class="token-gauge">' +
-        '<div class="row"><div><span class="used">' + threadTokens.toLocaleString() + '</span>' +
-          '<span class="total">/ ' + (budget/1000).toFixed(0) + 'k</span></div>' +
-          '<span class="pct">' + pct.toFixed(1) + '%</span></div>' +
-        '<div class="bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
+    // Context window — BIG gauge. Shows last turn's actual prompt_tokens vs
+    // the model's real context window. This is what "am I about to run out"
+    // actually depends on.
+    '<div class="insp-section">' +
+      '<div class="insp-section-hdr"><h3>Context window</h3>' +
+        (modelCtx > 0
+          ? '<span class="tag" style="font-size:9px;color:' + pctColor + ';border-color:' + pctColor + '">' + pct.toFixed(1) + '%</span>'
+          : '<span class="tag" style="font-size:9px" title="Model context unknown — set model_context in Settings → Inference">?</span>') +
       '</div>' +
+      '<div class="token-gauge">' +
+        '<div class="row"><div><span class="used">' + lastPrompt.toLocaleString() + '</span>' +
+          '<span class="total">/ ' + (modelCtx > 0 ? (modelCtx/1000).toFixed(0) + 'k' : '? ') + '</span></div>' +
+          '<span class="pct" style="color:' + pctColor + '">' + (modelCtx > 0 ? pct.toFixed(1) + '%' : '—') + '</span></div>' +
+        '<div class="bar"><div class="fill" style="width:' + pct + '%;background:' + pctColor + '"></div></div>' +
+        '<div style="font-size:9px;color:var(--fg-4);margin-top:4px;font-family:var(--font-mono);display:flex;justify-content:space-between">' +
+          '<span>prompt tokens, last turn</span>' +
+          '<span title="Where the context limit came from">' + (ctxSource === 'detected' ? 'auto' : ctxSource === 'override' ? 'manual' : ctxSource === 'setting' ? 'setting' : 'unknown') + '</span>' +
+        '</div>' +
+      '</div>' +
+      // Sparkline — prompt_tokens per turn history (shows growth trajectory)
       '<div style="margin-top:14px"><div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:10px;font-family:var(--font-mono);color:var(--fg-4)">' +
         '<span>tokens / turn</span><span>last ' + timeline.length + '</span></div>' +
         '<div class="sparkbars">' +
           timeline.map(v => '<div class="bar" style="height:' + (v/maxT)*100 + '%;opacity:' + (0.3 + (v/maxT)*0.7) + '"></div>').join('') +
         '</div></div>' +
-      // INPUT / OUTPUT mini-cards — last turn
+      // Last-turn breakdown (OUTPUT + TOK/SEC + THREAD history)
       (lt
         ? '<div class="mini-stats">' +
-            '<div class="mini-stat"><div class="lbl">INPUT</div><div class="v">' + (lt.prompt_tokens || 0).toLocaleString() + '</div></div>' +
             '<div class="mini-stat"><div class="lbl">OUTPUT</div><div class="v">' + (lt.tokens || 0).toLocaleString() + '</div></div>' +
+            '<div class="mini-stat"><div class="lbl">TOK/SEC</div><div class="v">' + (lt.tok_per_sec ? lt.tok_per_sec.toFixed(0) : '—') + '</div></div>' +
+            '<div class="mini-stat"><div class="lbl">HISTORY</div><div class="v">' + threadTokens.toLocaleString() + '</div></div>' +
           '</div>'
-        : '') +
+        : '<div class="mini-stats">' +
+            '<div class="mini-stat"><div class="lbl">HISTORY</div><div class="v">' + threadTokens.toLocaleString() + '</div></div>' +
+          '</div>') +
     '</div>' +
 
     // Recalled memories — real data from /api/knowledge/search

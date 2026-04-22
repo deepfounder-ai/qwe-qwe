@@ -508,6 +508,69 @@ def fetch_models(name: str | None = None) -> list[str]:
         return p.get("models", [])
 
 
+# ── Model context auto-detect ──
+
+_CTX_CACHE: dict[tuple[str, str], tuple[int, float]] = {}  # (provider, model) -> (ctx, expires_at)
+_CTX_TTL = 60.0  # cache for 60s — model swap invalidates naturally
+
+
+def detect_context_length(timeout: float = 1.5) -> int:
+    """Auto-detect the active model's context window in tokens.
+
+    Returns 0 if undetectable. Tries:
+      - LM Studio: GET /api/v0/models (native API, richer metadata)
+      - Ollama:    POST /api/show (returns modelfile with num_ctx / context_length)
+      - OpenAI-compatible: no public field, returns 0 (user sets model_context)
+
+    Cached per (provider, model) for 60s.
+    """
+    import time
+    name = get_active_name()
+    model = get_model()
+    key = (name, model)
+    now = time.time()
+    cached = _CTX_CACHE.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    ctx = 0
+    url = get_url().rstrip("/")
+    # Strip trailing /v1 to get base host
+    base = url[:-3].rstrip("/") if url.endswith("/v1") else url
+
+    try:
+        import urllib.request, json as _json
+        if name == "lmstudio" or "1234" in url:
+            # LM Studio native API exposes loaded_context_length per model
+            req = urllib.request.Request(f"{base}/api/v0/models")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+            for m in (data.get("data") or []):
+                if m.get("id") == model or m.get("id", "").startswith(model):
+                    ctx = int(m.get("loaded_context_length") or m.get("max_context_length") or 0)
+                    break
+        elif name == "ollama" or "11434" in url:
+            # Ollama exposes context_length in /api/show modelinfo
+            req = urllib.request.Request(
+                f"{base}/api/show",
+                data=_json.dumps({"name": model}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+            mi = data.get("model_info") or {}
+            # keys look like "qwen2.context_length" — pick the first *.context_length
+            for k, v in mi.items():
+                if k.endswith(".context_length"):
+                    ctx = int(v)
+                    break
+    except Exception as e:
+        _log.debug(f"detect_context_length({name}, {model}): {e}")
+
+    _CTX_CACHE[key] = (ctx, now + _CTX_TTL)
+    return ctx
+
+
 # ── Init: sync config.py with DB state on import ──
 
 def _init():
