@@ -413,14 +413,16 @@ def _is_youtube_url(url: str) -> bool:
 def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
     """Fetch a YouTube transcript via yt-dlp. Returns (markdown_text, meta) or None.
 
-    markitdown's bundled `youtube-transcript-api` is frequently broken by
-    YouTube's bot-detection (ParseError: no element found because the
-    timedtext endpoint returns empty without a PotToken). yt-dlp ships with
-    the JS-based workarounds and is actively maintained, so we use it as the
-    primary path for YouTube URLs.
+    Strategy: let yt-dlp **itself** download the subtitle file to a temp dir
+    (via writesubtitles=True + download([url])). yt-dlp handles cookies,
+    retries, rate-limit backoff, and session reuse. Grabbing the baseUrl from
+    extract_info() and then fetching it ourselves with urllib bypasses all
+    that and trips HTTP 429 after a couple of videos — YouTube notices the
+    session mismatch and rate-limits the anonymous scrape.
 
-    Returns None if yt-dlp is not installed or the video has no transcripts.
-    Logs warnings on failure so the caller can fall through to markitdown.
+    Returns None if yt-dlp is not installed, no transcripts exist, or a
+    non-transcript failure leaves nothing worth indexing. Logs warnings so
+    the caller can fall through to markitdown.
     """
     try:
         import yt_dlp  # type: ignore
@@ -428,15 +430,46 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
         _log.info("yt-dlp not installed — skipping YouTube-specific path (fallback to markitdown)")
         return None
 
-    opts = {
+    import tempfile, shutil
+    from pathlib import Path
+
+    # Language priority — ordered by what's MOST LIKELY to work AND be accurate:
+    # 1. user's stt_language (if they set one in Settings)
+    # 2. English variants (most common manual captions)
+    # 3. "" marker to signal "any manual sub beats auto in a specific lang"
+    # For video in a non-English language, manual subs in the NATIVE language
+    # are always more accurate than auto-translated English. We handle that by
+    # preferring manual-any over auto-en in best_lang() below.
+    preferred_lang = (config.get("stt_language") or "").strip()
+    lang_priority = []
+    if preferred_lang:
+        lang_priority.append(preferred_lang)
+        base = preferred_lang.split("-")[0]
+        if base != preferred_lang:
+            lang_priority.append(base)
+    lang_priority.extend(["en", "en-US", "en-GB"])
+    # Dedup while preserving order
+    seen_langs = set()
+    sub_langs = [l for l in lang_priority if not (l in seen_langs or seen_langs.add(l))]
+
+    # Optional browser-cookies to authenticate the session. YouTube rate-limits
+    # anonymous scrapes hard after a few videos — with a logged-in cookie
+    # from Chrome/Firefox/Edge/Safari/Brave the ceiling is much higher.
+    # Set via Settings → Memory → yt_cookies_from_browser.
+    browser_cookies = (config.get("yt_cookies_from_browser") or "").strip().lower()
+    cookie_opt = {"cookiesfrombrowser": (browser_cookies,)} if browser_cookies else {}
+
+    # Phase 1: extract metadata (no downloads) so we can pick the best track
+    # AND decide whether to ask yt-dlp to fetch manual or auto captions.
+    info_opts = {
         "skip_download": True,
         "quiet": True, "no_warnings": True,
-        "writesubtitles": False,  # we fetch the URL ourselves from the info dict
-        "writeautomaticsub": False,
-        "socket_timeout": 15,
+        "socket_timeout": 20,
+        "extractor_retries": 2,
+        **cookie_opt,
     }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         _log.warning(f"yt-dlp extract failed for {url}: {e}")
@@ -448,72 +481,108 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
     description = (info.get("description") or "").strip()
     video_id = info.get("id") or ""
 
-    # Gather caption tracks: prefer manual → auto, prefer user-language → English → any
     manual = info.get("subtitles") or {}
     auto = info.get("automatic_captions") or {}
-    # Picking order: user preference if set, else en / en-*, else first available
-    preferred_lang = config.get("stt_language") or "en"
-    lang_priority = [preferred_lang, preferred_lang.split("-")[0], "en", "en-US", "en-GB"]
 
-    def pick_track(pool: dict) -> tuple[str, list] | None:
-        for lang in lang_priority:
+    # Decide: prefer manual subs (more accurate). Pick the best language.
+    # For manual: priority-match first, then ANY manual track (native language
+    # on a non-English video is far better than nothing).
+    # For auto: priority-match only (auto-captions in random languages are
+    # often machine-translated garbage).
+    def best_lang(pool: dict, fallback_any: bool) -> str | None:
+        for lang in sub_langs:
             if lang in pool and pool[lang]:
-                return lang, pool[lang]
-        # Any language: pick English-base first if present, otherwise first
-        for lang, tracks in pool.items():
-            if lang.startswith("en") and tracks:
-                return lang, tracks
-        if pool:
-            lang, tracks = next(iter(pool.items()))
-            return lang, tracks
+                return lang
+        for lang in pool:
+            if lang.startswith("en") and pool[lang]:
+                return lang
+        if fallback_any and pool:
+            return next(iter(pool))
         return None
 
-    track_info = pick_track(manual) or pick_track(auto)
-    if not track_info:
+    manual_lang = best_lang(manual, fallback_any=True)
+    auto_lang = best_lang(auto, fallback_any=False)
+    want_lang = manual_lang or auto_lang
+    is_auto = manual_lang is None
+
+    if not want_lang:
+        # No transcripts at all — return title + description so user gets something
         _log.info(f"yt-dlp: no transcripts available for {url}")
-        # Still return title + description — better than nothing
         if description or title:
             md = f"# {title}\n\n**Channel:** {channel} · **Duration:** {duration}s\n\n{description}"
-            return md, {"video_id": video_id, "title": title, "channel": channel, "duration": duration, "has_transcript": False}
+            return md, {"video_id": video_id, "title": title, "channel": channel,
+                        "duration": duration, "has_transcript": False, "source_type": "metadata"}
         return None
 
-    lang, tracks = track_info
-    # Pick VTT format first (simplest to parse), fall back to anything
-    track = next((t for t in tracks if t.get("ext") == "vtt"), None) or \
-            next((t for t in tracks if t.get("ext") in ("srv3", "ttml", "srv1", "srv2")), None) or \
-            tracks[0]
-    sub_url = track.get("url")
-    if not sub_url:
-        return None
+    # Phase 2: let yt-dlp download the subtitle file itself (so it reuses the
+    # authenticated session and avoids 429).
+    tmpdir = Path(tempfile.mkdtemp(prefix="qweqwe_yt_"))
+    outtmpl = str(tmpdir / "%(id)s.%(ext)s")
+    dl_opts = {
+        "skip_download": True,
+        "writesubtitles": not is_auto,
+        "writeautomaticsub": is_auto,
+        "subtitleslangs": [want_lang],
+        "subtitlesformat": "vtt/srv3/ttml/best",
+        "outtmpl": outtmpl,
+        "quiet": True, "no_warnings": True,
+        "socket_timeout": 30,
+        "extractor_retries": 3,
+        "retries": 5,
+        "fragment_retries": 5,
+        "sleep_interval_requests": 1,
+        **cookie_opt,
+    }
 
-    # Download the transcript
-    import urllib.request
+    transcript = ""
+    fmt_used = ""
     try:
-        req = urllib.request.Request(sub_url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        })
-        with urllib.request.urlopen(req, timeout=20) as r:
-            sub_raw = r.read().decode("utf-8", errors="replace")
+        with yt_dlp.YoutubeDL(dl_opts) as ydl:
+            ydl.download([url])
+        # yt-dlp names the file <id>.<lang>.<ext> — find whichever extension landed
+        for ext in ("vtt", "srv3", "ttml", "srv1", "srv2"):
+            p = tmpdir / f"{video_id}.{want_lang}.{ext}"
+            if p.exists():
+                sub_raw = p.read_text(encoding="utf-8", errors="replace")
+                transcript = _clean_subtitle_text(sub_raw, fmt=ext)
+                fmt_used = ext
+                break
+        # Fallback: any file with the video id + lang (in case yt-dlp used a
+        # slightly different extension name)
+        if not transcript:
+            for p in tmpdir.glob(f"{video_id}.*"):
+                sub_raw = p.read_text(encoding="utf-8", errors="replace")
+                cand = _clean_subtitle_text(sub_raw, fmt=p.suffix.lstrip("."))
+                if cand and len(cand) > len(transcript):
+                    transcript = cand
+                    fmt_used = p.suffix.lstrip(".")
     except Exception as e:
-        _log.warning(f"yt-dlp: transcript fetch failed ({track.get('ext')}): {e}")
-        return None
+        _log.warning(f"yt-dlp subtitle download failed for {url}: {e}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
-    # Convert subtitle format → clean text (drop timestamps, cue metadata, HTML)
-    transcript = _clean_subtitle_text(sub_raw, fmt=track.get("ext", "vtt"))
     if not transcript or len(transcript) < 20:
-        _log.info(f"yt-dlp: transcript parsed to empty for {url}")
+        # Captions download failed — still return metadata so user gets something
+        _log.info(f"yt-dlp: transcript parsed to empty for {url} (falling back to metadata)")
+        if description or title:
+            md = f"# {title}\n\n**Channel:** {channel} · **Duration:** {duration}s\n\n{description}"
+            return md, {"video_id": video_id, "title": title, "channel": channel,
+                        "duration": duration, "has_transcript": False, "source_type": "metadata",
+                        "fallback_reason": "transcript_download_failed"}
         return None
 
     md = (
         f"# {title}\n\n"
-        f"**Channel:** {channel} · **Duration:** {duration}s · **Language:** {lang}"
-        f" · **Source:** {'manual' if track_info is pick_track(manual) else 'auto-generated'}\n\n"
+        f"**Channel:** {channel} · **Duration:** {duration}s · **Language:** {want_lang}"
+        f" · **Source:** {'auto-generated' if is_auto else 'manual'} ({fmt_used})\n\n"
         f"{('## Description\n\n' + description + '\n\n') if description else ''}"
         f"## Transcript\n\n{transcript}\n"
     )
     meta = {
         "video_id": video_id, "title": title, "channel": channel,
-        "duration": duration, "lang": lang, "has_transcript": True,
+        "duration": duration, "lang": want_lang, "has_transcript": True,
+        "source_type": "auto-generated" if is_auto else "manual",
+        "fmt": fmt_used,
     }
     return md, meta
 
@@ -576,18 +645,26 @@ def index_url(url: str, tags: list[str] | None = None) -> dict:
             # Prefer a filename with the video title, not the netloc+path
             title_slug = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (yt_meta.get("title") or "youtube"))[:60].strip() or "youtube"
             dest = uploads / f"{slug}_{title_slug}.md"
+            has_t = yt_meta.get("has_transcript", False)
+            fallback_reason = yt_meta.get("fallback_reason", "")
             header = (
                 f"<!-- Source: {url} -->\n"
                 f"<!-- Fetched: {time.strftime('%Y-%m-%d %H:%M:%S')} -->\n"
                 f"<!-- Converter: yt-dlp -->\n"
-                f"<!-- Video: {yt_meta.get('video_id')} · {yt_meta.get('duration')}s · {yt_meta.get('lang','?')} -->\n\n"
+                f"<!-- Video: {yt_meta.get('video_id')} · {yt_meta.get('duration')}s · {yt_meta.get('lang','?')} -->\n"
+                f"<!-- Content: {'full transcript + metadata' if has_t else 'metadata only' + (' (' + fallback_reason + ')' if fallback_reason else '')} -->\n\n"
             )
             dest.write_text(header + md_text, encoding="utf-8")
             all_tags = list(tags or []) + ["source:url", "source:youtube", url]
+            if not has_t:
+                all_tags.append("source:youtube:metadata-only")
             result = index_file(str(dest), tags=all_tags)
             result["url"] = url
             result["converter"] = "yt-dlp"
             result["title"] = yt_meta.get("title")
+            result["has_transcript"] = has_t
+            if fallback_reason:
+                result["fallback_reason"] = fallback_reason
             return result
         _log.info(f"yt-dlp failed for {url} — falling through to markitdown")
 

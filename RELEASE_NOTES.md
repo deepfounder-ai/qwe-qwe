@@ -1,52 +1,76 @@
-# v0.17.14 — Knowledge ingest: real progress + recent activity + no more zombie tasks
+# v0.17.15 — YouTube transcript: proper yt-dlp download + language fix + cookie bypass
 
-Three fixes to the knowledge ingestion feedback loop. Previously you clicked "paste URL", saw a chip flash `indexing 1/1` for half a second, and that was it. No idea what just happened, no trace afterwards, and every URL/file batch run left a "running" zombie in the internal task registry forever.
+User tested `https://www.youtube.com/watch?v=gzrAd7tCqYk` (Russian video) and still got ~800 bytes instead of a transcript. Three problems in one report:
 
-## 🔧 Fix A — zombie tasks
+## 🐛 What went wrong
 
-`server._run_url()` called `tasks.register("knowledge_url", …)` at start but **never** called `tasks.update(id, "done")` at the end. Every URL import leaked a "running" row into `tasks._results`, which then got injected into the agent's system prompt via `tasks.get_running()` ("background tasks running right now: knowledge_url — Fetching https://…"). The agent started each turn believing there was a pending fetch that had actually completed hours ago.
+### 1. Direct urllib fetch tripped HTTP 429
 
-Fixed: `_run_url` and `_run_knowledge_index` now both call `tasks.update(task_id, "done"/"error", summary)` in a `finally:` block so even crashes close the row.
+v0.17.13 took `track.get("url")` from yt-dlp's `extract_info()` result and then fetched that URL with plain `urllib.request.urlopen()`. That bypasses yt-dlp's authenticated session / cookies / retry logic, so YouTube rate-limits the anonymous scrape. Works for the first 1–2 videos, then **HTTP 429 Too Many Requests** for ~15+ minutes per IP.
 
-## 🆕 Fix B — real progress strip
+### 2. Wrong language picked
 
-A proper strip appears below the upload zone while indexing runs:
+Default priority was `[stt_language → en → en-US → en-GB]`. For a Russian video with manual Russian captions + auto-translated English captions, it tried `en` first → hit 429 on the auto-translate fetch → failed. Should have used the Russian manual subs in the first place — manual > auto in any language.
+
+### 3. Fallback output looked empty
+
+When the transcript fetch failed, the old code returned `None` and fell through to markitdown, which scraped the logged-out watch page and got the footer. User saw ~800 bytes of "About / Press / Copyright…" and rightly felt confused.
+
+## 🔧 Fixes
+
+### yt-dlp downloads subtitles itself
+
+`_fetch_youtube_transcript()` now:
+
+1. **Phase 1** — `extract_info(download=False)` to get metadata + caption catalogue.
+2. **Phase 2** — runs `ydl.download([url])` with `writesubtitles=True/writeautomaticsub=True` + `subtitleslangs=[want_lang]` + `outtmpl=<tempdir>`. yt-dlp writes the subtitle file to disk using its own session (same cookies, retries, backoff). We read the file back and clean it.
+3. **Phase 3** — `shutil.rmtree(tmpdir)` in `finally:` so we don't leak temp files.
+
+Retry settings added: `extractor_retries=3`, `retries=5`, `fragment_retries=5`, `sleep_interval_requests=1`, `socket_timeout=30`.
+
+### Smarter language priority
 
 ```
-⟳ FETCHING…  https://youtube.com/watch?v=dQw4w9WgXcQ   [████████▁▁▁▁]  1 / 1
+1. Manual caption matching user's stt_language (if set)
+2. Manual caption in English family
+3. ANY manual caption (native-language manual beats auto-translated English)
+4. Auto caption matching stt_language or English family
 ```
 
-- **Phase label** mapped from raw server phase: `fetch / convert / cpu / gpu / index / done` → `Fetching / Converting / Chunking / Embedding / Indexing / Done`.
-- **File name** from current URL or filename being processed.
-- **Determinate bar** — width = `current / total`.
-- **Counter** in monospace, updates live as `pollKbStatus` ticks every 1.5s.
+For the user's Russian video: now picks the manual Russian track instead of trying an auto-translated English track that never arrives.
 
-The tiny `indexing 1/1` chip in the page header is still there as a quick glance.
+### `yt_cookies_from_browser` setting
 
-## 🆕 Fix D — Recent activity card
+**Settings → Memory → `yt_cookies_from_browser`** — put `chrome`, `firefox`, `edge`, `safari`, `brave`, `chromium`, `opera`, or `vivaldi` and yt-dlp will pull the YouTube session cookies from that browser. With an authenticated session YouTube's anonymous rate limit basically doesn't apply.
 
-New card below the upload zone + progress strip. Shows the last 5 completed indexings (up to 20 retained server-side) with:
+Default is empty (anonymous). If you hit repeated 429s on YouTube URLs, set this to your browser and try again.
 
-| Kind icon | Label | Chunks | Duration | Time ago |
-|---|---|---|---|---|
-| 🌐 globe | `Rick Astley - Never Gonna Give You Up` | 4 ch | 3.4s | 12s ago |
-| 📦 package | `5 files` | 42 ch | 18.2s | 2m ago |
-| 📘 book | `research.pdf` | 18 ch | 5.1s | 1h ago |
+### Metadata-only fallback when transcript can't be fetched
 
-Status colours: green dot for done, amber for partial (some errors), red for error. Rows include `title` tooltip with full URL/path.
+If the transcript download fails (network, rate limit, video has no captions, region lock), we no longer return `None` and fall through to markitdown. Instead we return a proper markdown file with **title + channel + duration + description**:
 
-### Server plumbing
+```markdown
+<!-- Source: https://www.youtube.com/watch?v=gzrAd7tCqYk -->
+<!-- Converter: yt-dlp -->
+<!-- Video: gzrAd7tCqYk · 1297s · ? -->
+<!-- Content: metadata only (transcript_download_failed) -->
 
-- New module-level `_knowledge_history: deque(maxlen=20)` (newest first).
-- `_push_history(entry)` called from all three worker completion paths.
-- New endpoint `GET /api/knowledge/recent` returns `{items: [...]}`.
-- Each entry carries `{kind, label, url, status, chunks, duration_sec, converter, errors, ts}`.
+# Почему Эволюция Снова и Снова Создаёт Одних и Тех Же Животных
 
-### UI plumbing
+**Channel:** ВымершийЗоопарк · **Duration:** 1297s
 
-- `state.kbRecent` populated by `loadKbRecent()` on every Memory view load and after each `pollKbStatus` run.
-- `renderKbProgress()` + `renderKbRecent()` render into the Memory view between upload zone and the grid.
-- "2 total" counter in the card header so you can see if the history is trimming.
+Под сланцами Германии рабочие обнаружили ископаемые, которых не должно было существовать…
+```
+
+For the problem URL: **917 bytes of real content** (title + Russian description) instead of 745 bytes of YouTube footer.
+
+Tagged with `source:youtube:metadata-only` so you can find / re-import them later.
+
+### UI surfacing
+
+**Memory → Recent activity** now shows a `⚠ metadata only` badge next to any YouTube entry where the transcript couldn't be fetched, with the reason (e.g. `transcript_download_failed`) in the tooltip.
+
+Status colour is `partial` (amber) for metadata-only, not `done` (green), so it's visually distinct at a glance.
 
 ## 📦 Upgrade
 
@@ -55,11 +79,7 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-Now when you paste a URL:
-
-1. Progress strip shows `Fetching…  URL  [▓▓▓▓▁▁▁▁]  0/1` immediately.
-2. Flips to `Indexing… path  [▓▓▓▓▓▓▓▓▓▓]  1/1` when done.
-3. Strip disappears, Recent activity gets a new row: `🌐 Rick Astley — … 4 ch 3.4s just now`.
-4. The **tasks registry** is clean — no leaked "running" entries, the agent's system prompt stops hallucinating about pending fetches.
+If you import lots of YouTube URLs and keep hitting rate limits:
+**Settings → Memory → yt_cookies_from_browser** → `chrome` (or whatever you use). Make sure you're logged into YouTube in that browser first.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

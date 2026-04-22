@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.17.14"
+VERSION = "0.17.15"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -165,6 +165,7 @@ EDITABLE_SETTINGS = {
     "fallback_model":       ("setting:fallback_model",        str, "",     "Fallback model (e.g. anthropic/claude-sonnet-4)", "", ""),
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
     "model_context":        ("setting:model_context",         int, 0,      "Model context window in tokens (0 = auto-detect from provider, else override)", 0, 2000000),
+    "yt_cookies_from_browser": ("setting:yt_cookies_from_browser", str, "", "Use browser cookies for YouTube to bypass rate limits. Values: chrome, firefox, edge, safari, brave, chromium, opera, vivaldi. Empty = anonymous (rate-limited after a few videos).", "", ""),
     # ── Vision (Camera) ──
     "camera_index":         ("setting:camera_index",          int, -1,    "Camera index for agent vision (-1 = auto-detect best, 0/1/2 = specific camera)", -1, 10),
     # ── Voice: STT ──

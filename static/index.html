@@ -3421,9 +3421,14 @@ function renderKbRecent() {
     const label = it.label || it.url || '(unnamed)';
     const chunks = it.chunks || 0;
     const dur = it.duration_sec ? it.duration_sec.toFixed(1) + 's' : '';
-    return '<div class="row ' + cls + '" title="' + esc(it.url || label) + '">' +
+    // YouTube-specific warning when we only got metadata (transcript blocked)
+    const warn = (it.has_transcript === false)
+      ? ' · metadata only (' + esc(it.fallback_reason || 'no transcript') + ')'
+      : '';
+    const tooltip = (it.url || label) + (warn ? ' — ' + warn.replace(/ · /, '') : '');
+    return '<div class="row ' + cls + '" title="' + esc(tooltip) + '">' +
       '<div class="rk-icon">' + ico(iconFor(it.kind), 12) + '</div>' +
-      '<div class="lbl">' + esc(label) + '</div>' +
+      '<div class="lbl">' + esc(label) + (warn ? '<span style="color:var(--warn);font-size:10px;font-family:var(--font-mono);margin-left:8px">⚠ metadata only</span>' : '') + '</div>' +
       '<div class="chunks">' + (chunks ? chunks + ' ch' : (it.status === 'error' ? 'err' : '—')) + '</div>' +
       '<div class="dur">' + esc(dur) + '</div>' +
       '<div class="ago">' + esc(agoLabel(it.ts)) + '</div>' +

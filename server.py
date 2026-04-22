@@ -1784,14 +1784,21 @@ async def knowledge_url(data: dict):
                          f"{chunks} chunks via {converter}" if ok else result.get("status", "failed"))
             except Exception:
                 pass
+            has_t = result.get("has_transcript") if isinstance(result, dict) else None
+            fb = result.get("fallback_reason", "") if isinstance(result, dict) else ""
+            # Mark "partial" when yt-dlp fell back to metadata-only so the UI
+            # surfaces the warning without treating it as a hard failure.
+            entry_status = "error" if not ok else ("partial" if has_t is False else "done")
             _push_history({
                 "kind": "url",
                 "label": label[:120],
                 "url": url,
-                "status": "done" if ok else "error",
+                "status": entry_status,
                 "chunks": chunks,
                 "duration_sec": duration,
                 "converter": converter,
+                "has_transcript": has_t,
+                "fallback_reason": fb,
                 "errors": list(_knowledge_task.get("errors", [])) if _knowledge_task else [],
             })
 
