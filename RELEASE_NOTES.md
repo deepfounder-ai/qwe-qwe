@@ -1,75 +1,92 @@
-# v0.17.26 — Integration tests, slimmer install, schema migrations, dev docs
+# v0.17.27 — JS lint, coverage floor, release automation
 
-Four more tech-debt items off the priority list, landing in parallel. Pure structural work — no user-visible behavior changes, but the codebase is materially more resilient.
+Three more tech-debt items closed. These are the last "nearly-free wins" from the audit.
 
-## ✅ C1. Integration tests (16 new)
+## 🟨 D1. JS syntax check for `static/index.html`
 
-`tests/test_integration.py` — the layer missing between unit tests and manual QA. Uses `TestClient(server.app)` + mocked LLM to exercise real endpoints end-to-end.
+5500-line inline vanilla JS + zero build step = bugs caught only by manual review. Now automated.
 
-Covers:
+- **`scripts/check_js.py`** — pure Python helper that extracts every `<script>` block, writes to temp `.js`, runs `node --check`, remaps stderr line numbers back onto the HTML. No npm, no node_modules.
+- **`.pre-commit-config.yaml`** — two hooks (ruff + check_js.py). `pip install pre-commit && pre-commit install` to opt in.
+- **CI step** — runs `python scripts/check_js.py` between the AST syntax check and the import-time smoke. Node is preinstalled on GitHub runners; local dev without Node gets a friendly "skipped" (not a hard fail).
 
-- Server boots + serves SPA
-- `/api/status`, `/api/soul`, `/api/settings`, `/api/threads`, `/api/knowledge/list` (the v0.17.23 regression guard)
-- `/api/knowledge/url` — empty / non-http / private-IP SSRF / well-formed all behave correctly
-- `/api/knowledge/search` on empty corpus doesn't crash
-- `/api/knowledge/recent` round-trips synthetic history
-- `/api/kv` allowlist / blocklist enforced
-- WebSocket handshake
-- **Agent turn smoke** — mocks `providers.get_client()` with a `FakeStreamingClient` that yields deterministic chunks. Runs `agent.run("hello", ctx=...)`, verifies `on_content` fires and messages land in SQLite.
-- **Concurrent turn isolation** — two threads, two TurnContexts, separate replies, zero cross-contamination via the public HTTP surface.
+Verified: injecting `stae.x = 1 let bad;` produces `static/index.html:1396: SyntaxError: Unexpected identifier 'let'`.
 
-If any of these had existed before, the v0.17.23 3.11 SyntaxError wouldn't have shipped.
+eslint skipped — `npx eslint` would add an npm download for zero additional bug-catching beyond `node --check` on our codebase.
 
-## 📦 C3. `markitdown[all]` → `markitdown[docx,pptx,pdf,outlook]`
+## 📊 D2. pytest-cov + 24% coverage floor
 
-`[all]` was dragging ~115 MB of dead weight: `pandas` (xlsx — covered by our `openpyxl`), `speech_recognition` (we use faster-whisper), `azure-ai-documentintelligence` (Azure OCR — never called), `youtube-transcript-api` (broken by YT bot-detection — already replaced with `yt-dlp` in v0.17.13).
+Measure + hold-the-line. Not chasing 90% — just ensuring regressions get caught.
 
-```toml
-# before
-"markitdown[all]>=0.1.0",
-# after
-"markitdown[docx,pptx,pdf,outlook]>=0.1.0",
-```
+- `pytest-cov` added to `[dev]` extras.
+- `[tool.coverage.run]` + `[tool.coverage.report]` in `pyproject.toml` — source=`.`, omit tests/venv/build/static/setup, exclude `pragma: no cover` + `if __name__ == "__main__":` + stubs. `fail_under = 24` (2pp below the measured 25.95% baseline).
+- CI replaces the `pytest -v` step with `pytest -v --cov --cov-report=term --cov-report=xml`. XML goes to the job summary for visibility.
+- `CONTRIBUTING.md` documents `pytest --cov` as the canonical local run and states the floor policy.
 
-**Measured install size**: 361 MB → **241 MB** (33% reduction). XLSX still works via our `openpyxl` fallback in `rag._read_xlsx`. Smoke-tested DOCX/PPTX/PDF/HTML/XLSX ingestion end-to-end in a fresh venv — all non-empty output.
+**Baseline: 25.95% total**. 186/186 tests pass with or without `--cov`.
 
-## 🗃️ C4. SQLite migrations
+### Top 3 by coverage
+1. `agent_budget.py` — 81%
+2. `threads.py` — 80%
+3. `logger.py` — 80%
 
-`migrations/` directory + versioned SQL files. Replaces ad-hoc `CREATE TABLE IF NOT EXISTS` + `try/except ALTER TABLE` scattered across `db.py`.
+### At 0% (useful data, not lies)
+1. `cli.py` (1476 stmts) — entry point, not exercised by unit tests
+2. `inference_setup.py` (159 stmts)
+3. `synthesis.py` (173 stmts) — the night-synthesis job
+4. `skills/browser.py` (300 stmts) — Playwright, env-dependent
+5. `skills/mcp_manager.py`, `skills/spicy_duck.py`
 
-- `migrations/001_initial.sql` — baseline: `messages`, `kv`, `presets`, `threads`, `scheduled_tasks`, `secrets`, FTS5 virtual tables, primary indexes.
-- `migrations/002_message_thread_ts_index.sql` — first real migration (composite `(thread_id, ts)` index).
-- `migrations/README.md` — convention: `NNN_snake_case.sql`, monotonically increasing. Runner applies in order, transactional per-file, tracks `schema_version` in kv.
+These are candidates for future integration tests (the `skills/` ones are easy — just exercise `execute()` with mocked I/O). Not today.
 
-**Back-compat heuristic** for existing installs: if `schema_version` is missing AND `messages` table exists, stamp `schema_version=1` without re-running baseline. Fresh installs apply every file.
+## 🤖 D3. Release automation workflow
 
-5 new tests in `tests/test_migrations.py` covering fresh-apply, idempotency, back-compat stamping, rollback on invalid SQL.
+I hand-released 14 times today. Every one: bump VERSION in 3 files, write RELEASE_NOTES, commit, tag, push, `gh release create`. Error-prone — I hit merge conflicts on version bumps in parallel worktrees.
 
-## 📖 C5. `ARCHITECTURE.md` + `CONTRIBUTING.md`
+New `.github/workflows/release.yml` — triggers via `workflow_run: Tests completed success`. If `config.py` VERSION changed and the tag doesn't exist yet, auto-creates tag + GitHub release from `RELEASE_NOTES.md`.
 
-- **`ARCHITECTURE.md`** (113 lines) — system diagram, core modules one-liner each, request lifecycle, memory 3-way hybrid (corrected vs CLAUDE.md's 2-way claim), state locations, extension points.
-- **`CONTRIBUTING.md`** (93 lines) — setup, test commands, branching, commit style, CI guardrails, release flow, Dependabot.
+### Gating chain
+1. Push to main → `Tests` workflow runs (ruff → AST 3.11 check → JS check → import smoke → pytest --cov).
+2. On green, `Release` workflow fires.
+3. If `config.py` VERSION == `pyproject.toml` version ≠ any existing tag, tag + release.
+4. If VERSION unchanged OR tag exists, no-op cleanly.
+5. If `RELEASE_NOTES.md` is missing/empty when a new version is being released, fail loudly with a clear message.
 
-Agent caught and corrected two outdated claims while grepping:
-1. Memory search is **3-way hybrid** (dense + sparse + BM25 FTS5), not 2-way.
-2. Core tools count is **28**, not ~18.
+### Idempotency (3 layers)
+1. `git rev-parse --verify refs/tags/v$VERSION` — skip if tag already local
+2. `gh api /repos/.../git/refs/tags/v$VERSION` — skip if tag on remote
+3. `gh release view v$VERSION` — skip if release already exists (handles "tag pushed but release create failed" retry)
+
+### This release is the first test
+
+v0.17.27 is the first release where the workflow will fire. I'm still doing the manual bump + push (because the workflow doesn't exist yet on `main`); next release should be auto-cut by the workflow itself.
 
 ## 📊 Totals
 
 ```
-ruff check .                  — 0 errors
-pytest tests/                 — 186 passed (was 165 → +16 integration + 5 migrations)
-import smoke                  — all modules load, TurnContext exported
-Python 3.11 AST               — 0 findings
+ruff check .        — 0 errors
+JS syntax           — 1 script, parses clean
+pytest --cov        — 186 passed, 25.93% coverage (floor 24.0% ✓)
+Python 3.11 AST     — 0 findings
+import smoke        — all modules + FastAPI app
+```
+
+CI pipeline final form:
+
+```yaml
+1. Lint with ruff
+2. Syntax check against Python 3.11 grammar
+3. JS syntax check for static/index.html
+4. Import-time smoke
+5. Run tests with coverage (fail_under=24)
+→ release.yml fires on green + VERSION change
 ```
 
 ## 📦 Upgrade
 
 ```bash
-git pull && pip install -e . --upgrade
-# Restart the server
+git pull && pip install -e .[dev] --upgrade  # pytest-cov lands here
+pre-commit install                            # optional local hooks
 ```
-
-First upgrade: `_apply_migrations()` will stamp existing DBs at `schema_version=1` without re-running baseline. `pip install` downloads ~120 MB less. Your existing data is untouched.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
