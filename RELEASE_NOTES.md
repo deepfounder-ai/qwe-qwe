@@ -1,58 +1,75 @@
-# v0.17.17 — Provider picker: key input modal + visual cues
+# v0.17.19 — UX polish: toast flood, graph leak, Enter-to-submit, memory-meta skips
 
-User clicked the `openrouter` provider card in **Settings → Model** and nothing happened — no way to enter an API key. The picker was silently switching the active provider, model discovery was failing (no key), and the UI gave no surface to recover.
+Five targeted UX fixes. All changes localized, no public API shifts.
 
-## 🔧 Fixes
+## Fixes
 
-### 1. "NEEDS KEY" badge on cloud providers without a saved key
+### 1. Toast flood prevention (static/index.html)
 
-Provider cards now show a small amber chip in the top-right corner when `!has_key && !local`. You can see at a glance which providers are ready to use vs. which need credentials:
+`toast()` used to append a fresh `<div>` per call. Fifty rapid calls = fifty overlapping toasts piling down the screen. Now capped at **5 concurrent** (oldest dropped via a `state._toasts` queue) with **500ms dedup** (same `text+kind` within the window just refreshes the timestamp instead of stacking).
 
+**Before:**
+
+```js
+const toast = (text, kind) => {
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; ... }, 2500);
+  setTimeout(() => el.remove(), 2900);
+};
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│ 🟢 lmstudio   │    │ ollama        │    │ openrouter   │
-│ localhost:1234│    │ localhost:11434│    │ openrouter.ai│
-│              │    │              │    │    NEEDS KEY │
-└──────────────┘    └──────────────┘    └──────────────┘
-   (online)           (no ping)         (amber badge)
+
+**After:** tracks a `state._toasts` queue, dedups within 500ms, caps at 5 concurrent, still auto-removes at 2900ms.
+
+### 2. Graph handler leak (static/index.html)
+
+Every render of the knowledge-graph panel re-attached `mousemove` / `mouseup` / `mouseleave` listeners to `document` — and never removed them. After ten renders you'd have ten live `mousemove` handlers each carrying a stale `panning` closure, firing on every mouse tick.
+
+**Before:**
+
+```js
+let panning = null;
+graphSvg.addEventListener('mousedown', ...);
+const endPan = () => { panning = null; ... };
+document.addEventListener('mousemove', (ev) => { if (!panning) return; ... });
+document.addEventListener('mouseup', endPan);
+document.addEventListener('mouseleave', endPan);
 ```
 
-Local providers also show a green dot when the health ping succeeds.
+**After:** document-level listeners attach **once** behind a `state._graphGlobalHandlersAttached` flag and look up the active pan state through `state._graphPan` (which also stores the current `svg` ref so it survives re-renders). Node-level `mousedown` handlers were already self-cleaning (onMove/onUp remove themselves on mouseup) — no change there; the SVG itself is gc'd on re-render along with its listeners.
 
-### 2. Clicking a "NEEDS KEY" card opens a key-input modal
+### 3. Provider key modal — Enter-to-submit (static/index.html)
 
-Instead of silently switching (and failing), the card click checks `data-needs-key` and routes to a new `openProviderKeyModal(name)` that:
+`openProviderKeyModal` had no keyboard submit. You had to mouse the "Save + switch" button. Now `Enter` on either `#pk-url` or `#pk-key` triggers the primary action — mirrors the existing pattern in `openLoginModal`.
 
-- Pre-fills the base URL from the provider preset (e.g. `https://openrouter.ai/api/v1` for openrouter) — read-only-looking but editable if you use a proxy.
-- Password-masked key input with `autofocus`.
-- **Built-in hints** pointing to the right key-management page for common providers:
-  - `openai` → platform.openai.com/api-keys
-  - `openrouter` → openrouter.ai/keys
-  - `groq` → console.groq.com/keys
-  - `anthropic` → console.anthropic.com/settings/keys
-  - `together` → api.together.xyz/settings/api-keys
-  - `deepseek` → platform.deepseek.com/api_keys
-  - `mistral` → console.mistral.ai/api-keys
+### 4. Dead-code cleanup in Inspector (static/index.html)
 
-On **Save + switch**:
+```js
+// line 3234 — removed
+const toolCount = (lt && state.messages.find(m => m.id === 'stream-' + (state.lastTurnId || '')))?.tools?.length || 0;
+```
 
-1. `POST /api/provider` — persists the config (same endpoint used by "add custom provider")
-2. `POST /api/model {provider: name}` — switches active provider
-3. Refreshes `/api/status` + `/api/providers` so the card loses the amber badge and becomes active.
+`state.lastTurnId` is never assigned anywhere in the codebase, so the lookup always returned `undefined` and `toolCount` was permanently `0`. The variable wasn't displayed in the output HTML either. **Chose removal over wiring up**: wiring `lastTurnId` would mean threading a new piece of state through the WS message handlers with no visible consumer for it — pure dead code is simpler to delete than to resurrect a feature no one asked for.
 
-If either step fails, the modal stays open so you can fix and retry.
+### 5. `_save_experience` keyword/meta coverage (agent.py)
 
-### 3. Once a key is saved, next click switches directly
+The experience-learning skip list missed common Russian inflections and a few self-config tools, so meta-turns like "забыл пароль" or `soul_editor`-only edits were still being saved as "experiences" and polluting recall.
 
-No modal the second time — the server reports `has_key: true` on that provider, so the click goes straight through the normal switch path.
+**Added to `_MEMORY_KEYWORDS`:**
+`забыл, забыла, забудьте, забываешь, запомнил, запомните, вспомни, вспомнил`
 
-## 📦 Upgrade
+**Added to `_META_TOOLS`:**
+`soul_editor, skill_creator, add_trait, remove_trait, list_traits, rag_index, user_profile_get`
+
+(`list_notes` and `get_stats` were already present; not duplicated.)
+
+## Upgrade
 
 ```bash
 git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-Open **Settings → Model** and the cloud providers you haven't configured will show an amber **NEEDS KEY** chip. Click one and the modal appears.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+No config changes needed. Web UI picks up all four front-end fixes on next reload.

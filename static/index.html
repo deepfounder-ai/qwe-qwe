@@ -1459,12 +1459,36 @@ const fmtTime = (ts) => {
   return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
 };
 const toast = (text, kind) => {
+  const MAX_TOASTS = 5;
+  const DEDUP_MS = 500;
+  const now = Date.now();
+  if (!state._toasts) state._toasts = [];
+  // Dedup within 500ms window — same text+kind → update timestamp instead of creating new
+  const dupKey = (kind || '') + '\u0000' + text;
+  for (let i = state._toasts.length - 1; i >= 0; i--) {
+    const t = state._toasts[i];
+    if (t.key === dupKey && (now - t.ts) < DEDUP_MS) {
+      t.ts = now;
+      return;
+    }
+  }
   const el = document.createElement('div');
   el.className = 'toast' + (kind ? ' ' + kind : '');
   el.textContent = text;
   document.body.appendChild(el);
+  const entry = { el, key: dupKey, ts: now };
+  state._toasts.push(entry);
+  // Cap concurrent toasts: drop oldest beyond MAX_TOASTS
+  while (state._toasts.length > MAX_TOASTS) {
+    const oldest = state._toasts.shift();
+    if (oldest && oldest.el) oldest.el.remove();
+  }
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; }, 2500);
-  setTimeout(() => el.remove(), 2900);
+  setTimeout(() => {
+    el.remove();
+    const idx = state._toasts.indexOf(entry);
+    if (idx >= 0) state._toasts.splice(idx, 1);
+  }, 2900);
 };
 const api = async (path, opts) => {
   opts = opts || {};
@@ -3231,7 +3255,8 @@ function renderInspector() {
   // Latency bars — normalized against reasonable maxima
   const decodeNorm = Math.min(1, (lt && lt.tok_per_sec || 0) / 100); // >100 tok/s = full bar
   const durNorm = Math.min(1, (lt && lt.duration_ms || 0) / 10000); // 10s = full
-  const toolCount = (lt && state.messages.find(m => m.id === 'stream-' + (state.lastTurnId || '')))?.tools?.length || 0;
+  // (removed dead `toolCount` — state.lastTurnId was never assigned and the
+  // variable wasn't displayed anywhere.)
 
   return '<aside class="inspector">' +
     '<div class="insp-head"><h2>Inspector</h2>' +
@@ -4062,6 +4087,18 @@ function openProviderKeyModal(name) {
       }},
     ],
   });
+  // Enter in either input submits — mirrors openLoginModal
+  setTimeout(() => {
+    const submit = () => {
+      const btn = document.querySelector('[data-modal-action]:last-child');
+      if (btn) btn.click();
+    };
+    const onKey = (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+    const urlInp = document.getElementById('pk-url');
+    const keyInp = document.getElementById('pk-key');
+    if (urlInp) urlInp.addEventListener('keydown', onKey);
+    if (keyInp) keyInp.addEventListener('keydown', onKey);
+  }, 50);
 }
 
 function openAddProviderModal() {
@@ -5244,27 +5281,42 @@ function wireEvents() {
       applyView();
     });
 
-    // Pan with drag on empty canvas
-    let panning = null;
+    // Pan with drag on empty canvas.
+    // Document-level mousemove/mouseup/mouseleave handlers attach ONCE (globally)
+    // and look up current pan state via state._graphPan, so re-rendering the
+    // graph doesn't accumulate stale listeners with dead closures.
     graphSvg.addEventListener('mousedown', (ev) => {
       if (ev.target.closest('[data-kb-node]')) return;  // node drag takes over
-      panning = {
+      state._graphPan = {
         startX: ev.clientX, startY: ev.clientY,
         initTx: state.kbView.tx, initTy: state.kbView.ty,
+        svg: graphSvg,
       };
       graphSvg.style.cursor = 'grabbing';
       ev.preventDefault();
     });
-    const endPan = () => { panning = null; graphSvg.style.cursor = ''; };
-    document.addEventListener('mousemove', (ev) => {
-      if (!panning) return;
-      const d = screenToSvg(ev.clientX - panning.startX, ev.clientY - panning.startY);
-      state.kbView.tx = panning.initTx + d.x;
-      state.kbView.ty = panning.initTy + d.y;
-      applyView();
-    });
-    document.addEventListener('mouseup', endPan);
-    document.addEventListener('mouseleave', endPan);
+    if (!state._graphGlobalHandlersAttached) {
+      state._graphGlobalHandlersAttached = true;
+      document.addEventListener('mousemove', (ev) => {
+        const p = state._graphPan;
+        if (!p) return;
+        const svg = p.svg;
+        if (!svg || !svg.isConnected) { state._graphPan = null; return; }
+        const rect = svg.getBoundingClientRect();
+        const scale = 200 / Math.min(rect.width, rect.height);
+        state.kbView.tx = p.initTx + (ev.clientX - p.startX) * scale;
+        state.kbView.ty = p.initTy + (ev.clientY - p.startY) * scale;
+        const root = svg.querySelector('#graph-root');
+        if (root) root.setAttribute('transform', 'translate(' + state.kbView.tx + ' ' + state.kbView.ty + ') scale(' + state.kbView.zoom + ')');
+      });
+      const endPanGlobal = () => {
+        const p = state._graphPan;
+        if (p && p.svg) p.svg.style.cursor = '';
+        state._graphPan = null;
+      };
+      document.addEventListener('mouseup', endPanGlobal);
+      document.addEventListener('mouseleave', endPanGlobal);
+    }
 
     // Node drag — mutates node.x/y and updates DOM in place (no full re-render
     // so drag stays smooth and the outer event handlers don't get detached)
