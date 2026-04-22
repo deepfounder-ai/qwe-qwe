@@ -38,6 +38,19 @@ _ws_loop: asyncio.AbstractEventLoop | None = None
 _knowledge_task: dict | None = None  # {task_id, status, current, total, file, phase, errors}
 _knowledge_lock = threading.Lock()
 
+# Recent indexings (last 20, newest first) — powers the "Recent activity" card
+# in the Memory view. Each entry: {kind, label, status, chunks, duration_sec,
+# converter, errors, url/path, ts}.
+from collections import deque as _deque
+_knowledge_history: _deque = _deque(maxlen=20)
+
+
+def _push_history(entry: dict):
+    """Record a completed indexing run for /api/knowledge/recent."""
+    import time as _t
+    entry.setdefault("ts", _t.time())
+    _knowledge_history.appendleft(entry)
+
 # Camera frame request/response system — allows agent tools to capture frames on demand
 _pending_frame_requests: dict = {}  # request_id → asyncio.Event + result
 
@@ -1435,6 +1448,22 @@ def _run_knowledge_index(task_id: int, files: list[dict], tags: list[str] | None
     import tasks as t
     t.update(task_id, "done", f"Indexed {len(results)} files, {total_chunks} chunks")
 
+    # Record in recent-activity history
+    import time as _t
+    started = 0
+    with _knowledge_lock:
+        started = (_knowledge_task or {}).get("started_at", _t.time()) if _knowledge_task else _t.time()
+    _push_history({
+        "kind": "batch" if len(files) > 1 else "file",
+        "label": (files[0].get("path") or files[0].get("url", ""))[:120] if files else "(batch)",
+        "status": "done" if not errors else "partial" if results else "error",
+        "chunks": total_chunks,
+        "files": len(results),
+        "errors_count": len(errors),
+        "duration_sec": round(_t.time() - started, 2),
+        "converter": "markitdown",
+    })
+
     # Keep result visible for polling clients, then clear after 10s
     def _clear_task():
         import time as _t
@@ -1717,13 +1746,19 @@ async def knowledge_url(data: dict):
         _knowledge_task = {
             "task_id": task_id, "status": "running",
             "current": 0, "total": 1, "file": url, "phase": "fetch", "errors": [],
+            "started_at": time.time(),
         }
 
     def _run_url():
+        import time as _t
+        start = _t.time()
+        result: dict = {}
+        ok = False
         try:
             result = rag.index_url(url, tags=tags)
+            ok = result.get("status") == "indexed"
             with _knowledge_lock:
-                if result.get("status") == "indexed":
+                if ok:
                     _knowledge_task.update({
                         "status": "done", "current": 1,
                         "file": result.get("path", url),
@@ -1737,6 +1772,28 @@ async def knowledge_url(data: dict):
             with _knowledge_lock:
                 _knowledge_task["errors"].append(f"{url}: {e}")
                 _knowledge_task.update({"status": "done", "current": 1, "phase": "done"})
+            result = {"status": f"error: {e}"}
+        finally:
+            duration = round(_t.time() - start, 2)
+            chunks = result.get("chunks", 0) if isinstance(result, dict) else 0
+            converter = result.get("converter", "") if isinstance(result, dict) else ""
+            label = result.get("title") if isinstance(result, dict) and result.get("title") else url
+            # Mark the task row completed so it stops leaking as "running"
+            try:
+                t.update(task_id, "done" if ok else "error",
+                         f"{chunks} chunks via {converter}" if ok else result.get("status", "failed"))
+            except Exception:
+                pass
+            _push_history({
+                "kind": "url",
+                "label": label[:120],
+                "url": url,
+                "status": "done" if ok else "error",
+                "chunks": chunks,
+                "duration_sec": duration,
+                "converter": converter,
+                "errors": list(_knowledge_task.get("errors", [])) if _knowledge_task else [],
+            })
 
     threading.Thread(target=_run_url, daemon=True).start()
     return {"task_id": task_id, "status": "started", "url": url}
@@ -1787,7 +1844,8 @@ async def knowledge_index(data: dict):
             "total": len(files),
             "file": "",
             "phase": "cpu",
-            "errors": []
+            "errors": [],
+            "started_at": time.time(),
         }
 
     thread = threading.Thread(target=_run_knowledge_index, args=(task_id, files, tags), daemon=True)
@@ -1803,6 +1861,17 @@ async def knowledge_status():
         if _knowledge_task:
             return dict(_knowledge_task)
     return {"status": "idle"}
+
+
+@app.get("/api/knowledge/recent")
+async def knowledge_recent():
+    """Last 20 completed indexing runs (URL, file, batch). Newest first.
+
+    Powers the "Recent activity" card in the Memory view so you can see
+    what just got indexed, how many chunks landed, and whether anything
+    errored — without fishing through logs.
+    """
+    return {"items": list(_knowledge_history)}
 
 
 @app.get("/api/knowledge/graph")

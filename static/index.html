@@ -297,6 +297,76 @@ main.canvas { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   color: var(--fg-3); flex-shrink: 0;
 }
 .upload-zone.drag .up-icon { color: var(--accent); }
+
+/* Live indexing progress strip (sits between upload zone and grid) */
+.kb-progress {
+  margin-top: 10px; padding: 12px 14px; border-radius: 9px;
+  background: var(--bg-inspector); border: 1px solid var(--accent-dim);
+  display: flex; align-items: center; gap: 12px; font-size: 12px;
+}
+.kb-progress .spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--line-2); border-top-color: var(--accent);
+  animation: kb-spin 0.8s linear infinite; flex-shrink: 0;
+}
+@keyframes kb-spin { to { transform: rotate(360deg); } }
+.kb-progress .phase {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+  flex-shrink: 0;
+}
+.kb-progress .file {
+  color: var(--fg-2); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0; flex: 1;
+}
+.kb-progress .bar {
+  width: 160px; height: 4px; background: var(--surface-2);
+  border-radius: 2px; overflow: hidden; flex-shrink: 0;
+}
+.kb-progress .bar .fill {
+  height: 100%; background: var(--accent); transition: width 0.3s;
+}
+.kb-progress .counter {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3);
+  font-variant-numeric: tabular-nums; flex-shrink: 0;
+}
+
+/* Recent activity card — compact list of last 5 indexings */
+.kb-recent {
+  margin-top: 10px; padding: 12px 14px; border-radius: 9px;
+  background: var(--bg-inspector); border: 1px solid var(--line);
+}
+.kb-recent .hdr {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  font-family: var(--font-mono); font-size: 10px; color: var(--fg-4);
+  letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600;
+}
+.kb-recent .rows { display: flex; flex-direction: column; gap: 4px; }
+.kb-recent .row {
+  display: grid; grid-template-columns: 20px 1fr auto auto auto;
+  align-items: center; gap: 10px; padding: 6px 8px; border-radius: 5px;
+  font-size: 11.5px;
+}
+.kb-recent .row:hover { background: var(--surface); }
+.kb-recent .row .rk-icon {
+  width: 20px; height: 20px; display: flex; align-items: center;
+  justify-content: center; color: var(--fg-3);
+}
+.kb-recent .row.err .rk-icon { color: var(--err); }
+.kb-recent .row.partial .rk-icon { color: var(--warn); }
+.kb-recent .row.done .rk-icon { color: var(--ok); }
+.kb-recent .row .lbl {
+  color: var(--fg-2); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0;
+}
+.kb-recent .row .chunks,
+.kb-recent .row .dur,
+.kb-recent .row .ago {
+  font-family: var(--font-mono); font-size: 10px; color: var(--fg-4);
+  font-variant-numeric: tabular-nums;
+}
+.kb-recent .row .chunks { color: var(--accent); }
+
 .kb-grid {
   display: grid; grid-template-columns: 1fr 1.2fr; gap: 18px;
   padding-bottom: 32px;
@@ -1574,6 +1644,7 @@ const state = {
   kbKindFilter: 'all',
   kbPicked: null,
   kbStatus: null,
+  kbRecent: [],  // last N completed indexings from /api/knowledge/recent
   kbRecallSessionTotal: 0,  // total pills recalled across this UI session
   spicy: false,
   _spicyClicks: 0,
@@ -2393,7 +2464,16 @@ const humanSize = (n) => {
   return (n/1024/1024).toFixed(1) + ' MB';
 };
 
+async function loadKbRecent() {
+  try {
+    const r = await api('/api/knowledge/recent');
+    state.kbRecent = (r && r.items) || [];
+    render();
+  } catch { state.kbRecent = []; }
+}
+
 async function loadMemory() {
+  loadKbRecent();  // fire-and-forget, updates the activity card
   try {
     const r = await api('/api/knowledge/list');
     const files = (r && r.files) || [];
@@ -2644,6 +2724,7 @@ async function pollKbStatus() {
     toast('indexing done' + (s.total ? ' · ' + s.total + ' file' + (s.total === 1 ? '' : 's') : ''));
   }
   loadMemory();
+  loadKbRecent();  // refresh the activity card
 }
 
 async function loadCron() {
@@ -3294,6 +3375,68 @@ function renderGraphSvg() {
   '</svg>';
 }
 
+// Map raw phase names from server → human labels shown in the progress strip
+const KB_PHASE_LABELS = {
+  fetch: 'Fetching',
+  convert: 'Converting',
+  cpu: 'Chunking',
+  gpu: 'Embedding',
+  index: 'Indexing',
+  done: 'Done',
+};
+
+function renderKbProgress() {
+  const s = state.kbStatus;
+  if (!s || s.status !== 'running') return '';
+  const phase = KB_PHASE_LABELS[s.phase] || (s.phase || 'Indexing');
+  const cur = Number(s.current || 0), total = Number(s.total || 0);
+  const pct = total > 0 ? Math.min(100, (cur / total) * 100) : 0;
+  const fileLabel = s.file || '…';
+  return '<div class="kb-progress">' +
+    '<div class="spinner"></div>' +
+    '<div class="phase">' + esc(phase) + '…</div>' +
+    '<div class="file" title="' + esc(fileLabel) + '">' + esc(fileLabel) + '</div>' +
+    '<div class="bar"><div class="fill" style="width:' + pct + '%"></div></div>' +
+    '<div class="counter">' + cur + (total ? ' / ' + total : '') + '</div>' +
+  '</div>';
+}
+
+function renderKbRecent() {
+  const items = state.kbRecent || [];
+  if (!items.length) return '';
+  const now = Date.now() / 1000;
+  const agoLabel = (ts) => {
+    const d = Math.max(0, now - (ts || 0));
+    if (d < 60) return Math.round(d) + 's ago';
+    if (d < 3600) return Math.round(d / 60) + 'm ago';
+    if (d < 86400) return Math.round(d / 3600) + 'h ago';
+    return Math.round(d / 86400) + 'd ago';
+  };
+  const iconFor = (kind) => kind === 'url' ? 'globe'
+    : kind === 'batch' ? 'package'
+    : kind === 'file' ? 'book'
+    : 'check';
+  const rows = items.slice(0, 5).map(it => {
+    const cls = it.status === 'error' ? 'err' : (it.status === 'partial' ? 'partial' : 'done');
+    const label = it.label || it.url || '(unnamed)';
+    const chunks = it.chunks || 0;
+    const dur = it.duration_sec ? it.duration_sec.toFixed(1) + 's' : '';
+    return '<div class="row ' + cls + '" title="' + esc(it.url || label) + '">' +
+      '<div class="rk-icon">' + ico(iconFor(it.kind), 12) + '</div>' +
+      '<div class="lbl">' + esc(label) + '</div>' +
+      '<div class="chunks">' + (chunks ? chunks + ' ch' : (it.status === 'error' ? 'err' : '—')) + '</div>' +
+      '<div class="dur">' + esc(dur) + '</div>' +
+      '<div class="ago">' + esc(agoLabel(it.ts)) + '</div>' +
+    '</div>';
+  }).join('');
+  return '<div class="kb-recent">' +
+    '<div class="hdr">' + ico('clock', 11) + '<span>Recent activity</span>' +
+      '<span style="margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--fg-5);letter-spacing:0">' + items.length + ' total</span>' +
+    '</div>' +
+    '<div class="rows">' + rows + '</div>' +
+  '</div>';
+}
+
 function renderMemoryView() {
   const files = state.kbFiles || [];
   const kinds = ['all'].concat(Array.from(new Set(files.map(f => f.kind))));
@@ -3397,6 +3540,8 @@ function renderMemoryView() {
         '<button class="btn-secondary" data-act="kb-paste-url" onclick="event.stopPropagation()">' + ico('globe', 12) + ' paste URL</button>' +
         '<button class="btn-secondary" data-act="kb-scan-dir" onclick="event.stopPropagation()" style="margin-left:6px">' + ico('package', 12) + ' scan folder</button>' +
       '</div>' +
+      renderKbProgress() +
+      renderKbRecent() +
     '</div>' +
 
     '<div style="display:flex;align-items:center;gap:10px;padding:20px 0 14px">' +

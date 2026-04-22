@@ -1,90 +1,65 @@
-# v0.17.13 — YouTube import now actually works (yt-dlp primary path)
+# v0.17.14 — Knowledge ingest: real progress + recent activity + no more zombie tasks
 
-User reported YouTube URLs imported as "почти пустой файл" — ~745 bytes of the YouTube footer ("About / Press / Copyright / Contact us") instead of the transcript.
+Three fixes to the knowledge ingestion feedback loop. Previously you clicked "paste URL", saw a chip flash `indexing 1/1` for half a second, and that was it. No idea what just happened, no trace afterwards, and every URL/file batch run left a "running" zombie in the internal task registry forever.
 
-## 🐛 Root cause
+## 🔧 Fix A — zombie tasks
 
-MarkItDown bundles `youtube-transcript-api` as the YouTube path. Since mid-2024 YouTube rolled out PotToken (Proof of Origin Token) bot-detection on the `timedtext` API endpoint. Without a valid token the endpoint returns **empty 200 OK** regardless of `fmt=` parameter (tested all of `xml / json3 / srv3 / vtt / ttml` — all zero bytes, even with proper browser headers + Referer + Origin). `youtube-transcript-api` then crashes with `ParseError: no element found`. MarkItDown swallows the exception and scrapes the watch page HTML instead — which for logged-out server traffic is just the footer. Result: empty file, user frustrated.
+`server._run_url()` called `tasks.register("knowledge_url", …)` at start but **never** called `tasks.update(id, "done")` at the end. Every URL import leaked a "running" row into `tasks._results`, which then got injected into the agent's system prompt via `tasks.get_running()` ("background tasks running right now: knowledge_url — Fetching https://…"). The agent started each turn believing there was a pending fetch that had actually completed hours ago.
 
-## 🔧 Fix: yt-dlp as primary YouTube path
+Fixed: `_run_url` and `_run_knowledge_index` now both call `tasks.update(task_id, "done"/"error", summary)` in a `finally:` block so even crashes close the row.
 
-`yt-dlp` ships with the JS-based PotToken workarounds and is actively maintained specifically to handle YouTube's bot-protection changes. Now:
+## 🆕 Fix B — real progress strip
+
+A proper strip appears below the upload zone while indexing runs:
 
 ```
-Is this URL youtube.com / youtu.be / music.youtube.com / m.youtube.com?
-  ├── YES → try yt-dlp first
-  │         ├── manual subtitles → pick preferred language (user's stt_language setting → en → any)
-  │         ├── auto-captions    → same priority chain
-  │         ├── no transcript    → save title + channel + description as markdown
-  │         └── yt-dlp not installed → fall through
-  └── NO  → MarkItDown (unchanged for all other URL types)
+⟳ FETCHING…  https://youtube.com/watch?v=dQw4w9WgXcQ   [████████▁▁▁▁]  1 / 1
 ```
 
-### What you get in the knowledge base
+- **Phase label** mapped from raw server phase: `fetch / convert / cpu / gpu / index / done` → `Fetching / Converting / Chunking / Embedding / Indexing / Done`.
+- **File name** from current URL or filename being processed.
+- **Determinate bar** — width = `current / total`.
+- **Counter** in monospace, updates live as `pollKbStatus` ticks every 1.5s.
 
-The saved markdown file now looks like:
+The tiny `indexing 1/1` chip in the page header is still there as a quick glance.
 
-```markdown
-<!-- Source: https://www.youtube.com/watch?v=dQw4w9WgXcQ -->
-<!-- Fetched: 2026-04-21 22:15:03 -->
-<!-- Converter: yt-dlp -->
-<!-- Video: dQw4w9WgXcQ · 213s · en -->
+## 🆕 Fix D — Recent activity card
 
-# Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)
+New card below the upload zone + progress strip. Shows the last 5 completed indexings (up to 20 retained server-side) with:
 
-**Channel:** Rick Astley · **Duration:** 213s · **Language:** en · **Source:** auto-generated
+| Kind icon | Label | Chunks | Duration | Time ago |
+|---|---|---|---|---|
+| 🌐 globe | `Rick Astley - Never Gonna Give You Up` | 4 ch | 3.4s | 12s ago |
+| 📦 package | `5 files` | 42 ch | 18.2s | 2m ago |
+| 📘 book | `research.pdf` | 18 ch | 5.1s | 1h ago |
 
-## Description
+Status colours: green dot for done, amber for partial (some errors), red for error. Rows include `title` tooltip with full URL/path.
 
-The official video for "Never Gonna Give You Up" by Rick Astley. …
+### Server plumbing
 
-## Transcript
+- New module-level `_knowledge_history: deque(maxlen=20)` (newest first).
+- `_push_history(entry)` called from all three worker completion paths.
+- New endpoint `GET /api/knowledge/recent` returns `{items: [...]}`.
+- Each entry carries `{kind, label, url, status, chunks, duration_sec, converter, errors, ts}`.
 
-(cleaned VTT/TTML — timestamps stripped, dedup'd, no HTML tags)
-```
+### UI plumbing
 
-Tagged with `source:url` + `source:youtube` + the original URL so the agent can trace it back.
+- `state.kbRecent` populated by `loadKbRecent()` on every Memory view load and after each `pollKbStatus` run.
+- `renderKbProgress()` + `renderKbRecent()` render into the Memory view between upload zone and the grid.
+- "2 total" counter in the card header so you can see if the history is trimming.
 
-### Subtitle cleaning
-
-`_clean_subtitle_text()` handles VTT, TTML, and SRV3 formats:
-
-- Drops `WEBVTT` / `NOTE` / `Kind:` / `Language:` headers
-- Drops cue numbers and `00:00:01.000 --> 00:00:04.000` timing lines
-- Strips `<b>...</b>`, `<c.yellow>...</c>`, and `{\an1}` style markers
-- Deduplicates consecutive identical lines (YouTube auto-captions repeat)
-
-### Language priority
-
-1. User's `stt_language` setting (if set in Settings → Voice)
-2. Base language (e.g. `stt_language=ru-RU` → also tries `ru`)
-3. English (`en`, `en-US`, `en-GB`)
-4. Any English-prefixed track
-5. First available
-
-### Fallback chain
-
-Even with yt-dlp installed, any failure (private video, region-locked, no transcripts, API hiccup) falls through cleanly to MarkItDown, and finally to stdlib HTML strip. Never crashes the indexer.
-
-## 📦 New dependency
-
-`yt-dlp>=2025.1.0` is now a hard dep (~3.3 MB wheel). Upgrade via:
+## 📦 Upgrade
 
 ```bash
 git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-`--doctor` now shows a `yt-dlp` check so you can confirm it installed correctly.
+Now when you paste a URL:
 
-## Verification
-
-Tested on `https://www.youtube.com/watch?v=dQw4w9WgXcQ`:
-
-| Path | Result |
-|---|---|
-| Old (youtube-transcript-api) | ❌ ParseError — XML empty |
-| Old fallback (MarkItDown page scrape) | ❌ 745 bytes footer |
-| **New (yt-dlp)** | ✅ 3,331 bytes — title, channel, description, full transcript |
+1. Progress strip shows `Fetching…  URL  [▓▓▓▓▁▁▁▁]  0/1` immediately.
+2. Flips to `Indexing… path  [▓▓▓▓▓▓▓▓▓▓]  1/1` when done.
+3. Strip disappears, Recent activity gets a new row: `🌐 Rick Astley — … 4 ch 3.4s just now`.
+4. The **tasks registry** is clean — no leaked "running" entries, the agent's system prompt stops hallucinating about pending fetches.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
