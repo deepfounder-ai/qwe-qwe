@@ -1,51 +1,48 @@
-# v0.17.11 — Knowledge Graph is actually explorable
+# v0.17.12 — Memory discipline: stop saving conversational noise
 
-Before: the graph used a fixed 3-ring radial layout (7 + 12 + 24 slots). Once you pushed past ~30 entities everything overlapped into a labels-on-labels blob. No zoom, no pan, no way to untangle it. Screenshot showed 89 nodes stacked on top of each other.
+User reported the agent was saving useless stuff to long-term memory:
 
-Now the graph is a proper interactive canvas.
+- Right after "hi, be my business assistant" → saved `user wants me to be a business assistant, need to ask about his business domain, tasks, goals, what functions he needs…`
+- On a "clean up memory" task → saved `[EXP] Task: надо подчистить память | Tools: memory_search, self_config | Steps: 3 | Result: success | Learned: Вижу, что в памяти сейчас: 📦 Что хранится: 6 записе…`
+
+Both are noise that pollutes recall quality. Fixed on two fronts:
 
 ## 🔧 What changed
 
-### Force-directed layout
+### 1. `memory_save` tool description is now prescriptive
 
-Replaced radial with a physics simulation that runs once on load:
+Before:
+> Save info to long-term memory. Long texts auto-chunked for knowledge graph.
 
-- **Repulsion** — every pair of nodes pushes each other apart (O(n²), fine to ~500 nodes).
-- **Spring attraction** — edges pull connected nodes to a rest length. Length scales with average degree so dense graphs don't squish.
-- **Gravity** — pulls everything softly toward centre so isolated subgraphs don't drift off screen.
-- **Cooling** — later iterations make smaller adjustments, so the graph settles.
-- Parameters auto-scale with node count. Tested: **38ms for 89 nodes / 167 edges**.
+Now:
+> Save a **DURABLE FACT** to long-term memory. Call this ONLY when: (1) user explicitly says remember/запомни/save, OR (2) you learned a stable fact about the user (name, role, location, stack, preferences, deadlines, project constants) that will matter in future conversations. **DO NOT save**: conversational intents ("user wants X"), current session plans, task lists, acknowledgments ("user said hi"), transient requests, your own reasoning, or what you're about to do. Rule of thumb: if it won't be useful a week from now, don't save it.
 
-### Pan / zoom / drag
+Also removed `task` from the list of suggested tags — tasks belong in the scheduler, not in memory.
 
-- **Scroll wheel** — zoom in/out anchored at the cursor.
-- **Drag empty space** — pan.
-- **Drag a node** — move it (and its attached edges update in real-time).
-- **Click a node** — pick it (inspector section below shows details).
-- **Double-click empty space** — reset view to default.
+### 2. Soul rule 8 rewritten
 
-Zoom clamped to 0.25×–8×.
+Before:
+> Memory: search before saving (avoid duplicates). Tags: user, project, fact, task, decision, idea.
 
-### Toolbar
+Now:
+> **MEMORY DISCIPLINE — default is DO NOT SAVE.** Call memory_save ONLY for (a) user explicit "remember"/"запомни", (b) durable facts that matter weeks later (user name/role/stack/preferences, committed decisions, stable project info). **NEVER save**: intents ("user wants…"), session plans, current tasks, greetings, your own reasoning, "need to learn more about…", TODO lists. **Ask yourself: will this matter in a week? If not, skip.**
 
-New buttons in the panel header:
+### 3. Experience auto-save filters noise
 
-| Button | What it does |
-|---|---|
-| `−` | Zoom out |
-| `+` | Zoom in |
-| 👁 | Fit all nodes to the viewport |
-| ↻ | Reset view (pan=0, zoom=1) |
-| ⎊ | Re-run layout (shuffles positions, re-settles) |
-| 🗑 | Clear graph (unchanged — still there) |
+`_save_experience()` fired after every tool-using turn — including memory-cleanup and meta tasks. It now skips:
 
-### Implementation notes
+- **Meta-only tool sets** — when the whole turn used only memory/self-config/tool-search/list-* tools. Saving "I searched memory" as an experience is circular.
+- **Memory-topic user inputs** — keywords like `память`, `memory`, `запомни`, `forget`, `clean memory`, `recall` in the user message skip save. Experiences about managing memory poison the recall pool.
+- **Trivial single-round turns** — one tool round + reply under 80 chars = nothing worth remembering.
 
-- SVG viewBox is `0 0 200 200` (was `0 0 100 100`) — 2× the coordinate space so nodes have room to breathe.
-- All graph content lives in `<g id="graph-root" transform="translate(tx ty) scale(zoom)">` so pan/zoom is a single attribute update — no re-render.
-- Node drag also updates DOM directly (circle + text + connected lines) instead of re-rendering the whole SVG, so dragging stays smooth at 60fps.
-- `.graph-canvas` got `overflow: hidden` + `user-select: none` + cursor states.
-- Panel height bumped from 520 → 640 px.
+Verified with unit tests:
+
+| Case | Tools | Input | Rounds | Saved? |
+|---|---|---|---|---|
+| Memory cleanup | `memory_search, self_config` | "надо подчистить память" | 3 | ❌ |
+| Real task | `read_file, shell, write_file` | "write a CSV sorter" | 3 | ✅ |
+| Meta-only | `memory_search, memory_save` | "do some unrelated thing" | 2 | ❌ |
+| Trivial | `read_file` | "open the config" (reply: "OK.") | 1 | ❌ |
 
 ## 📦 Upgrade
 
@@ -54,6 +51,6 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-Open **Memory → Knowledge graph**: scroll to zoom, drag nodes around, click **fit** (eye icon) to auto-frame them all.
+If you already have junk in memory from before this fix: **Memory → Knowledge graph → Clear graph** wipes the synthesized layer. For raw saves, search for `[EXP]` entries or conversational summaries in the Memory tab and delete individually (or `memory_delete` via the agent).
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

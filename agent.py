@@ -782,16 +782,55 @@ _OUTCOME_WEIGHTS = {"success": 1.0, "partial": 0.6, "failed": 0.2}
 
 def _save_experience(user_input: str, result: "TurnResult", rounds: int,
                      fail_count: int, _sync: bool = False):
-    """Save a compact experience case after a tool-using turn (async, non-blocking)."""
+    """Save a compact experience case after a tool-using turn (async, non-blocking).
+
+    Skips low-signal turns to keep the experience pool useful:
+      - Trivial tasks (single tool round, no real learning).
+      - Memory-meta tasks (the whole turn was about the memory system itself —
+        saving "I searched memory" as experience is circular noise).
+      - Self-config / introspection tasks.
+      - Empty replies (nothing to learn from).
+    """
     if not config.get("experience_learning"):
         return
     if not result.tool_calls_made:
         return
 
+    # Unique tools used this turn
+    tools_used = list(dict.fromkeys(result.tool_calls_made))
+
+    # Skip when the whole turn was meta (memory / self-config / tool_search only)
+    _META_TOOLS = {
+        "memory_search", "memory_save", "memory_delete",
+        "self_config", "tool_search",
+        "list_notes", "list_skills", "list_cron", "list_secrets",
+        "get_stats", "list_experience",
+    }
+    if all(t in _META_TOOLS for t in tools_used):
+        _log.debug(f"experience skipped: meta-only tools ({tools_used})")
+        return
+
+    # Skip when user input is about memory itself (poisons the recall pool)
+    _low = (user_input or "").strip().lower()
+    _MEMORY_KEYWORDS = (
+        "память", "memory", "запомни", "remember", "forget", "забудь",
+        "очисти", "clean", "clear memory", "удали", "delete memory",
+        "что ты помнишь", "what do you remember", "recall",
+    )
+    if any(kw in _low for kw in _MEMORY_KEYWORDS):
+        _log.debug(f"experience skipped: memory-meta input ({_low[:40]})")
+        return
+
+    # Skip single-round tasks unless they produced a substantive reply
+    reply_stripped = result.reply.strip()
+    if rounds <= 1 and len(reply_stripped) < 80:
+        _log.debug(f"experience skipped: trivial single-round turn (reply={len(reply_stripped)}ch)")
+        return
+
     outcome = "failed" if fail_count >= 2 else "partial" if fail_count > 0 else "success"
     task = user_input.strip().replace("\n", " ")[:80]
-    tools_str = ", ".join(dict.fromkeys(result.tool_calls_made))
-    reply_summary = result.reply.strip().replace("\n", " ")[:60]
+    tools_str = ", ".join(tools_used)
+    reply_summary = reply_stripped.replace("\n", " ")[:60]
 
     case_text = (
         f"[EXP] Task: {task} | Tools: {tools_str} | "

@@ -291,12 +291,20 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "memory_save",
-            "description": "Save info to long-term memory. Long texts auto-chunked for knowledge graph.",
+            "description": (
+                "Save a DURABLE fact to long-term memory. "
+                "Call this ONLY when: (1) user explicitly says remember/запомни/save, OR "
+                "(2) you learned a stable fact about the user (name, role, location, stack, preferences, deadlines, project constants) "
+                "that will matter in future conversations. "
+                "DO NOT save: conversational intents ('user wants X'), current session plans, task lists, "
+                "acknowledgments ('user said hi'), transient requests, your own reasoning, or what you're about to do. "
+                "Rule of thumb: if it won't be useful a week from now, don't save it."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "What to remember (long texts auto-chunked)"},
-                    "tag": {"type": "string", "description": "Category: user/project/fact/task/knowledge"},
+                    "text": {"type": "string", "description": "The durable fact (NOT a task description or intent summary). Long texts auto-chunked."},
+                    "tag": {"type": "string", "description": "Category: user (about the user) / project (stable project info) / fact (general) / decision (committed choice) / knowledge (domain info). AVOID 'task'."},
                     "source": {"type": "string", "description": "Source name (article title, URL, filename)"},
                 },
                 "required": ["text"],
