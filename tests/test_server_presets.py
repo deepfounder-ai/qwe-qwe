@@ -13,46 +13,51 @@ import zipfile
 import importlib
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import pytest
 
 
-# ── Environment isolation ─────────────────────────────────────────────
-
-_tmp_root: Path | None = None
-_original_data_dir = None
+# ── Environment isolation (autouse module-scoped fixture) ─────────────
 
 
-def setup_module(module):
-    global _tmp_root, _original_data_dir
-    _original_data_dir = os.environ.get("QWE_DATA_DIR")
-    _tmp_root = Path(tempfile.mkdtemp(prefix="qwe_server_test_"))
-    os.environ["QWE_DATA_DIR"] = str(_tmp_root)
+@pytest.fixture(scope="module", autouse=True)
+def _server_preset_env():
+    original_data_dir = os.environ.get("QWE_DATA_DIR")
+    tmp_root = Path(tempfile.mkdtemp(prefix="qwe_server_test_"))
+    os.environ["QWE_DATA_DIR"] = str(tmp_root)
     _reload_core()
+    try:
+        yield tmp_root
+    finally:
+        _close_db()
+        if original_data_dir is not None:
+            os.environ["QWE_DATA_DIR"] = original_data_dir
+        else:
+            os.environ.pop("QWE_DATA_DIR", None)
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        _reload_core()
 
 
-def teardown_module(module):
-    global _tmp_root
-    if _original_data_dir is not None:
-        os.environ["QWE_DATA_DIR"] = _original_data_dir
-    else:
-        os.environ.pop("QWE_DATA_DIR", None)
-    if _tmp_root and _tmp_root.exists():
-        shutil.rmtree(_tmp_root, ignore_errors=True)
-    _reload_core()
+def _close_db():
+    db_mod = sys.modules.get("db")
+    if db_mod is None:
+        return
+    try:
+        _local = getattr(db_mod, "_local", None)
+        conn = getattr(_local, "conn", None) if _local else None
+        if conn is not None:
+            conn.close()
+        if _local is not None:
+            _local.conn = None
+        db_mod._migrated = False
+    except Exception:
+        pass
 
 
 def _reload_core():
     """Drop stale db connection + reload core modules so they pick up the
     new QWE_DATA_DIR. server.py is re-imported last."""
-    if "db" in sys.modules:
-        try:
-            conn = getattr(sys.modules["db"]._local, "conn", None)
-            if conn is not None:
-                conn.close()
-            sys.modules["db"]._local.conn = None
-            sys.modules["db"]._migrated = False
-        except Exception:
-            pass
+    _close_db()
     for mod in ("config", "db", "soul", "presets", "server"):
         if mod in sys.modules:
             importlib.reload(sys.modules[mod])
@@ -334,8 +339,26 @@ def test_delete_invalid_id_rejected():
 
 # ── Runner ────────────────────────────────────────────────────────────
 
+def _manual_setup():
+    original = os.environ.get("QWE_DATA_DIR")
+    tmp_root = Path(tempfile.mkdtemp(prefix="qwe_server_test_"))
+    os.environ["QWE_DATA_DIR"] = str(tmp_root)
+    _reload_core()
+    return original, tmp_root
+
+
+def _manual_teardown(original, tmp_root):
+    if original is not None:
+        os.environ["QWE_DATA_DIR"] = original
+    else:
+        os.environ.pop("QWE_DATA_DIR", None)
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    _reload_core()
+
+
 if __name__ == "__main__":
-    setup_module(None)
+    _orig, _tmp = _manual_setup()
     tests = [
         test_list_empty,
         test_install_happy_path_and_list,
@@ -361,6 +384,6 @@ if __name__ == "__main__":
             print(f"  FAIL {fn.__name__}: {e}")
             import traceback
             traceback.print_exc()
-    teardown_module(None)
+    _manual_teardown(_orig, _tmp)
     print(f"\n{len(tests) - failures}/{len(tests)} passed")
     sys.exit(1 if failures else 0)
