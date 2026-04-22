@@ -69,14 +69,24 @@ release) or `~/.qwe-qwe/skills/` (user-local). It must export
 `execute(name, args) -> str`. See `skills/notes.py` or `skills/timer.py`
 for a minimal template.
 
-## Release flow
+## Release
 
-1. Bump `VERSION` in **both** `config.py` and `pyproject.toml` (same string).
-2. Update the version badge in `README.md`.
-3. Add an entry to `RELEASE_NOTES.md` (and `CHANGELOG.md`).
-4. Verify the release checklist in [CLAUDE.md](CLAUDE.md#release-checklist) — `py-modules` coverage, `--doctor` checks, compile check, fresh-venv install.
-5. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin main --tags`.
-6. `gh release create vX.Y.Z --title "vX.Y.Z — ..." --notes-file RELEASE_NOTES.md`.
+Bump VERSION in config.py + pyproject.toml + README badge.
+Write RELEASE_NOTES.md.
+Commit + push to main.
+The release-automation workflow tags + creates the GitHub release if CI is green.
+
+Details:
+
+- `config.py` `VERSION` and `pyproject.toml` `version` must match exactly — the
+  workflow fails the job if they drift.
+- `RELEASE_NOTES.md` must exist and be non-empty; its first line becomes the
+  release title suffix (`vX.Y.Z — <first-line>`).
+- See the release checklist in [CLAUDE.md](CLAUDE.md#release-checklist) —
+  `py-modules` coverage, `--doctor` checks, compile check, fresh-venv install.
+- Workflow: `.github/workflows/release.yml`. Triggered via `workflow_run` on
+  the Tests workflow — no release is cut if tests are red. Idempotent: a
+  re-run on the same commit is a no-op when the tag / release already exists.
 
 ## Dependabot
 
