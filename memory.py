@@ -1,6 +1,6 @@
 """Qdrant-backed semantic memory — hybrid search (dense + sparse via FastEmbed), recommendations, grouping."""
 
-import atexit, re, uuid, time
+import atexit, re, uuid, time, threading
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter,
@@ -17,6 +17,14 @@ _log = logger.get("memory")
 _qclient: QdrantClient | None = None
 _dense_model = None
 _sparse_model = None
+
+# Lazy-init locks — two concurrent threads reaching _get_qdrant() at once used
+# to construct two QdrantClient instances, and disk-mode Qdrant refuses to
+# share a storage folder ("Storage folder already accessed"). Double-checked
+# locking keeps the fast path unlocked after the singleton is built.
+_qclient_lock = threading.Lock()
+_dense_model_lock = threading.Lock()
+_sparse_model_lock = threading.Lock()
 
 
 # ── Secret scrubbing ──
@@ -94,21 +102,25 @@ EMBED_DIM = 384  # multilingual-MiniLM output dimension
 def _get_dense_model():
     global _dense_model
     if _dense_model is None:
-        import warnings
-        from fastembed import TextEmbedding
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            _dense_model = TextEmbedding(model_name=DENSE_MODEL_NAME)
-        _log.info(f"loaded dense model: {DENSE_MODEL_NAME}")
+        with _dense_model_lock:
+            if _dense_model is None:
+                import warnings
+                from fastembed import TextEmbedding
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    _dense_model = TextEmbedding(model_name=DENSE_MODEL_NAME)
+                _log.info(f"loaded dense model: {DENSE_MODEL_NAME}")
     return _dense_model
 
 
 def _get_sparse_model():
     global _sparse_model
     if _sparse_model is None:
-        from fastembed import SparseTextEmbedding
-        _sparse_model = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
-        _log.info(f"loaded sparse model: {SPARSE_MODEL_NAME}")
+        with _sparse_model_lock:
+            if _sparse_model is None:
+                from fastembed import SparseTextEmbedding
+                _sparse_model = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
+                _log.info(f"loaded sparse model: {SPARSE_MODEL_NAME}")
     return _sparse_model
 
 
@@ -136,13 +148,15 @@ _sparse_embed = sparse_embed
 def _get_qdrant() -> QdrantClient:
     global _qclient
     if _qclient is None:
-        if config.QDRANT_MODE == "memory":
-            _qclient = QdrantClient(":memory:")
-        elif config.QDRANT_MODE == "disk":
-            _qclient = QdrantClient(path=config.QDRANT_PATH)
-        else:
-            _qclient = QdrantClient(url=config.QDRANT_URL)
-        _ensure_collection(_qclient, config.QDRANT_COLLECTION)
+        with _qclient_lock:
+            if _qclient is None:
+                if config.QDRANT_MODE == "memory":
+                    _qclient = QdrantClient(":memory:")
+                elif config.QDRANT_MODE == "disk":
+                    _qclient = QdrantClient(path=config.QDRANT_PATH)
+                else:
+                    _qclient = QdrantClient(url=config.QDRANT_URL)
+                _ensure_collection(_qclient, config.QDRANT_COLLECTION)
     return _qclient
 
 
