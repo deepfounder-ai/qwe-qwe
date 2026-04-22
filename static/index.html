@@ -4013,6 +4013,57 @@ function openSettingsTab(id) {
 }
 
 // ───── Modal bodies ─────
+function openProviderKeyModal(name) {
+  // Look up the known URL + any existing config so user doesn't have to retype
+  const p = (state.providers || []).find(x => (x.name || x.id) === name) || {};
+  const knownUrl = p.url || p.base_url || '';
+  const hints = {
+    openai: 'Get at https://platform.openai.com/api-keys',
+    openrouter: 'Get at https://openrouter.ai/keys',
+    groq: 'Get at https://console.groq.com/keys',
+    anthropic: 'Get at https://console.anthropic.com/settings/keys',
+    together: 'Get at https://api.together.xyz/settings/api-keys',
+    deepseek: 'Get at https://platform.deepseek.com/api_keys',
+    mistral: 'Get at https://console.mistral.ai/api-keys',
+  };
+  const hint = hints[name.toLowerCase()] || '';
+  const body =
+    '<div class="field"><div class="label">Provider</div>' +
+      '<div class="mono" style="padding:8px 10px;background:var(--surface);border:1px solid var(--line);border-radius:5px;font-size:12px">' + esc(name) + '</div></div>' +
+    '<div class="field"><div class="label">Base URL</div>' +
+      '<input type="url" id="pk-url" class="mono" value="' + esc(knownUrl) + '" placeholder="https://api.example.com/v1">' +
+      '<div class="hint">Usually correct — edit only if you use a proxy.</div></div>' +
+    '<div class="field"><div class="label">API key</div>' +
+      '<input type="password" id="pk-key" placeholder="sk-…" autofocus>' +
+      (hint ? '<div class="hint">' + esc(hint) + '</div>' : '') +
+    '</div>';
+  openModal({
+    title: 'Set API key for ' + name,
+    body,
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Save + switch', primary: true, onClick: async () => {
+          const url = document.getElementById('pk-url').value.trim();
+          const key = document.getElementById('pk-key').value.trim();
+          if (!key) { toast('api key required', 'err'); return false; }
+          if (!url) { toast('url required', 'err'); return false; }
+          try {
+            // 1. Save provider config (adds or updates, preserves models list)
+            await api('/api/provider', { method: 'POST', body: { name, url, key } });
+            // 2. Switch active provider
+            await api('/api/model', { method: 'POST', body: { provider: name } });
+            toast('switched to ' + name);
+            await loadStatus();
+            await loadModelPicker();
+          } catch (e) {
+            toast('save failed', 'err');
+            return false;
+          }
+      }},
+    ],
+  });
+}
+
 function openAddProviderModal() {
   const body =
     '<div class="field"><div class="label">Name</div><input type="text" id="mp-name" placeholder="my-provider" autofocus></div>' +
@@ -4188,8 +4239,16 @@ function renderTabModel() {
         : '<div class="picker-grid">' + providers.map(p => {
             const n = p.name || p.id;
             const url = p.url || p.base_url || '';
-            return '<button class="picker-card ' + (n === activeProv ? 'active' : '') + '" data-pick-provider="' + esc(n) + '">' +
-              '<div class="name">' + esc(n) + '</div>' +
+            const isLocal = !!p.local;
+            const hasKey = !!p.has_key;
+            // Show "needs key" chip for cloud providers without a saved key
+            const badge = (!hasKey && !isLocal)
+              ? '<span style="position:absolute;top:6px;right:6px;font-family:var(--font-mono);font-size:8.5px;color:var(--warn);border:1px solid var(--warn);padding:1px 5px;border-radius:3px;letter-spacing:0.05em">NEEDS KEY</span>'
+              : '';
+            const online = isLocal && p.online ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);margin-right:5px;vertical-align:middle" title="Online"></span>' : '';
+            return '<button class="picker-card ' + (n === activeProv ? 'active' : '') + '" data-pick-provider="' + esc(n) + '" data-needs-key="' + (!hasKey && !isLocal ? '1' : '0') + '" style="position:relative">' +
+              badge +
+              '<div class="name">' + online + esc(n) + '</div>' +
               '<div class="sub">' + esc(url) + '</div></button>';
           }).join('') +
           '<button class="picker-card" data-act="add-provider" style="border-style:dashed;display:flex;flex-direction:column;align-items:center;justify-content:center">' +
@@ -5433,10 +5492,18 @@ function wireEvents() {
     });
   });
 
-  // Model picker
+  // Model picker — provider cards.
+  // If the provider needs an API key and doesn't have one yet, prompt for it
+  // BEFORE switching. This is what the user was missing: clicking openrouter
+  // used to silently switch + fail model discovery, with no input surface.
   document.querySelectorAll('[data-pick-provider]').forEach(b => {
     b.onclick = async () => {
       const name = b.dataset.pickProvider;
+      const needsKey = b.dataset.needsKey === '1';
+      if (needsKey) {
+        openProviderKeyModal(name);
+        return;
+      }
       try { await api('/api/model', { method: 'POST', body: { provider: name } }); toast('provider: ' + name); await loadStatus(); await loadModelPicker(); }
       catch { toast('switch failed', 'err'); }
     };

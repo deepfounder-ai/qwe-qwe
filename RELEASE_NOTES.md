@@ -1,58 +1,50 @@
-# v0.17.16 — YouTube: android player_client + native language detection
+# v0.17.17 — Provider picker: key input modal + visual cues
 
-User tested the Russian evolution video (`gzrAd7tCqYk`) again and still got metadata-only. Turned out the "429 rate limit" diagnosis in v0.17.15 was only half the story.
+User clicked the `openrouter` provider card in **Settings → Model** and nothing happened — no way to enter an API key. The picker was silently switching the active provider, model discovery was failing (no key), and the UI gave no surface to recover.
 
-## 🔍 Real root cause
+## 🔧 Fixes
 
-After probing with every `player_client` yt-dlp supports (`web`, `ios`, `android`, `mweb`, `tv`, `web_safari`), only **`android` and `ios`** succeeded on this video:
+### 1. "NEEDS KEY" badge on cloud providers without a saved key
 
-| Client | Result |
-|---|---|
-| `web` | ❌ "Requested format is not available" |
-| `ios` | ❌ format unavailable |
-| `mweb` | ❌ format unavailable |
-| `tv` | ❌ **"This video is DRM protected"** |
-| `web_safari` | ❌ format unavailable |
-| `web` + `ios` | ❌ |
-| **`android`** | ✅ **237 KB VTT downloaded** |
-| `ios` + `android` | ✅ 237 KB VTT (same, via android fallback) |
-
-YouTube is applying **different access policies per client**. Some videos work on the YouTube Android app but are blocked on the web player as DRM-protected. yt-dlp's default client order (starts with `web`) hits the wall. The 429 errors I was seeing were yt-dlp's fallback attempts on the other clients failing for the same reason.
-
-## 🔧 Fix
-
-Pin `extractor_args.youtube.player_client = ["android", "ios", "web"]` in both the info-extract and download phases. yt-dlp tries them in order, first success wins.
-
-### Second fix: prefer the video's native language
-
-The same video had only auto-captions (no manual), in every language on Earth including `ru` (native) and `en` (auto-translated). My code defaulted to `en` because `stt_language` defaults to `en`. YouTube rate-limits auto-translated fetches harder than direct ones, so `en` failed first.
-
-Language priority is now:
+Provider cards now show a small amber chip in the top-right corner when `!has_key && !local`. You can see at a glance which providers are ready to use vs. which need credentials:
 
 ```
-1. stt_language (if user set it in Settings → Voice)
-2. info.language — the video's OWN language from yt-dlp metadata
-3. en / en-US / en-GB fallback
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│ 🟢 lmstudio   │    │ ollama        │    │ openrouter   │
+│ localhost:1234│    │ localhost:11434│    │ openrouter.ai│
+│              │    │              │    │    NEEDS KEY │
+└──────────────┘    └──────────────┘    └──────────────┘
+   (online)           (no ping)         (amber badge)
 ```
 
-For a Russian video: priority becomes `[ru, en, en-US, en-GB]` → picks `ru` auto-caption (direct, not translated) → downloads instantly.
+Local providers also show a green dot when the health ping succeeds.
 
-## ✅ Verified
+### 2. Clicking a "NEEDS KEY" card opens a key-input modal
 
-Same URL that returned 917 bytes of fallback metadata before:
+Instead of silently switching (and failing), the card click checks `data-needs-key` and routes to a new `openProviderKeyModal(name)` that:
 
-```
-META: {'lang': 'ru', 'has_transcript': True, 'source_type': 'auto-generated', 'fmt': 'vtt'}
-MD LEN: 22,642
-Transcript LEN: 21,640
+- Pre-fills the base URL from the provider preset (e.g. `https://openrouter.ai/api/v1` for openrouter) — read-only-looking but editable if you use a proxy.
+- Password-masked key input with `autofocus`.
+- **Built-in hints** pointing to the right key-management page for common providers:
+  - `openai` → platform.openai.com/api-keys
+  - `openrouter` → openrouter.ai/keys
+  - `groq` → console.groq.com/keys
+  - `anthropic` → console.anthropic.com/settings/keys
+  - `together` → api.together.xyz/settings/api-keys
+  - `deepseek` → platform.deepseek.com/api_keys
+  - `mistral` → console.mistral.ai/api-keys
 
-Transcript first 500 chars:
-В немецком сланце Позитония рабочие добывают камень уже веками,
-превращая древнее морское дно в черепицу и столешницы. Но иногда
-их инструменты натыкаются на что-то неожиданное…
-```
+On **Save + switch**:
 
-**22 KB of real content** (21.6 KB transcript) in 1.2 s, zero 429s.
+1. `POST /api/provider` — persists the config (same endpoint used by "add custom provider")
+2. `POST /api/model {provider: name}` — switches active provider
+3. Refreshes `/api/status` + `/api/providers` so the card loses the amber badge and becomes active.
+
+If either step fails, the modal stays open so you can fix and retry.
+
+### 3. Once a key is saved, next click switches directly
+
+No modal the second time — the server reports `has_key: true` on that provider, so the click goes straight through the normal switch path.
 
 ## 📦 Upgrade
 
@@ -61,6 +53,6 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-The `yt_cookies_from_browser` setting from v0.17.15 is still there as a second layer — use it if you hit issues with more-protected videos.
+Open **Settings → Model** and the cloud providers you haven't configured will show an amber **NEEDS KEY** chip. Click one and the modal appears.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
