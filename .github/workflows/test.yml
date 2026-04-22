@@ -66,5 +66,15 @@ jobs:
           print('all modules import cleanly')
           "
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run tests with coverage
+        run: pytest tests/ -v --cov --cov-report=term --cov-report=xml
+
+      - name: Publish coverage to job summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Test coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Render the already-collected .coverage data — no second pytest run.
+          python -m coverage report | tail -60 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
