@@ -36,6 +36,8 @@ PDF_EXTENSION = ".pdf"
 # Office & book formats — parsed by specialist readers in _read_file
 OFFICE_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".odt", ".epub", ".rtf"}
 URL_SCHEMES = ("http://", "https://")
+# YouTube URL patterns — matched case-insensitively
+_YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "music.youtube.com")
 ALL_INDEXABLE = SUPPORTED_EXTENSIONS | IMAGE_EXTENSIONS | {PDF_EXTENSION} | OFFICE_EXTENSIONS
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 VISION_RATE_LIMIT = 1.0  # seconds between vision API calls
@@ -398,13 +400,159 @@ def _read_file(path: Path) -> str | None:
         return None
 
 
+def _is_youtube_url(url: str) -> bool:
+    """Check if URL is a YouTube video / short / music link."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower()
+        return host in _YOUTUBE_HOSTS
+    except Exception:
+        return False
+
+
+def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
+    """Fetch a YouTube transcript via yt-dlp. Returns (markdown_text, meta) or None.
+
+    markitdown's bundled `youtube-transcript-api` is frequently broken by
+    YouTube's bot-detection (ParseError: no element found because the
+    timedtext endpoint returns empty without a PotToken). yt-dlp ships with
+    the JS-based workarounds and is actively maintained, so we use it as the
+    primary path for YouTube URLs.
+
+    Returns None if yt-dlp is not installed or the video has no transcripts.
+    Logs warnings on failure so the caller can fall through to markitdown.
+    """
+    try:
+        import yt_dlp  # type: ignore
+    except ImportError:
+        _log.info("yt-dlp not installed — skipping YouTube-specific path (fallback to markitdown)")
+        return None
+
+    opts = {
+        "skip_download": True,
+        "quiet": True, "no_warnings": True,
+        "writesubtitles": False,  # we fetch the URL ourselves from the info dict
+        "writeautomaticsub": False,
+        "socket_timeout": 15,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        _log.warning(f"yt-dlp extract failed for {url}: {e}")
+        return None
+
+    title = info.get("title") or "Untitled"
+    duration = info.get("duration") or 0
+    channel = info.get("channel") or info.get("uploader") or "unknown"
+    description = (info.get("description") or "").strip()
+    video_id = info.get("id") or ""
+
+    # Gather caption tracks: prefer manual → auto, prefer user-language → English → any
+    manual = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+    # Picking order: user preference if set, else en / en-*, else first available
+    preferred_lang = config.get("stt_language") or "en"
+    lang_priority = [preferred_lang, preferred_lang.split("-")[0], "en", "en-US", "en-GB"]
+
+    def pick_track(pool: dict) -> tuple[str, list] | None:
+        for lang in lang_priority:
+            if lang in pool and pool[lang]:
+                return lang, pool[lang]
+        # Any language: pick English-base first if present, otherwise first
+        for lang, tracks in pool.items():
+            if lang.startswith("en") and tracks:
+                return lang, tracks
+        if pool:
+            lang, tracks = next(iter(pool.items()))
+            return lang, tracks
+        return None
+
+    track_info = pick_track(manual) or pick_track(auto)
+    if not track_info:
+        _log.info(f"yt-dlp: no transcripts available for {url}")
+        # Still return title + description — better than nothing
+        if description or title:
+            md = f"# {title}\n\n**Channel:** {channel} · **Duration:** {duration}s\n\n{description}"
+            return md, {"video_id": video_id, "title": title, "channel": channel, "duration": duration, "has_transcript": False}
+        return None
+
+    lang, tracks = track_info
+    # Pick VTT format first (simplest to parse), fall back to anything
+    track = next((t for t in tracks if t.get("ext") == "vtt"), None) or \
+            next((t for t in tracks if t.get("ext") in ("srv3", "ttml", "srv1", "srv2")), None) or \
+            tracks[0]
+    sub_url = track.get("url")
+    if not sub_url:
+        return None
+
+    # Download the transcript
+    import urllib.request
+    try:
+        req = urllib.request.Request(sub_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        })
+        with urllib.request.urlopen(req, timeout=20) as r:
+            sub_raw = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        _log.warning(f"yt-dlp: transcript fetch failed ({track.get('ext')}): {e}")
+        return None
+
+    # Convert subtitle format → clean text (drop timestamps, cue metadata, HTML)
+    transcript = _clean_subtitle_text(sub_raw, fmt=track.get("ext", "vtt"))
+    if not transcript or len(transcript) < 20:
+        _log.info(f"yt-dlp: transcript parsed to empty for {url}")
+        return None
+
+    md = (
+        f"# {title}\n\n"
+        f"**Channel:** {channel} · **Duration:** {duration}s · **Language:** {lang}"
+        f" · **Source:** {'manual' if track_info is pick_track(manual) else 'auto-generated'}\n\n"
+        f"{('## Description\n\n' + description + '\n\n') if description else ''}"
+        f"## Transcript\n\n{transcript}\n"
+    )
+    meta = {
+        "video_id": video_id, "title": title, "channel": channel,
+        "duration": duration, "lang": lang, "has_transcript": True,
+    }
+    return md, meta
+
+
+def _clean_subtitle_text(raw: str, fmt: str = "vtt") -> str:
+    """Strip timestamps/cue metadata from a subtitle file → paragraph text."""
+    import re
+    # VTT and SRV3/TTML differ but a common enough stripping handles both
+    lines = []
+    seen = set()  # YouTube auto-captions repeat lines between cues; dedup
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Skip VTT header / cue timings
+        if s == "WEBVTT" or s.startswith("NOTE ") or s.startswith("Kind:") or s.startswith("Language:"):
+            continue
+        # Timing lines: "00:00:01.000 --> 00:00:04.000" or just cue numbers
+        if "-->" in s or re.match(r"^\d+$", s):
+            continue
+        # TTML / XML tags — strip
+        s = re.sub(r"<[^>]+>", "", s)
+        # Style tags in VTT like {\an1}
+        s = re.sub(r"\{[^}]*\}", "", s)
+        s = s.strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        lines.append(s)
+    return "\n".join(lines)
+
+
 def index_url(url: str, tags: list[str] | None = None) -> dict:
     """Fetch a URL, convert to markdown, and index it.
 
-    MarkItDown handles the full pipeline: HTTP fetch, content-type detection,
-    HTML→markdown (preserving headings/tables/lists), PDF extraction, even
-    YouTube transcripts. Falls back to urllib + stdlib HTML strip if
-    MarkItDown fails (e.g. auth-walled page, unusual MIME).
+    Pipeline:
+      1. If URL is YouTube → try yt-dlp first (most reliable for transcripts).
+      2. Else try MarkItDown (handles HTML, PDF, DOCX, Office, etc.).
+      3. Fall back to urllib + stdlib HTML strip for auth-walled or exotic MIMEs.
     """
     import uuid as _uuid
     from urllib.parse import urlparse
@@ -417,6 +565,31 @@ def index_url(url: str, tags: list[str] | None = None) -> dict:
     slug = _uuid.uuid4().hex[:8]
     parsed = urlparse(url)
     base = (parsed.netloc + parsed.path).rstrip("/").replace("/", "_")[-60:] or "page"
+
+    # YouTube-first path: yt-dlp handles bot-protection (PotToken) that breaks
+    # the youtube-transcript-api MarkItDown bundles. Fall through to markitdown
+    # on any failure so other paths still work.
+    if _is_youtube_url(url):
+        yt = _fetch_youtube_transcript(url)
+        if yt:
+            md_text, yt_meta = yt
+            # Prefer a filename with the video title, not the netloc+path
+            title_slug = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (yt_meta.get("title") or "youtube"))[:60].strip() or "youtube"
+            dest = uploads / f"{slug}_{title_slug}.md"
+            header = (
+                f"<!-- Source: {url} -->\n"
+                f"<!-- Fetched: {time.strftime('%Y-%m-%d %H:%M:%S')} -->\n"
+                f"<!-- Converter: yt-dlp -->\n"
+                f"<!-- Video: {yt_meta.get('video_id')} · {yt_meta.get('duration')}s · {yt_meta.get('lang','?')} -->\n\n"
+            )
+            dest.write_text(header + md_text, encoding="utf-8")
+            all_tags = list(tags or []) + ["source:url", "source:youtube", url]
+            result = index_file(str(dest), tags=all_tags)
+            result["url"] = url
+            result["converter"] = "yt-dlp"
+            result["title"] = yt_meta.get("title")
+            return result
+        _log.info(f"yt-dlp failed for {url} — falling through to markitdown")
 
     # Primary path: MarkItDown converts the URL directly to markdown.
     md_text = _markitdown_convert(url)

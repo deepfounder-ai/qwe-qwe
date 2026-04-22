@@ -1,56 +1,90 @@
-# v0.17.12 — Memory discipline: stop saving conversational noise
+# v0.17.13 — YouTube import now actually works (yt-dlp primary path)
 
-User reported the agent was saving useless stuff to long-term memory:
+User reported YouTube URLs imported as "почти пустой файл" — ~745 bytes of the YouTube footer ("About / Press / Copyright / Contact us") instead of the transcript.
 
-- Right after "hi, be my business assistant" → saved `user wants me to be a business assistant, need to ask about his business domain, tasks, goals, what functions he needs…`
-- On a "clean up memory" task → saved `[EXP] Task: надо подчистить память | Tools: memory_search, self_config | Steps: 3 | Result: success | Learned: Вижу, что в памяти сейчас: 📦 Что хранится: 6 записе…`
+## 🐛 Root cause
 
-Both are noise that pollutes recall quality. Fixed on two fronts:
+MarkItDown bundles `youtube-transcript-api` as the YouTube path. Since mid-2024 YouTube rolled out PotToken (Proof of Origin Token) bot-detection on the `timedtext` API endpoint. Without a valid token the endpoint returns **empty 200 OK** regardless of `fmt=` parameter (tested all of `xml / json3 / srv3 / vtt / ttml` — all zero bytes, even with proper browser headers + Referer + Origin). `youtube-transcript-api` then crashes with `ParseError: no element found`. MarkItDown swallows the exception and scrapes the watch page HTML instead — which for logged-out server traffic is just the footer. Result: empty file, user frustrated.
 
-## 🔧 What changed
+## 🔧 Fix: yt-dlp as primary YouTube path
 
-### 1. `memory_save` tool description is now prescriptive
+`yt-dlp` ships with the JS-based PotToken workarounds and is actively maintained specifically to handle YouTube's bot-protection changes. Now:
 
-Before:
-> Save info to long-term memory. Long texts auto-chunked for knowledge graph.
+```
+Is this URL youtube.com / youtu.be / music.youtube.com / m.youtube.com?
+  ├── YES → try yt-dlp first
+  │         ├── manual subtitles → pick preferred language (user's stt_language setting → en → any)
+  │         ├── auto-captions    → same priority chain
+  │         ├── no transcript    → save title + channel + description as markdown
+  │         └── yt-dlp not installed → fall through
+  └── NO  → MarkItDown (unchanged for all other URL types)
+```
 
-Now:
-> Save a **DURABLE FACT** to long-term memory. Call this ONLY when: (1) user explicitly says remember/запомни/save, OR (2) you learned a stable fact about the user (name, role, location, stack, preferences, deadlines, project constants) that will matter in future conversations. **DO NOT save**: conversational intents ("user wants X"), current session plans, task lists, acknowledgments ("user said hi"), transient requests, your own reasoning, or what you're about to do. Rule of thumb: if it won't be useful a week from now, don't save it.
+### What you get in the knowledge base
 
-Also removed `task` from the list of suggested tags — tasks belong in the scheduler, not in memory.
+The saved markdown file now looks like:
 
-### 2. Soul rule 8 rewritten
+```markdown
+<!-- Source: https://www.youtube.com/watch?v=dQw4w9WgXcQ -->
+<!-- Fetched: 2026-04-21 22:15:03 -->
+<!-- Converter: yt-dlp -->
+<!-- Video: dQw4w9WgXcQ · 213s · en -->
 
-Before:
-> Memory: search before saving (avoid duplicates). Tags: user, project, fact, task, decision, idea.
+# Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)
 
-Now:
-> **MEMORY DISCIPLINE — default is DO NOT SAVE.** Call memory_save ONLY for (a) user explicit "remember"/"запомни", (b) durable facts that matter weeks later (user name/role/stack/preferences, committed decisions, stable project info). **NEVER save**: intents ("user wants…"), session plans, current tasks, greetings, your own reasoning, "need to learn more about…", TODO lists. **Ask yourself: will this matter in a week? If not, skip.**
+**Channel:** Rick Astley · **Duration:** 213s · **Language:** en · **Source:** auto-generated
 
-### 3. Experience auto-save filters noise
+## Description
 
-`_save_experience()` fired after every tool-using turn — including memory-cleanup and meta tasks. It now skips:
+The official video for "Never Gonna Give You Up" by Rick Astley. …
 
-- **Meta-only tool sets** — when the whole turn used only memory/self-config/tool-search/list-* tools. Saving "I searched memory" as an experience is circular.
-- **Memory-topic user inputs** — keywords like `память`, `memory`, `запомни`, `forget`, `clean memory`, `recall` in the user message skip save. Experiences about managing memory poison the recall pool.
-- **Trivial single-round turns** — one tool round + reply under 80 chars = nothing worth remembering.
+## Transcript
 
-Verified with unit tests:
+(cleaned VTT/TTML — timestamps stripped, dedup'd, no HTML tags)
+```
 
-| Case | Tools | Input | Rounds | Saved? |
-|---|---|---|---|---|
-| Memory cleanup | `memory_search, self_config` | "надо подчистить память" | 3 | ❌ |
-| Real task | `read_file, shell, write_file` | "write a CSV sorter" | 3 | ✅ |
-| Meta-only | `memory_search, memory_save` | "do some unrelated thing" | 2 | ❌ |
-| Trivial | `read_file` | "open the config" (reply: "OK.") | 1 | ❌ |
+Tagged with `source:url` + `source:youtube` + the original URL so the agent can trace it back.
 
-## 📦 Upgrade
+### Subtitle cleaning
+
+`_clean_subtitle_text()` handles VTT, TTML, and SRV3 formats:
+
+- Drops `WEBVTT` / `NOTE` / `Kind:` / `Language:` headers
+- Drops cue numbers and `00:00:01.000 --> 00:00:04.000` timing lines
+- Strips `<b>...</b>`, `<c.yellow>...</c>`, and `{\an1}` style markers
+- Deduplicates consecutive identical lines (YouTube auto-captions repeat)
+
+### Language priority
+
+1. User's `stt_language` setting (if set in Settings → Voice)
+2. Base language (e.g. `stt_language=ru-RU` → also tries `ru`)
+3. English (`en`, `en-US`, `en-GB`)
+4. Any English-prefixed track
+5. First available
+
+### Fallback chain
+
+Even with yt-dlp installed, any failure (private video, region-locked, no transcripts, API hiccup) falls through cleanly to MarkItDown, and finally to stdlib HTML strip. Never crashes the indexer.
+
+## 📦 New dependency
+
+`yt-dlp>=2025.1.0` is now a hard dep (~3.3 MB wheel). Upgrade via:
 
 ```bash
 git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-If you already have junk in memory from before this fix: **Memory → Knowledge graph → Clear graph** wipes the synthesized layer. For raw saves, search for `[EXP]` entries or conversational summaries in the Memory tab and delete individually (or `memory_delete` via the agent).
+`--doctor` now shows a `yt-dlp` check so you can confirm it installed correctly.
+
+## Verification
+
+Tested on `https://www.youtube.com/watch?v=dQw4w9WgXcQ`:
+
+| Path | Result |
+|---|---|
+| Old (youtube-transcript-api) | ❌ ParseError — XML empty |
+| Old fallback (MarkItDown page scrape) | ❌ 745 bytes footer |
+| **New (yt-dlp)** | ✅ 3,331 bytes — title, channel, description, full transcript |
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

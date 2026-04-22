@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwe-qwe"
-version = "0.17.12"
+version = "0.17.13"
 description = "Lightweight offline AI agent for local models"
 readme = "README.md"
 license = {text = "MIT"}
@@ -37,6 +37,11 @@ dependencies = [
     "markdownify>=0.14",
     "beautifulsoup4>=4.12",
     "pdfminer.six>=20240706",
+    # YouTube transcript fallback: youtube-transcript-api (bundled with markitdown)
+    # is frequently broken by YouTube's bot-detection. yt-dlp has the JS-based
+    # PotToken workarounds and is actively maintained. rag.index_url() tries
+    # yt-dlp first for youtube.com / youtu.be URLs.
+    "yt-dlp>=2025.1.0",
 ]
 
 [project.optional-dependencies]

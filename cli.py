@@ -1701,6 +1701,14 @@ def doctor():
             return "⚠ FTS5 tables not found (BM25 not active)"
     check("BM25", _check_fts)
 
+    def _check_ytdlp():
+        try:
+            import yt_dlp
+            return f"✓ yt-dlp {yt_dlp.version.__version__} (YouTube transcripts)"
+        except ImportError:
+            return "⚠ yt-dlp not installed — YouTube import will fall back to markitdown (often broken by bot-detection)"
+    check("yt-dlp", _check_ytdlp)
+
     # ── 13b. Presets ──
     def _check_presets():
         import presets
