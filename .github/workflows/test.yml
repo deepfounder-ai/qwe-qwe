@@ -26,6 +26,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Syntax check against Python 3.11 grammar
+        # Catches PEP 701 leakage — backslash / quote / triple-quote inside
+        # f-string expressions is legal on 3.12 but breaks 3.11. pytest
+        # doesn't catch these unless it happens to import the module.
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+          errors = []
+          for glob in ("*.py", "tests/*.py", "skills/*.py"):
+              for p in pathlib.Path(".").glob(glob):
+                  if p.stem.startswith(".") or p.stem == "setup":
+                      continue
+                  try:
+                      ast.parse(p.read_text(encoding="utf-8"),
+                                filename=str(p),
+                                feature_version=(3, 11))
+                  except SyntaxError as e:
+                      errors.append(f"{p}:{e.lineno}: {e.msg}")
+          if errors:
+              print("\n".join(errors)); sys.exit(1)
+          print("ok — all files valid Python 3.11 syntax")
+          PY
+
+      - name: Import-time smoke (surfaces runtime SyntaxError / ImportError)
+        # pytest doesn't exercise the server/rag/tools modules on startup —
+        # a syntax error in rag.py only shows up when a request hits
+        # knowledge_list(). Importing every module here catches those.
+        run: |
+          python -c "
+          import agent, agent_loop, tools, server, memory, rag, providers
+          import scheduler, tasks, soul, threads, vault, mcp_client, presets
+          import config, cli, db, discovery, synthesis, telegram_bot, stt, tts
+          import updater, utils, logger, inference_setup
+          from server import app  # force middleware stack construction
+          print('all modules import cleanly')
+          "
+
       - name: Run tests
         # Run each test file in its own pytest process. Several legacy test
         # files (test_config, test_experience, test_presets, test_reliability,

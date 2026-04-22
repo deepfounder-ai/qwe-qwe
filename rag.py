@@ -601,11 +601,15 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
                         "fallback_reason": "transcript_download_failed"}
         return None
 
+    # Precompute the optional Description section — Python 3.11's f-string
+    # parser rejects backslash escapes inside expression braces (PEP 701 only
+    # relaxed that in 3.12), so the conditional `\n\n` has to live outside.
+    desc_section = f"## Description\n\n{description}\n\n" if description else ""
     md = (
         f"# {title}\n\n"
         f"**Channel:** {channel} · **Duration:** {duration}s · **Language:** {want_lang}"
         f" · **Source:** {'auto-generated' if is_auto else 'manual'} ({fmt_used})\n\n"
-        f"{('## Description\n\n' + description + '\n\n') if description else ''}"
+        f"{desc_section}"
         f"## Transcript\n\n{transcript}\n"
     )
     meta = {
