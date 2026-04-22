@@ -1461,9 +1461,30 @@ def doctor():
         try:
             import memory
             vec = memory.embed("test")
-            return f"✓ FastEmbed ({memory.DENSE_MODEL_NAME}, {len(vec)}d)"
+            # Report which provider ONNX actually ended up using so half-installed
+            # CUDA is diagnosable without reading stderr during init.
+            provider_hint = ""
+            try:
+                model = memory._get_dense_model()
+                sess = getattr(model, "model", None) or getattr(model, "_model", None)
+                providers = None
+                if sess and hasattr(sess, "model"):
+                    # fastembed wraps InferenceSession under .model.model (varies by version)
+                    inner = getattr(sess, "model", None)
+                    if inner and hasattr(inner, "get_providers"):
+                        providers = inner.get_providers()
+                if providers:
+                    active = providers[0].replace("ExecutionProvider", "")
+                    provider_hint = f" via {active}"
+            except Exception:
+                pass
+            return f"✓ FastEmbed ({memory.DENSE_MODEL_NAME}, {len(vec)}d){provider_hint}"
         except Exception as e:
-            return str(e)[:80]
+            msg = str(e).lower()
+            hint = ""
+            if "cuda" in msg or "loadlibrary" in msg or "onnxruntime_providers_cuda" in msg:
+                hint = " — set QWE_EMBED_DEVICE=cpu or Settings → embed_device=cpu"
+            return (str(e)[:100] + hint) if hint else str(e)[:120]
     check("Embeddings", _check_embeddings)
 
     # ── 6. Inference test ──

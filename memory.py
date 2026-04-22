@@ -1,6 +1,6 @@
 """Qdrant-backed semantic memory — hybrid search (dense + sparse via FastEmbed), recommendations, grouping."""
 
-import atexit, re, uuid, time, threading
+import atexit, os, re, uuid, time, threading
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter,
@@ -99,16 +99,88 @@ SPARSE_MODEL_NAME = "prithivida/Splade_PP_en_v1"  # learned sparse (SPLADE++)
 EMBED_DIM = 384  # multilingual-MiniLM output dimension
 
 
+def _fastembed_providers() -> list[str] | None:
+    """Pick ONNX execution providers based on user preference.
+
+    Setting `embed_device` (or env `QWE_EMBED_DEVICE`) can be:
+      - "auto"  (default): FastEmbed decides — tries CUDA first if the GPU
+        onnxruntime is installed, else CPU. We return None to accept FastEmbed's
+        auto behavior, BUT we also wrap the init in a CUDA→CPU fallback below
+        because ONNX's own retry has historically been unreliable on Windows
+        when CUDA DLLs are missing.
+      - "cpu":  force ["CPUExecutionProvider"] — skip CUDA entirely, no noisy
+        stderr when CUDA is half-installed.
+      - "cuda": force ["CUDAExecutionProvider"] — error out loudly if it fails
+        instead of silently falling back to CPU. Useful for debugging.
+    """
+    mode = (os.environ.get("QWE_EMBED_DEVICE") or config.get("embed_device") or "auto").strip().lower()
+    if mode == "cpu":
+        return ["CPUExecutionProvider"]
+    if mode == "cuda":
+        return ["CUDAExecutionProvider"]
+    return None  # auto — let FastEmbed decide
+
+
+def _suppress_onnx_stderr():
+    """Temporary stderr redirect — ONNX prints noisy C-level error messages
+    ('LoadLibrary failed with error 126 …') to stderr even on successful
+    CPU-fallback. Return a (restore_fn, captured_text) pair.
+    """
+    import contextlib
+    class _Capture:
+        def __init__(self):
+            self.buf = []
+        def write(self, s):
+            self.buf.append(s)
+        def flush(self):
+            pass
+    cap = _Capture()
+    return contextlib.redirect_stderr(cap), cap
+
+
+def _init_fastembed(cls, model_name: str):
+    """Instantiate a FastEmbed model with (a) user-preferred providers,
+    (b) graceful CUDA→CPU fallback on any exception, (c) stderr suppression
+    during the first attempt so half-installed CUDA doesn't spam the user's
+    terminal with raw onnxruntime noise.
+    """
+    import warnings
+    providers = _fastembed_providers()
+    # First attempt — honor user preference (or auto)
+    init_kwargs = {"model_name": model_name}
+    if providers is not None:
+        init_kwargs["providers"] = providers
+    try:
+        ctx, cap = _suppress_onnx_stderr()
+        with ctx, warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            try:
+                return cls(**init_kwargs)
+            except Exception as first_err:
+                captured_noise = "".join(cap.buf)
+                # Auto mode: retry explicit CPU — covers the case where CUDA
+                # DLL is half-installed and ONNX's own fallback didn't save us.
+                if providers is None:
+                    _log.warning(
+                        f"FastEmbed auto-init failed ({type(first_err).__name__}: "
+                        f"{str(first_err)[:120]}); retrying with CPU provider"
+                    )
+                    if captured_noise.strip():
+                        _log.debug(f"onnxruntime noise during init: {captured_noise[:400]}")
+                    return cls(model_name=model_name, providers=["CPUExecutionProvider"])
+                # Explicit provider mode — re-raise so user sees the real error
+                raise
+    except Exception:
+        raise
+
+
 def _get_dense_model():
     global _dense_model
     if _dense_model is None:
         with _dense_model_lock:
             if _dense_model is None:
-                import warnings
                 from fastembed import TextEmbedding
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    _dense_model = TextEmbedding(model_name=DENSE_MODEL_NAME)
+                _dense_model = _init_fastembed(TextEmbedding, DENSE_MODEL_NAME)
                 _log.info(f"loaded dense model: {DENSE_MODEL_NAME}")
     return _dense_model
 
@@ -119,7 +191,7 @@ def _get_sparse_model():
         with _sparse_model_lock:
             if _sparse_model is None:
                 from fastembed import SparseTextEmbedding
-                _sparse_model = SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
+                _sparse_model = _init_fastembed(SparseTextEmbedding, SPARSE_MODEL_NAME)
                 _log.info(f"loaded sparse model: {SPARSE_MODEL_NAME}")
     return _sparse_model
 
