@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Question or support
+    url: https://github.com/deepfounder-ai/qwe-qwe/discussions
+    about: Ask a question, share a workflow, or chat with other users. Issues are for bugs and feature requests only.
+  - name: 🔒 Security vulnerability
+    url: https://github.com/deepfounder-ai/qwe-qwe/security/advisories/new
+    about: Report privately via GitHub Security Advisory — not a public issue. See SECURITY.md for scope.
+  - name: 📣 Telegram community
+    url: https://t.me/qwe_qwe_ai
+    about: Quick questions, show-and-tell, release announcements.

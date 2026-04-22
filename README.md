@@ -528,11 +528,42 @@ static/           Web UI (single-file HTML/CSS/JS)
 
 ## Contributing
 
+**Contributions welcome.** qwe-qwe is a small open project — your PR won't get lost in a queue.
+
+- 📘 Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup + workflow
+- 🏗️ See [ARCHITECTURE.md](ARCHITECTURE.md) for the big picture
+- 🐛 [Open an issue](../../issues/new/choose) if you found a bug or want a feature
+- 💬 [Start a Discussion](../../discussions) for questions and workflow sharing
+- 🔒 [Security vulnerabilities](SECURITY.md) — private report via GitHub Security Advisory
+- 🤝 Everyone is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md)
+
+### Good first issues
+
+If you want to help but don't know where to start, we label easy tasks as [`good first issue`](../../issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22). Typical starting points:
+
+- Add a new [skill](skills/) (weather, notes, timers — each is 50-100 lines of Python)
+- Add a new [provider](providers.py) preset (`PRESETS` dict — ~5 lines)
+- Improve [doctor checks](cli.py) — add detection for a new subsystem edge case
+- Write [integration tests](tests/test_integration.py) for a 0%-covered module (check `pytest --cov`)
+
+### What I'm NOT looking for
+
+Be upfront so we don't waste each other's time:
+
+- Cloud-first features that don't work offline
+- Rewrites of the single-file web UI to React/Vue/Svelte
+- Splitting `server.py` for the sake of splitting (until it's actually causing pain)
+- Generic LLM wrapper features that exist in 20 other projects
+
+### Housekeeping
+
 Dependencies are tracked by [Dependabot](.github/dependabot.yml) — weekly grouped PRs for pip (minor + patch bundled) and monthly PRs for GitHub Actions land in the inbox. Security updates bypass the grouping and open their own PR immediately.
 
 ## Community
 
-Join our Telegram community: **[@qwe_qwe_ai](https://t.me/qwe_qwe_ai)**
+- 💬 [Telegram — @qwe_qwe_ai](https://t.me/qwe_qwe_ai) — quick chat, show-and-tell, release announcements
+- 💭 [GitHub Discussions](../../discussions) — long-form questions, workflow sharing
+- ⭐ If qwe-qwe is useful — **star the repo**. It's the clearest signal we're on the right track.
 
 ## License
 
