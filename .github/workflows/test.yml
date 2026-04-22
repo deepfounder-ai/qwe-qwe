@@ -52,6 +52,13 @@ jobs:
           print("ok — all files valid Python 3.11 syntax")
           PY
 
+      - name: JS syntax check for static/index.html
+        # Node ships on ubuntu-latest runners by default, so no setup-node
+        # step is required. scripts/check_js.py extracts every inline
+        # <script> block and runs `node --check` on it — catches typos
+        # like `stae.x = 1` that pytest can't see.
+        run: python scripts/check_js.py
+
       - name: Import-time smoke (surfaces runtime SyntaxError / ImportError)
         # pytest doesn't exercise the server/rag/tools modules on startup —
         # a syntax error in rag.py only shows up when a request hits

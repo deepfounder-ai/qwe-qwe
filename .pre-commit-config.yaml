@@ -1,0 +1,25 @@
+# Pre-commit hooks for qwe-qwe.
+#
+# Install locally with:
+#   pip install pre-commit && pre-commit install
+#
+# These hooks are advisory for contributors — CI runs the same checks on
+# every push/PR, so a missing local install will never let a bad commit
+# through to main.
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: ruff check .
+        language: system
+        pass_filenames: false
+        types_or: [python]
+
+      - id: check-js
+        name: JS syntax check (static/index.html)
+        entry: python scripts/check_js.py
+        language: system
+        pass_filenames: false
+        files: ^(static/index\.html|scripts/check_js\.py)$
