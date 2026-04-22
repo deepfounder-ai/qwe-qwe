@@ -433,24 +433,10 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
     import tempfile, shutil
     from pathlib import Path
 
-    # Language priority — ordered by what's MOST LIKELY to work AND be accurate:
-    # 1. user's stt_language (if they set one in Settings)
-    # 2. English variants (most common manual captions)
-    # 3. "" marker to signal "any manual sub beats auto in a specific lang"
-    # For video in a non-English language, manual subs in the NATIVE language
-    # are always more accurate than auto-translated English. We handle that by
-    # preferring manual-any over auto-en in best_lang() below.
+    # We'll decide the language priority AFTER extract_info() so we can read
+    # the video's native language from info.language. See the sub_langs build
+    # after Phase 1 below.
     preferred_lang = (config.get("stt_language") or "").strip()
-    lang_priority = []
-    if preferred_lang:
-        lang_priority.append(preferred_lang)
-        base = preferred_lang.split("-")[0]
-        if base != preferred_lang:
-            lang_priority.append(base)
-    lang_priority.extend(["en", "en-US", "en-GB"])
-    # Dedup while preserving order
-    seen_langs = set()
-    sub_langs = [l for l in lang_priority if not (l in seen_langs or seen_langs.add(l))]
 
     # Optional browser-cookies to authenticate the session. YouTube rate-limits
     # anonymous scrapes hard after a few videos — with a logged-in cookie
@@ -458,6 +444,14 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
     # Set via Settings → Memory → yt_cookies_from_browser.
     browser_cookies = (config.get("yt_cookies_from_browser") or "").strip().lower()
     cookie_opt = {"cookiesfrombrowser": (browser_cookies,)} if browser_cookies else {}
+
+    # Player client order — matters a LOT. YouTube applies different policies
+    # per client: some videos are flagged "DRM protected" or "format not
+    # available" on `web` but download fine via the `android`/`ios` YouTube-app
+    # clients. yt-dlp tries the list in order, first success wins.
+    # Tested: a random ~21-min video failed on web/ios/mweb/tv/web_safari
+    # but succeeded on android (237 KB VTT).
+    player_clients = {"extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}}}
 
     # Phase 1: extract metadata (no downloads) so we can pick the best track
     # AND decide whether to ask yt-dlp to fetch manual or auto captions.
@@ -467,6 +461,7 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
         "socket_timeout": 20,
         "extractor_retries": 2,
         **cookie_opt,
+        **player_clients,
     }
     try:
         with yt_dlp.YoutubeDL(info_opts) as ydl:
@@ -480,9 +475,30 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
     channel = info.get("channel") or info.get("uploader") or "unknown"
     description = (info.get("description") or "").strip()
     video_id = info.get("id") or ""
+    video_lang = (info.get("language") or "").strip()
 
     manual = info.get("subtitles") or {}
     auto = info.get("automatic_captions") or {}
+
+    # Language priority — ordered so the highest-quality option wins:
+    #  1. user's stt_language (explicit preference from Settings → Voice)
+    #  2. the video's OWN language (info.language) — for a Russian video, the
+    #     direct Russian auto-captions are better than auto-TRANSLATED English
+    #  3. English variants as a last-resort fallback
+    lang_priority = []
+    if preferred_lang:
+        lang_priority.append(preferred_lang)
+        base = preferred_lang.split("-")[0]
+        if base != preferred_lang:
+            lang_priority.append(base)
+    if video_lang:
+        lang_priority.append(video_lang)
+        base = video_lang.split("-")[0]
+        if base != video_lang:
+            lang_priority.append(base)
+    lang_priority.extend(["en", "en-US", "en-GB"])
+    seen_langs = set()
+    sub_langs = [l for l in lang_priority if not (l in seen_langs or seen_langs.add(l))]
 
     # Decide: prefer manual subs (more accurate). Pick the best language.
     # For manual: priority-match first, then ANY manual track (native language
@@ -532,6 +548,7 @@ def _fetch_youtube_transcript(url: str) -> tuple[str, dict] | None:
         "fragment_retries": 5,
         "sleep_interval_requests": 1,
         **cookie_opt,
+        **player_clients,
     }
 
     transcript = ""
