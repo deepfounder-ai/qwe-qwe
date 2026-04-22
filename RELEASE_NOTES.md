@@ -1,40 +1,51 @@
-# v0.17.10 — Context gauge denominator is `context_budget`, not model's raw context
+# v0.17.11 — Knowledge Graph is actually explorable
 
-v0.17.8 made the Context Window gauge show `prompt_tokens / model_context`. That was wrong — I'd forgotten that `context_budget` (the agent-side setting, default 24k) is the **actual** ceiling. Compaction and tool-result truncation both trigger on `context_budget`, not on the model's native context length. So if your model supports 128k but `context_budget` is 24k, the agent will compact at ~24k regardless — the 128k was never the limit.
+Before: the graph used a fixed 3-ring radial layout (7 + 12 + 24 slots). Once you pushed past ~30 entities everything overlapped into a labels-on-labels blob. No zoom, no pan, no way to untangle it. Screenshot showed 89 nodes stacked on top of each other.
+
+Now the graph is a proper interactive canvas.
 
 ## 🔧 What changed
 
-### The gauge now measures what actually matters
+### Force-directed layout
 
-**Numerator**: `lt.prompt_tokens` (last API call's `usage.prompt_tokens`) — unchanged.
+Replaced radial with a physics simulation that runs once on load:
 
-**Denominator**: `context_budget` (the setting that triggers compaction in `agent._maybe_compact()` and tool-result summarization/truncation in `agent_loop.run_loop`). This is what determines when the agent starts shedding load.
+- **Repulsion** — every pair of nodes pushes each other apart (O(n²), fine to ~500 nodes).
+- **Spring attraction** — edges pull connected nodes to a rest length. Length scales with average degree so dense graphs don't squish.
+- **Gravity** — pulls everything softly toward centre so isolated subgraphs don't drift off screen.
+- **Cooling** — later iterations make smaller adjustments, so the graph settles.
+- Parameters auto-scale with node count. Tested: **38ms for 89 nodes / 167 edges**.
 
-**Secondary reference**: `model_context` (auto-detected from LM Studio `/api/v0/models` or Ollama `/api/show`, override via setting). Shown as `model 32k` next to the gauge so you can see whether your budget is within what the model can actually accept.
+### Pan / zoom / drag
 
-### Misconfiguration warning
+- **Scroll wheel** — zoom in/out anchored at the cursor.
+- **Drag empty space** — pan.
+- **Drag a node** — move it (and its attached edges update in real-time).
+- **Click a node** — pick it (inspector section below shows details).
+- **Double-click empty space** — reset view to default.
 
-If `context_budget > model_context` (e.g. budget=32k but the model only accepts 16k), the panel now shows a red warning bar:
+Zoom clamped to 0.25×–8×.
 
-> ⚠ context_budget (32k) exceeds the model's actual context (16k). Lower context_budget in Settings → Model to avoid provider errors.
+### Toolbar
 
-This used to silently fail at the provider — now you see it before sending.
+New buttons in the panel header:
 
-### `/api/status`
+| Button | What it does |
+|---|---|
+| `−` | Zoom out |
+| `+` | Zoom in |
+| 👁 | Fit all nodes to the viewport |
+| ↻ | Reset view (pan=0, zoom=1) |
+| ⎊ | Re-run layout (shuffles positions, re-settles) |
+| 🗑 | Clear graph (unchanged — still there) |
 
-Now returns both:
-- `context_budget` — agent-side effective ceiling
-- `model_context` — model's native capacity (or 0 if unknown)
-- `model_context_source` — `override` / `detected` / `unknown`
+### Implementation notes
 
-## Why the two numbers exist
-
-| Setting | What it does | Default |
-|---|---|---|
-| `context_budget` | Agent-side. When the total conversation hits this, compaction summarizes old messages into memory. Tool outputs get summarized/truncated when they would push the prompt past this. | 24 000 |
-| `model_context` | Model-side hard cap. Going past this = provider HTTP error. | auto-detect, or set manually (0 = auto) |
-
-The agent keeps total prompt ≤ `context_budget`, so `model_context` is mostly informational — useful only for catching misconfigurations where someone set `context_budget` higher than the model supports.
+- SVG viewBox is `0 0 200 200` (was `0 0 100 100`) — 2× the coordinate space so nodes have room to breathe.
+- All graph content lives in `<g id="graph-root" transform="translate(tx ty) scale(zoom)">` so pan/zoom is a single attribute update — no re-render.
+- Node drag also updates DOM directly (circle + text + connected lines) instead of re-rendering the whole SVG, so dragging stays smooth at 60fps.
+- `.graph-canvas` got `overflow: hidden` + `user-select: none` + cursor states.
+- Panel height bumped from 520 → 640 px.
 
 ## 📦 Upgrade
 
@@ -43,6 +54,6 @@ git pull && pip install -e . --upgrade
 # Restart the server
 ```
 
-If you want to raise the practical ceiling: **Settings → Model → `context_budget`** (keep it ≤ `model_context`). If `model_context` shows `?`, either your provider doesn't report it or set `model_context` manually.
+Open **Memory → Knowledge graph**: scroll to zoom, drag nodes around, click **fit** (eye icon) to auto-frame them all.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

@@ -318,16 +318,21 @@ main.canvas { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .graph-panel {
   background: var(--bg-inspector);
   border: 1px solid var(--line); border-radius: 10px;
-  padding: 14px; height: 520px;
+  padding: 14px; height: 640px;
   display: flex; flex-direction: column;
+  min-width: 0;  /* let flex children shrink under parent grid */
 }
 .graph-panel .hdr { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .graph-canvas {
   flex: 1; position: relative;
   background: radial-gradient(circle at 50% 50%, rgba(255,122,26,0.03), transparent 60%);
   border-radius: 6px;
+  overflow: hidden;  /* clip when user pans / zooms beyond the box */
+  cursor: grab;
+  user-select: none;
 }
-.graph-canvas svg { width: 100%; height: 100%; display: block; }
+.graph-canvas:active { cursor: grabbing; }
+.graph-canvas svg { width: 100%; height: 100%; display: block; touch-action: none; }
 .graph-canvas .kb-node .core { transition: r 0.15s, stroke-width 0.15s; }
 .graph-canvas .kb-node:hover .core { stroke: var(--fg) !important; stroke-width: 0.35 !important; }
 .graph-canvas .kb-node:hover .halo { opacity: 0.4 !important; }
@@ -1328,6 +1333,7 @@ const I = {
   settings:'M128,80a48,48,0,1,0,48,48A48.1,48.1,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32.1,32.1,0,0,1,128,160Zm96-40a8,8,0,0,0-8-8H197.4a69.8,69.8,0,0,0-5.3-12.8l13.7-13.7a8,8,0,0,0,0-11.3L186.6,75.2a8,8,0,0,0-11.3,0L161.6,88.9a69.8,69.8,0,0,0-12.8-5.3V64a8,8,0,0,0-8-8H116a8,8,0,0,0-8,8V83.6a69.8,69.8,0,0,0-12.8,5.3L81.5,75.2a8,8,0,0,0-11.3,0L51.1,94.2a8,8,0,0,0,0,11.3l13.7,13.7A69.8,69.8,0,0,0,59.5,132H40a8,8,0,0,0-8,8v24a8,8,0,0,0,8,8H59.5a69.8,69.8,0,0,0,5.3,12.8L51.1,198.5a8,8,0,0,0,0,11.3l19,19a8,8,0,0,0,11.3,0l13.7-13.7a69.8,69.8,0,0,0,12.8,5.3V240a8,8,0,0,0,8,8h24a8,8,0,0,0,8-8V220.4a69.8,69.8,0,0,0,12.8-5.3l13.7,13.7a8,8,0,0,0,11.3,0l19-19a8,8,0,0,0,0-11.3L192.1,184.8a69.8,69.8,0,0,0,5.3-12.8H216a8,8,0,0,0,8-8Z',
   plus:'M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z',
   plusSmall:'M208,128a8,8,0,0,1-8,8H136v64a8,8,0,0,1-16,0V136H56a8,8,0,0,1,0-16h64V56a8,8,0,0,1,16,0v64h64A8,8,0,0,1,208,128Z',
+  minus:'M208,128a8,8,0,0,1-8,8H56a8,8,0,0,1,0-16H200A8,8,0,0,1,208,128Z',
   search:'M229.7,218.3l-50.1-50.1a88,88,0,1,0-11.3,11.3l50.1,50.1a8,8,0,0,0,11.3-11.3ZM40,112a72,72,0,1,1,72,72A72.1,72.1,0,0,1,40,112Z',
   arrow:'M216,128a8,8,0,0,1-8,8H67.3l42.4,42.3a8,8,0,0,1-11.4,11.4l-56-56a8,8,0,0,1,0-11.4l56-56a8,8,0,0,1,11.4,11.4L67.3,120H208A8,8,0,0,1,216,128Z',
   send:'M231.4,44.3a16,16,0,0,0-18.6-3.8L30.4,120.2A16,16,0,0,0,32.3,151l55.1,18.4,18.4,55.1A16.2,16.2,0,0,0,120.8,235c.3,0,.6.1,1,.1a16,16,0,0,0,14.3-9l79.7-182.4A16,16,0,0,0,231.4,44.3Z',
@@ -1563,6 +1569,7 @@ const state = {
   presetList: [],
   kbFiles: [],
   kbGraph: { nodes: [], links: [] },
+  kbView: { tx: 0, ty: 0, zoom: 1 },  // knowledge graph pan + zoom
   kbSearch: '',
   kbKindFilter: 'all',
   kbPicked: null,
@@ -2407,29 +2414,93 @@ async function loadMemory() {
     const g = await api('/api/knowledge/graph');
     const nodes = (g && g.nodes) || [];
     const links = (g && g.links) || [];
-    // Pre-compute radial layout: heaviest at center, others on a ring around it
+    // Force-directed layout: repulsion + edge springs + gravity toward centre.
+    // Replaces the old 3-ring radial layout which overlapped past ~30 nodes.
     const sorted = nodes.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0));
     const placed = {};
+    // Seed positions on a small circle (breaks the symmetry that crushes the
+    // simulation when everyone starts on top of each other)
+    const W = 200, H = 200, CX = W/2, CY = H/2;
     sorted.forEach((n, i) => {
-      if (i === 0) { n.x = 50; n.y = 50; n.r = 14; }
-      else {
-        const ring = i < 8 ? 1 : (i < 20 ? 2 : 3);
-        const countInRing = ring === 1 ? 7 : (ring === 2 ? 12 : 24);
-        const idxInRing = ring === 1 ? (i - 1) : (ring === 2 ? (i - 8) : (i - 20));
-        const radius = ring === 1 ? 22 : (ring === 2 ? 36 : 46);
-        const theta = (idxInRing / countInRing) * Math.PI * 2 + (ring * 0.3);
-        n.x = 50 + Math.cos(theta) * radius;
-        n.y = 50 + Math.sin(theta) * radius * 0.85;
-        n.r = Math.max(4, 10 - ring * 2 + Math.min(4, (n.weight || 0) / 2));
-      }
+      const a = (i / Math.max(1, sorted.length)) * Math.PI * 2;
+      const r = 30 + Math.random() * 10;
+      n.x = CX + Math.cos(a) * r;
+      n.y = CY + Math.sin(a) * r;
       const typeColors = { person: 'var(--fg-2)', topic: 'var(--info)', project: 'var(--accent)', preference: 'var(--fg-3)', place: 'var(--ok)', event: 'var(--warn)' };
       n.color = typeColors[(n.type || '').toLowerCase()] || 'var(--magic)';
       placed[n.id] = n;
     });
     const validLinks = links.filter(l => placed[l.source] && placed[l.target]);
+    // Run the simulation. Parameters tuned for 20–500 node graphs.
+    runForceLayout(sorted, validLinks, { W, H });
     state.kbGraph = { nodes: sorted, links: validLinks, byId: placed };
+    state.kbView = state.kbView || { tx: 0, ty: 0, zoom: 1 };  // pan/zoom
     render();
   } catch { state.kbGraph = { nodes: [], links: [], byId: {} }; render(); }
+}
+
+function runForceLayout(nodes, edges, opts) {
+  if (!nodes.length) return;
+  const { W = 200, H = 200 } = opts || {};
+  const CX = W/2, CY = H/2;
+  // Scale parameters with graph size so dense graphs don't squish
+  const n = nodes.length;
+  const ITERS = Math.min(500, 200 + n * 2);
+  // Spring rest length: give edges more room when there are many of them
+  const avgDeg = edges.length * 2 / Math.max(1, n);
+  const SPRING_LEN = 18 + Math.min(14, avgDeg * 2);
+  const SPRING_K = 0.04;
+  const REPEL = 55 + Math.min(40, n * 0.3);  // stronger for more nodes
+  const GRAVITY = 0.012;
+  const DAMPING = 0.82;
+  const MIN_D2 = 0.25;  // prevent division blow-up when nodes collide
+
+  nodes.forEach(nd => { nd.vx = 0; nd.vy = 0; });
+  // Resolve edge endpoints to node references once
+  const es = edges.map(l => ({
+    a: nodes.find(nd => nd.id === l.source),
+    b: nodes.find(nd => nd.id === l.target),
+  })).filter(e => e.a && e.b);
+
+  for (let iter = 0; iter < ITERS; iter++) {
+    // Cooling: later iterations make smaller adjustments
+    const cool = 1 - (iter / ITERS) * 0.4;
+
+    // Repulsion — O(n²), fine up to ~500 nodes
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d2 = dx*dx + dy*dy;
+        if (d2 < MIN_D2) { d2 = MIN_D2; dx = (Math.random()-0.5)*0.5; dy = (Math.random()-0.5)*0.5; }
+        const d = Math.sqrt(d2);
+        const f = REPEL / d2;
+        const fx = (dx/d) * f, fy = (dy/d) * f;
+        a.vx -= fx; a.vy -= fy;
+        b.vx += fx; b.vy += fy;
+      }
+    }
+    // Spring attraction along edges
+    for (const e of es) {
+      const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
+      const d = Math.sqrt(dx*dx + dy*dy) + 0.01;
+      const f = (d - SPRING_LEN) * SPRING_K;
+      const fx = (dx/d) * f, fy = (dy/d) * f;
+      e.a.vx += fx; e.a.vy += fy;
+      e.b.vx -= fx; e.b.vy -= fy;
+    }
+    // Gravity + integrate
+    for (const nd of nodes) {
+      nd.vx += (CX - nd.x) * GRAVITY;
+      nd.vy += (CY - nd.y) * GRAVITY;
+      nd.vx *= DAMPING;
+      nd.vy *= DAMPING;
+      nd.x += nd.vx * cool;
+      nd.y += nd.vy * cool;
+    }
+  }
+  nodes.forEach(nd => { delete nd.vx; delete nd.vy; });
 }
 
 function openKbScanModal() {
@@ -3200,22 +3271,27 @@ function renderGraphSvg() {
     const opa = q ? (both ? 0.6 : 0.1) : 0.45;
     const stroke = (q && both) ? 'var(--accent)' : 'var(--line-strong)';
     return '<line x1="'+A.x+'" y1="'+A.y+'" x2="'+B.x+'" y2="'+B.y+
-      '" stroke="'+stroke+'" stroke-width="0.4" opacity="'+opa+'" data-edge="'+esc(l.source)+'|'+esc(l.target)+'" />';
+      '" stroke="'+stroke+'" stroke-width="0.8" opacity="'+opa+'" data-edge="'+esc(l.source)+'|'+esc(l.target)+'" />';
   }).join('');
   const nodes = g.nodes.map(n => {
     const show = hit(n);
-    // Node radius: base 2 in 100-unit viewBox, scaled by weight
-    const rBase = Math.max(1.6, Math.min(3.2, 1.6 + (n.weight || 0) / 8));
+    // Node radius: base 3.2 in 200-unit viewBox, scaled by weight
+    const rBase = Math.max(3.2, Math.min(6.4, 3.2 + (n.weight || 0) / 4));
     const rHalo = rBase * 2.2;
     const label = esc(String(n.id).slice(0, 22));
     const isPicked = state.kbPicked && state.kbPicked.id === n.id;
-    return '<g class="kb-node ' + (isPicked ? 'picked' : '') + '" data-kb-node="'+esc(n.id)+'" style="cursor:pointer;opacity:'+(show?1:0.18)+'">' +
+    return '<g class="kb-node ' + (isPicked ? 'picked' : '') + '" data-kb-node="'+esc(n.id)+'" style="cursor:grab;opacity:'+(show?1:0.18)+'">' +
       '<circle class="halo" cx="'+n.x+'" cy="'+n.y+'" r="'+rHalo+'" fill="'+n.color+'" opacity="0.18"/>' +
-      '<circle class="core" cx="'+n.x+'" cy="'+n.y+'" r="'+rBase+'" fill="'+n.color+'" stroke="' + (isPicked ? 'var(--fg)' : 'rgba(255,255,255,0.2)') + '" stroke-width="' + (isPicked ? 0.3 : 0.15) + '"/>' +
-      '<text x="'+n.x+'" y="'+(n.y + rBase + 2.8)+'" font-size="1.8" font-family="var(--font-ui)" fill="' + (isPicked ? 'var(--fg)' : 'var(--fg-3)') + '" text-anchor="middle" style="pointer-events:none;paint-order:stroke;stroke:var(--bg-inspector);stroke-width:0.35">' + label + '</text>' +
+      '<circle class="core" cx="'+n.x+'" cy="'+n.y+'" r="'+rBase+'" fill="'+n.color+'" stroke="' + (isPicked ? 'var(--fg)' : 'rgba(255,255,255,0.2)') + '" stroke-width="' + (isPicked ? 0.6 : 0.3) + '"/>' +
+      '<text x="'+n.x+'" y="'+(n.y + rBase + 5.6)+'" font-size="3.6" font-family="var(--font-ui)" fill="' + (isPicked ? 'var(--fg)' : 'var(--fg-3)') + '" text-anchor="middle" style="pointer-events:none;paint-order:stroke;stroke:var(--bg-inspector);stroke-width:0.7">' + label + '</text>' +
     '</g>';
   }).join('');
-  return '<svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" style="overflow:visible">' + lines + nodes + '</svg>';
+  const v = state.kbView || { tx: 0, ty: 0, zoom: 1 };
+  return '<svg viewBox="0 0 200 200" preserveAspectRatio="xMidYMid meet" style="overflow:hidden" data-graph-svg>' +
+    '<g id="graph-root" transform="translate(' + v.tx + ' ' + v.ty + ') scale(' + v.zoom + ')">' +
+      lines + nodes +
+    '</g>' +
+  '</svg>';
 }
 
 function renderMemoryView() {
@@ -3246,7 +3322,7 @@ function renderMemoryView() {
         ' nodes · weight ' + (picked.weight || 0) + '</div>' +
       (picked.description ? '<div style="font-size:11.5px;color:var(--fg-2);margin-top:6px;line-height:1.5">' + esc(picked.description) + '</div>' : '') +
     '</div>'
-    : '<div class="graph-empty">hover or click a node to inspect · search above filters visible</div>';
+    : '<div class="graph-empty">scroll to zoom · drag empty space to pan · drag a node to move it · click to pick · double-click to reset</div>';
 
   const kbRow = (k) => {
     const kind = KB_KINDS[k.kind] || KB_KINDS.txt;
@@ -3340,7 +3416,14 @@ function renderMemoryView() {
           '<h3>Knowledge graph</h3>' +
           '<span class="mono" style="font-size:10px;color:var(--fg-4);font-variant-numeric:tabular-nums">' + g.nodes.length + ' nodes · ' + g.links.length + ' edges</span>' +
           (g.nodes.length
-            ? '<button class="icon-btn" data-act="graph-clear" title="Clear graph (entities + wiki)" style="margin-left:6px">' + ico('trash', 12) + '</button>'
+            ? '<div class="graph-tools" style="display:flex;gap:2px;margin-left:auto">' +
+                '<button class="icon-btn" data-act="graph-zoom-out" title="Zoom out (or Ctrl + wheel)">' + ico('minus', 12) + '</button>' +
+                '<button class="icon-btn" data-act="graph-zoom-in" title="Zoom in (or Ctrl + wheel)">' + ico('plusSmall', 12) + '</button>' +
+                '<button class="icon-btn" data-act="graph-fit" title="Fit all nodes">' + ico('eye', 12) + '</button>' +
+                '<button class="icon-btn" data-act="graph-reset" title="Reset view (double-click empty space)">' + ico('refresh', 12) + '</button>' +
+                '<button class="icon-btn" data-act="graph-relayout" title="Re-run layout (shuffles positions)">' + ico('graph', 12) + '</button>' +
+                '<button class="icon-btn" data-act="graph-clear" title="Clear graph (entities + wiki)" style="margin-left:4px">' + ico('trash', 12) + '</button>' +
+              '</div>'
             : '') +
         '</div>' +
         '<div class="graph-canvas">' + renderGraphSvg() + '</div>' +
@@ -4905,6 +4988,191 @@ function wireEvents() {
       catch { toast('clear failed', 'err'); }
     };
   });
+
+  // ── Knowledge graph: toolbar + pan + zoom + node drag ─────────────────────
+  const graphSvg = document.querySelector('svg[data-graph-svg]');
+  const graphRoot = graphSvg && graphSvg.querySelector('#graph-root');
+  if (graphSvg && graphRoot) {
+    // Helpers
+    const applyView = () => {
+      const v = state.kbView;
+      graphRoot.setAttribute('transform', 'translate(' + v.tx + ' ' + v.ty + ') scale(' + v.zoom + ')');
+    };
+    const clampZoom = z => Math.min(8, Math.max(0.25, z));
+    // Convert screen px delta → SVG viewBox units (200×200 viewBox, scaled to
+    // whatever size the container has)
+    const screenToSvg = (dx, dy) => {
+      const rect = graphSvg.getBoundingClientRect();
+      const scale = 200 / Math.min(rect.width, rect.height);
+      return { x: dx * scale, y: dy * scale };
+    };
+
+    // Zoom on wheel — anchor at cursor
+    graphSvg.addEventListener('wheel', (ev) => {
+      ev.preventDefault();
+      const rect = graphSvg.getBoundingClientRect();
+      const scaleFactor = 200 / Math.min(rect.width, rect.height);
+      // Cursor position in viewBox coords (before zoom)
+      const cx = (ev.clientX - rect.left) * scaleFactor;
+      const cy = (ev.clientY - rect.top) * scaleFactor;
+      const v = state.kbView;
+      // Point in graph-root coords (before transform)
+      const gx = (cx - v.tx) / v.zoom;
+      const gy = (cy - v.ty) / v.zoom;
+      const factor = ev.deltaY < 0 ? 1.15 : 1/1.15;
+      const newZoom = clampZoom(v.zoom * factor);
+      v.zoom = newZoom;
+      // Keep cursor anchor stable: solve for tx, ty such that gx*zoom + tx = cx
+      v.tx = cx - gx * newZoom;
+      v.ty = cy - gy * newZoom;
+      applyView();
+    }, { passive: false });
+
+    // Double-click empty space → reset view
+    graphSvg.addEventListener('dblclick', (ev) => {
+      if (ev.target.closest('[data-kb-node]')) return;
+      state.kbView = { tx: 0, ty: 0, zoom: 1 };
+      applyView();
+    });
+
+    // Pan with drag on empty canvas
+    let panning = null;
+    graphSvg.addEventListener('mousedown', (ev) => {
+      if (ev.target.closest('[data-kb-node]')) return;  // node drag takes over
+      panning = {
+        startX: ev.clientX, startY: ev.clientY,
+        initTx: state.kbView.tx, initTy: state.kbView.ty,
+      };
+      graphSvg.style.cursor = 'grabbing';
+      ev.preventDefault();
+    });
+    const endPan = () => { panning = null; graphSvg.style.cursor = ''; };
+    document.addEventListener('mousemove', (ev) => {
+      if (!panning) return;
+      const d = screenToSvg(ev.clientX - panning.startX, ev.clientY - panning.startY);
+      state.kbView.tx = panning.initTx + d.x;
+      state.kbView.ty = panning.initTy + d.y;
+      applyView();
+    });
+    document.addEventListener('mouseup', endPan);
+    document.addEventListener('mouseleave', endPan);
+
+    // Node drag — mutates node.x/y and updates DOM in place (no full re-render
+    // so drag stays smooth and the outer event handlers don't get detached)
+    const updateNodeDom = (id, node) => {
+      const group = graphSvg.querySelector('[data-kb-node="' + CSS.escape(id) + '"]');
+      if (!group) return;
+      const halo = group.querySelector('.halo'), core = group.querySelector('.core');
+      const text = group.querySelector('text');
+      if (halo) { halo.setAttribute('cx', node.x); halo.setAttribute('cy', node.y); }
+      if (core) { core.setAttribute('cx', node.x); core.setAttribute('cy', node.y); }
+      if (text) {
+        const rBase = parseFloat(core ? core.getAttribute('r') : 3.2);
+        text.setAttribute('x', node.x);
+        text.setAttribute('y', node.y + rBase + 5.6);
+      }
+      // Update every line touching this node
+      graphSvg.querySelectorAll('line[data-edge]').forEach(ln => {
+        const [a, b] = (ln.getAttribute('data-edge') || '').split('|');
+        if (a === id) { ln.setAttribute('x1', node.x); ln.setAttribute('y1', node.y); }
+        if (b === id) { ln.setAttribute('x2', node.x); ln.setAttribute('y2', node.y); }
+      });
+    };
+
+    document.querySelectorAll('[data-kb-node]').forEach(el => {
+      el.addEventListener('mousedown', (ev) => {
+        ev.stopPropagation();  // don't start a pan
+        ev.preventDefault();
+        const id = el.getAttribute('data-kb-node');
+        const node = (state.kbGraph.nodes || []).find(n => String(n.id) === id);
+        if (!node) return;
+        const startX = ev.clientX, startY = ev.clientY;
+        const initX = node.x, initY = node.y;
+        let moved = false;
+        el.style.cursor = 'grabbing';
+        const onMove = (e) => {
+          const d = screenToSvg(e.clientX - startX, e.clientY - startY);
+          node.x = initX + d.x / state.kbView.zoom;
+          node.y = initY + d.y / state.kbView.zoom;
+          if (Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY) > 3) moved = true;
+          updateNodeDom(id, node);
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          el.style.cursor = '';
+          // Only pick-on-click if there was no meaningful drag
+          if (!moved) { state.kbPicked = node; render(); }
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    });
+  }
+
+  // Graph toolbar buttons
+  document.querySelectorAll('[data-act="graph-zoom-in"]').forEach(b => {
+    b.onclick = () => {
+      state.kbView.zoom = Math.min(8, state.kbView.zoom * 1.3);
+      const root = document.querySelector('#graph-root');
+      if (root) root.setAttribute('transform', 'translate(' + state.kbView.tx + ' ' + state.kbView.ty + ') scale(' + state.kbView.zoom + ')');
+    };
+  });
+  document.querySelectorAll('[data-act="graph-zoom-out"]').forEach(b => {
+    b.onclick = () => {
+      state.kbView.zoom = Math.max(0.25, state.kbView.zoom / 1.3);
+      const root = document.querySelector('#graph-root');
+      if (root) root.setAttribute('transform', 'translate(' + state.kbView.tx + ' ' + state.kbView.ty + ') scale(' + state.kbView.zoom + ')');
+    };
+  });
+  document.querySelectorAll('[data-act="graph-reset"]').forEach(b => {
+    b.onclick = () => {
+      state.kbView = { tx: 0, ty: 0, zoom: 1 };
+      const root = document.querySelector('#graph-root');
+      if (root) root.setAttribute('transform', 'translate(0 0) scale(1)');
+    };
+  });
+  document.querySelectorAll('[data-act="graph-fit"]').forEach(b => {
+    b.onclick = () => {
+      const nodes = state.kbGraph.nodes || [];
+      if (!nodes.length) return;
+      // Compute bounding box of current node positions
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      nodes.forEach(n => {
+        if (n.x < minX) minX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y > maxY) maxY = n.y;
+      });
+      const pad = 15;
+      const w = (maxX - minX) + pad*2;
+      const h = (maxY - minY) + pad*2;
+      const zoom = Math.min(8, Math.max(0.25, 200 / Math.max(w, h)));
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      state.kbView = {
+        tx: 100 - cx * zoom,
+        ty: 100 - cy * zoom,
+        zoom,
+      };
+      const root = document.querySelector('#graph-root');
+      if (root) root.setAttribute('transform', 'translate(' + state.kbView.tx + ' ' + state.kbView.ty + ') scale(' + state.kbView.zoom + ')');
+    };
+  });
+  document.querySelectorAll('[data-act="graph-relayout"]').forEach(b => {
+    b.onclick = () => {
+      const nodes = state.kbGraph.nodes || [];
+      if (!nodes.length) return;
+      // Randomize then re-run simulation
+      nodes.forEach((n, i) => {
+        const a = (i / nodes.length) * Math.PI * 2 + Math.random();
+        const r = 30 + Math.random() * 20;
+        n.x = 100 + Math.cos(a) * r;
+        n.y = 100 + Math.sin(a) * r;
+      });
+      runForceLayout(nodes, state.kbGraph.links || [], { W: 200, H: 200 });
+      render();
+    };
+  });
   const pickFiles = () => {
     const i = document.createElement('input');
     i.type = 'file'; i.multiple = true;
@@ -4955,14 +5223,9 @@ function wireEvents() {
     b.onclick = () => { state.kbKindFilter = b.dataset.kbFilter; render(); };
   });
 
-  // Graph node pick + hover highlight
+  // Graph node hover highlight (click/drag is handled by the pan+zoom block)
   const graphCanvas = document.querySelector('.graph-canvas');
   document.querySelectorAll('[data-kb-node]').forEach(el => {
-    el.addEventListener('click', () => {
-      const id = el.getAttribute('data-kb-node');
-      const node = (state.kbGraph.nodes || []).find(n => String(n.id) === id);
-      if (node) { state.kbPicked = node; render(); }
-    });
     el.addEventListener('mouseenter', () => {
       if (!graphCanvas) return;
       const id = el.getAttribute('data-kb-node');
