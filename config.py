@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.17.20"
+VERSION = "0.17.21"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -167,7 +167,7 @@ EDITABLE_SETTINGS = {
     "ollama_num_ctx":       ("setting:ollama_num_ctx",        int, 16384,  "Ollama context window (tokens)", 2048, 131072),
     "model_context":        ("setting:model_context",         int, 0,      "Model context window in tokens (0 = auto-detect from provider, else override)", 0, 2000000),
     "yt_cookies_from_browser": ("setting:yt_cookies_from_browser", str, "", "Use browser cookies for YouTube to bypass rate limits. Values: chrome, firefox, edge, safari, brave, chromium, opera, vivaldi. Empty = anonymous (rate-limited after a few videos).", "", ""),
-    "embed_device":            ("setting:embed_device",            str, "auto", "FastEmbed ONNX execution provider: auto (try CUDA then fall back to CPU), cpu (force CPU — use when CUDA is half-installed and throws LoadLibrary errors), cuda (force CUDA, fail loudly if unavailable).", "", ""),
+    "embed_device":            ("setting:embed_device",            str, "cpu", "FastEmbed ONNX execution provider. qwe-qwe is CPU-only by design — the CPU embedder runs comfortably on a laptop and avoids CUDA install pain. Set to 'cuda' only if you've explicitly installed onnxruntime-gpu + CUDA Toolkit + cuDNN and want GPU acceleration; 'auto' tries CUDA first and falls back to CPU on failure.", "", ""),
     # ── Vision (Camera) ──
     "camera_index":         ("setting:camera_index",          int, -1,    "Camera index for agent vision (-1 = auto-detect best, 0/1/2 = specific camera)", -1, 10),
     # ── Voice: STT ──

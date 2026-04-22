@@ -1456,20 +1456,19 @@ def doctor():
         return f"⚠ could not check model status"
     check("Model loaded", _check_model_loaded)
 
-    # ── 5. Embeddings (FastEmbed, local ONNX) ──
+    # ── 5. Embeddings (FastEmbed, local ONNX — CPU by design) ──
     def _check_embeddings():
         try:
             import memory
             vec = memory.embed("test")
-            # Report which provider ONNX actually ended up using so half-installed
-            # CUDA is diagnosable without reading stderr during init.
+            # Report which provider ONNX actually ended up using — diagnoses
+            # half-installed CUDA without reading stderr during init.
             provider_hint = ""
             try:
                 model = memory._get_dense_model()
                 sess = getattr(model, "model", None) or getattr(model, "_model", None)
                 providers = None
                 if sess and hasattr(sess, "model"):
-                    # fastembed wraps InferenceSession under .model.model (varies by version)
                     inner = getattr(sess, "model", None)
                     if inner and hasattr(inner, "get_providers"):
                         providers = inner.get_providers()
@@ -1483,9 +1482,30 @@ def doctor():
             msg = str(e).lower()
             hint = ""
             if "cuda" in msg or "loadlibrary" in msg or "onnxruntime_providers_cuda" in msg:
-                hint = " — set QWE_EMBED_DEVICE=cpu or Settings → embed_device=cpu"
+                hint = " — set QWE_EMBED_DEVICE=cpu or run: pip uninstall onnxruntime-gpu"
             return (str(e)[:100] + hint) if hint else str(e)[:120]
     check("Embeddings", _check_embeddings)
+
+    # ── 5b. onnxruntime-gpu detection — qwe-qwe is CPU-only by design ──
+    def _check_onnxruntime_variant():
+        try:
+            import importlib.metadata as _md
+            try:
+                _md.version("onnxruntime-gpu")
+                # onnxruntime-gpu is installed → warn. It's 3GB of CUDA DLLs
+                # and causes LoadLibrary errors when CUDA Toolkit isn't in sync.
+                return ("⚠ onnxruntime-gpu detected — qwe-qwe is CPU-only by design. "
+                        "Run: pip uninstall onnxruntime-gpu && pip install onnxruntime")
+            except _md.PackageNotFoundError:
+                pass
+            try:
+                _md.version("onnxruntime")
+                return "✓ onnxruntime (CPU) — correct for qwe-qwe"
+            except _md.PackageNotFoundError:
+                return "⚠ neither onnxruntime nor onnxruntime-gpu found (fastembed may not work)"
+        except Exception as e:
+            return f"? onnxruntime check skipped: {e}"
+    check("ONNX Runtime", _check_onnxruntime_variant)
 
     # ── 6. Inference test ──
     def _check_inference():
