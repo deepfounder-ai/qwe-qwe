@@ -54,7 +54,12 @@ def _ensure_table():
             next_run REAL NOT NULL,
             last_run REAL,
             repeat INTEGER DEFAULT 0,
-            enabled INTEGER DEFAULT 1
+            enabled INTEGER DEFAULT 1,
+            run_count INTEGER DEFAULT 0,
+            last_status TEXT,
+            last_error TEXT,
+            last_duration_ms INTEGER,
+            last_result TEXT
         )
     """)
 
@@ -81,10 +86,13 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
     if next_run is None:
         return {"error": f"Can't parse schedule: '{schedule}'"}
 
-    # Dry-run validation (unless explicitly skipped)
+    # Dry-run validation (unless explicitly skipped).
+    # max_rounds bumped 5 → 8: real tasks (logs → filter → send to telegram)
+    # often need 6-7 rounds just to explore the filesystem before executing
+    # the actual action. 5 was too tight.
     if not skip_dry_run:
         _log.info(f"dry-run for '{name}': {task[:100]}")
-        dry_result = _execute_task(task, max_rounds=5)
+        dry_result = _execute_task(task, max_rounds=8)
         validation = _validate_dry_run(dry_result, task)
         if not validation["ok"]:
             _log.warning(f"dry-run failed for '{name}': {validation['reason']}")
@@ -92,6 +100,9 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
                 "error": f"Dry-run failed: {validation['reason']}",
                 "output": dry_result[:500],
                 "hint": validation.get("hint", ""),
+                # UI signal: offer the user a "save anyway" retry with
+                # skip_dry_run=true instead of making them re-type the form.
+                "offer_skip": True,
                 "saved": False,
             }
         _log.info(f"dry-run passed for '{name}': {dry_result[:100]}")
@@ -109,12 +120,41 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
     return result
 
 
+# ── Runtime error classification (shared with dry-run) ──
+
+
+def _looks_like_error(result: str) -> bool:
+    """Heuristic: does a task result look like a failure?
+
+    Used to classify live runs as ok/err for UI stats. A stricter version
+    (``_validate_dry_run``) runs on pre-save validation; this one just
+    flags obvious error text so users don't see every run as "ok" when
+    the task actually crashed.
+    """
+    if not result:
+        return False
+    low = result.lower()
+    for marker in _DRY_RUN_ERROR_MARKERS:
+        if marker in low:
+            return True
+    if _DRY_RUN_ERROR_PATTERNS.search(result):
+        return True
+    return False
+
+
 # ── Dry-run validation ──
 
+# Strict failure markers — output containing these means the task is
+# genuinely broken (missing binary, permission denied, traceback, etc).
+# NOTE: "task completed (max rounds)" used to live here but was removed —
+# hitting max rounds means the task is *complex* (agent explored filesystem
+# for a while before composing the reply), not that it's broken. Rejecting
+# complex-but-valid tasks on dry-run was the top cron-creation pain point
+# reported in v0.17.28.
 _DRY_RUN_ERROR_MARKERS = [
     "command not found", "no such file or directory", "permission denied",
     "blocked:", "not allowed", "traceback (most recent call last)",
-    "modulenotfounderror", "task completed (max rounds)",
+    "modulenotfounderror",
     "connection refused", "name or service not known",
     "\nerrno ", "importerror:",
 ]
@@ -145,12 +185,26 @@ def _validate_dry_run(result: str, task_description: str) -> dict:
         return {"ok": False, "reason": f"Output contains error pattern: '{match}'",
                 "hint": "Try using built-in tools (http_request, read_file, shell) instead of external scripts"}
 
-    # For send/notify tasks — verify delivery confirmation
+    # For send/notify tasks — verify delivery confirmation.
+    # This check is a pragmatic heuristic, not a correctness proof: we scan
+    # the agent's final reply for any of several confirmation phrases across
+    # English + Russian. Historically this was English-only (ok/sent/200)
+    # which rejected every task where the agent confirmed in Russian
+    # ("Отправил сводку в Telegram"). If a task genuinely failed to send,
+    # it'll have an error marker that's already been caught above — we
+    # don't need to double-check here, so the bar stays low.
     task_lower = task_description.lower()
-    if any(w in task_lower for w in ("telegram", "send", "notify", "webhook")):
-        if "ok" not in lower and "sent" not in lower and "200" not in result:
+    if any(w in task_lower for w in ("telegram", "send", "notify", "webhook",
+                                      "отправ", "уведом", "пришли", "пиши", "напиши")):
+        confirmations_en = ("ok", "sent", "200", "delivered", "posted", "message_id",
+                            "ok=true", "success", "done")
+        confirmations_ru = ("отправил", "отправлено", "отправлена", "послал", "послано",
+                            "доставлено", "успешно", "готово", "сделано")
+        ok_markers = confirmations_en + confirmations_ru
+        if not any(m in lower for m in ok_markers):
             return {"ok": False, "reason": "Send task didn't confirm delivery",
-                    "hint": "Use http_request tool to POST to the API directly. Check secret_get for tokens."}
+                    "hint": "Use http_request or the telegram tool directly, and make sure "
+                            "the final reply mentions the send succeeded."}
 
     return {"ok": True}
 
@@ -200,14 +254,34 @@ def _parse_schedule(schedule: str) -> tuple:
 def list_tasks() -> list[dict]:
     _ensure_table()
     rows = db.fetchall(
-        "SELECT id, name, task, schedule, next_run, repeat, enabled FROM scheduled_tasks ORDER BY next_run"
+        "SELECT id, name, task, schedule, next_run, last_run, repeat, enabled, "
+        "       run_count, last_status, last_error, last_duration_ms, last_result "
+        "FROM scheduled_tasks ORDER BY next_run"
     )
     tasks = []
-    for id_, name, task, schedule, next_run, repeat, enabled in rows:
-        dt = datetime.fromtimestamp(next_run, _tz()).strftime("%Y-%m-%d %H:%M")
+    for (id_, name, task, schedule, next_run, last_run, repeat, enabled,
+         run_count, last_status, last_error, last_duration_ms, last_result) in rows:
+        next_dt = datetime.fromtimestamp(next_run, _tz()).strftime("%Y-%m-%d %H:%M")
+        last_dt = (datetime.fromtimestamp(last_run, _tz()).strftime("%Y-%m-%d %H:%M")
+                    if last_run else "")
+        # UI's "last" field — compact human string ("ok · 42ms" / "err · Timeout")
+        if last_status == "ok":
+            last = f"ok · {last_duration_ms}ms" if last_duration_ms else "ok"
+        elif last_status == "err":
+            err_short = (last_error or "failed").split("\n", 1)[0][:60]
+            last = f"err · {err_short}"
+        else:
+            last = ""
         tasks.append({
             "id": id_, "name": name, "task": task, "schedule": schedule,
-            "next_run": dt, "repeat": bool(repeat), "enabled": bool(enabled),
+            "next_run": next_dt, "last_run": last_dt,
+            "repeat": bool(repeat), "enabled": bool(enabled),
+            "run_count": int(run_count or 0),
+            "last_status": last_status or "",
+            "last": last,
+            "last_error": last_error or "",
+            "last_duration_ms": int(last_duration_ms or 0),
+            "last_result": (last_result or "")[:200],
         })
     return tasks
 
@@ -357,10 +431,24 @@ def _check_and_run():
             # Disable one-time task before execution
             db.execute("UPDATE scheduled_tasks SET enabled=0 WHERE id=?", (id_,))
 
-        # Execute task
+        # Execute task (time it, catch exceptions so one bad job doesn't
+        # freeze the whole scheduler loop).
         _log.info(f"cron firing: #{id_} '{name}' → {task[:80]}")
-        result = _execute_task(task)
-        _log.info(f"cron done: #{id_} '{name}' → {result[:200]}")
+        t0 = time.time()
+        result = ""
+        error_msg = None
+        try:
+            result = _execute_task(task)
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {e}"
+            _log.warning(f"cron crashed: #{id_} '{name}' → {error_msg}", exc_info=True)
+        duration_ms = int((time.time() - t0) * 1000)
+        _log.info(f"cron done: #{id_} '{name}' ({duration_ms}ms) → {result[:200]}")
+
+        # Classify run outcome. Errors thrown by _execute_task, or result
+        # text starting with a known error marker, count as failures.
+        status = "err" if (error_msg or _looks_like_error(result)) else "ok"
+        last_result_preview = (error_msg or result or "")[:500]
 
         # Notify callbacks
         for fn in _callbacks:
@@ -369,9 +457,15 @@ def _check_and_run():
             except Exception:
                 _log.warning(f"cron callback error for #{id_}", exc_info=True)
 
-        # Finalize
+        # Finalize: metrics update for repeating tasks, delete one-offs.
         if repeat:
-            db.execute("UPDATE scheduled_tasks SET last_run=? WHERE id=?", (now, id_))
+            db.execute(
+                "UPDATE scheduled_tasks "
+                "SET last_run=?, run_count=COALESCE(run_count,0)+1, "
+                "    last_status=?, last_error=?, last_duration_ms=?, last_result=? "
+                "WHERE id=?",
+                (now, status, error_msg, duration_ms, last_result_preview, id_),
+            )
         else:
             db.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
 

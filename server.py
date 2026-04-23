@@ -1476,8 +1476,19 @@ async def list_cron():
 
 @app.post("/api/cron")
 async def add_cron(data: dict):
-    """Add a scheduled task."""
-    result = scheduler.add(data.get("name",""), data.get("task",""), data.get("schedule",""))
+    """Add a scheduled task.
+
+    ``skip_dry_run`` (default False) bypasses the pre-save validation that
+    executes the task once through the LLM. Useful when the side effect
+    (sending a message, writing a file) is unwanted as a "test", or when
+    the user is confident the task description is correct.
+    """
+    result = scheduler.add(
+        data.get("name", ""),
+        data.get("task", ""),
+        data.get("schedule", ""),
+        skip_dry_run=bool(data.get("skip_dry_run", False)),
+    )
     return result
 
 

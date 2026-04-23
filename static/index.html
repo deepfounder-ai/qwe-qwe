@@ -2759,8 +2759,12 @@ async function loadCron() {
       repeat: !!j.repeat,
       status: j.enabled === false || j.paused ? 'paused' : 'active',
       next: j.next_run || j.next || '',
-      last: j.last_status || j.last || '',
-      runs: j.run_count || j.runs || 0,
+      lastRun: j.last_run || '',
+      last: j.last || '',                 // pre-composed "ok · 42ms" / "err · Timeout"
+      lastStatus: j.last_status || '',    // raw "ok"/"err"/"" for coloring
+      lastDuration: j.last_duration_ms || 0,
+      lastResult: j.last_result || '',
+      runs: typeof j.run_count === 'number' ? j.run_count : (j.runs || 0),
       hits: j.recent || null,
     }));
     render();
@@ -2773,35 +2777,74 @@ async function loadCron() {
 }
 
 function openNewCronModal() {
+  // Schedule syntax is the qwe-qwe scheduler's own DSL, NOT 5-field cron.
+  // Supported formats (see scheduler._parse_schedule):
+  //   in 5m / in 2h / in 30s     — one-off relative
+  //   every 30m / every 2h       — repeat every N units
+  //   daily HH:MM                — every day at that time
+  //   HH:MM                      — one-off today/tomorrow at that time
   const presets = [
-    { label: 'Every hour', expr: '0 * * * *' },
-    { label: 'Every 4 hours', expr: '0 */4 * * *' },
-    { label: 'Daily at 9am', expr: '0 9 * * *' },
-    { label: 'Weekdays at 9am', expr: '0 9 * * 1-5' },
-    { label: 'Weekly (Mon 9am)', expr: '0 9 * * 1' },
-    { label: 'Nightly at 3am', expr: '0 3 * * *' },
+    { label: 'Every hour',     expr: 'every 1h' },
+    { label: 'Every 4 hours',  expr: 'every 4h' },
+    { label: 'Daily at 9am',   expr: 'daily 09:00' },
+    { label: 'Nightly at 3am', expr: 'daily 03:00' },
+    { label: 'In 30 min',      expr: 'in 30m' },
+    { label: 'In 2 hours',     expr: 'in 2h' },
   ];
   const body =
     '<div class="field"><div class="label">Name</div><input type="text" id="cr-name" placeholder="Daily brief" autofocus></div>' +
-    '<div class="field"><div class="label">Schedule</div><input type="text" id="cr-schedule" class="mono" placeholder="0 9 * * 1-5"><div class="hint">Standard cron: <span class="mono">min hr dom mon dow</span></div></div>' +
+    '<div class="field"><div class="label">Schedule</div><input type="text" id="cr-schedule" class="mono" placeholder="daily 09:00"><div class="hint">Formats: <span class="mono">in 5m</span> · <span class="mono">every 2h</span> · <span class="mono">daily 09:00</span> · <span class="mono">14:30</span></div></div>' +
     '<div class="field"><div class="label">Presets</div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">' +
         presets.map(p => '<button class="chip" data-cr-preset="' + esc(p.expr) + '">' + esc(p.label) + '</button>').join('') +
       '</div></div>' +
-    '<div class="field"><div class="label">Task prompt</div><textarea id="cr-task" placeholder="e.g. Check GitHub notifications, summarize, and DM me on Telegram if anything looks urgent."></textarea></div>';
+    '<div class="field"><div class="label">Task prompt</div><textarea id="cr-task" placeholder="e.g. Check GitHub notifications, summarize, and DM me on Telegram if anything looks urgent."></textarea></div>' +
+    '<div class="field"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer"><input type="checkbox" id="cr-skip-dryrun" style="margin-top:3px"><div><div style="font-size:13px;color:var(--fg-2)">Skip validation</div>' +
+      '<div class="hint" style="margin-top:2px">By default the scheduler runs your task once right now through the LLM to check it works — this takes 20-60s and has <b>real side effects</b> (sends messages, writes files, etc.). Skip if the task is trivial or you don\'t want the side effect.</div></div></label></div>';
   openModal({
     title: 'New scheduled job',
     body,
     wide: true,
     actions: [
       { label: 'Cancel' },
-      { label: 'Create', primary: true, onClick: async () => {
+      { label: 'Create', primary: true, busyLabel: 'Creating… (running dry-run)', onClick: async () => {
           const name = document.getElementById('cr-name').value.trim();
           const schedule = document.getElementById('cr-schedule').value.trim();
           const task = document.getElementById('cr-task').value.trim();
+          const skipEl = document.getElementById('cr-skip-dryrun');
+          const skip = skipEl.checked;
           if (!name || !schedule || !task) { toast('name, schedule, task required', 'err'); return false; }
-          try { await api('/api/cron', { method: 'POST', body: { name, schedule, task } }); toast('job created'); loadCron(); }
-          catch { toast('create failed', 'err'); return false; }
+          let r;
+          try { r = await api('/api/cron', { method: 'POST', body: { name, schedule, task, skip_dry_run: skip } }); }
+          catch { toast('create failed — server error', 'err'); return false; }
+          // Server signals failure with { error: "..." } — don't close the
+          // modal, show the error so the user can fix and retry.
+          if (r && r.error) {
+            // Server offers the user a "save anyway" escape hatch when
+            // dry-run failed but the task might still be correct (e.g.
+            // complex task that hit the round cap while exploring).
+            // Auto-check the Skip-validation box and highlight it — user's
+            // next click on Create will save without re-running dry-run.
+            if (r.offer_skip && !skip) {
+              skipEl.checked = true;
+              // Visual nudge — flash the checkbox label border so the user
+              // notices what changed.
+              const lbl = skipEl.closest('label');
+              if (lbl) {
+                lbl.style.outline = '2px solid var(--warn)';
+                lbl.style.outlineOffset = '4px';
+                lbl.style.borderRadius = '4px';
+                setTimeout(() => { lbl.style.outline = ''; lbl.style.outlineOffset = ''; }, 2500);
+              }
+              toast(r.error + ' · Skip validation auto-enabled — click Create again to save anyway', 'err');
+            } else {
+              const hint = r.hint ? ' (' + r.hint + ')' : '';
+              toast(r.error + hint, 'err');
+            }
+            return false;
+          }
+          toast('job created · next: ' + (r.next_run || '?'));
+          loadCron();
       }},
     ],
   });
@@ -3618,6 +3661,8 @@ function renderSchedulerView() {
   const jobs = state.cronJobs;
   const active = jobs.filter(j => j.status === 'active').length;
   const paused = jobs.length - active;
+  const totalRuns = jobs.reduce((n, j) => n + (j.runs || 0), 0);
+  const errRuns = jobs.filter(j => j.lastStatus === 'err').length;
   const rt = state.runningTasks || { pending: 0, results: [] };
   const recent = (rt.results || []).slice(-4).reverse();
   const runningStrip = (rt.pending || recent.length)
@@ -3641,14 +3686,14 @@ function renderSchedulerView() {
     '</div><button class="page-primary" data-act="new-cron">' + ico('plusSmall', 12) + ' New job</button></div>' +
     '<div class="stats-row">' +
       '<div class="stat"><div class="lbl">ACTIVE</div><div class="v" style="color:var(--ok)">' + active + '</div><div class="sub">' + paused + ' paused</div></div>' +
-      '<div class="stat"><div class="lbl">TOTAL RUNS</div><div class="v">' + jobs.reduce((n,j)=>n+(j.runs||0),0).toLocaleString() + '</div><div class="sub">all time</div></div>' +
+      '<div class="stat"><div class="lbl">TOTAL RUNS</div><div class="v">' + totalRuns.toLocaleString() + '</div><div class="sub">all time</div></div>' +
       '<div class="stat"><div class="lbl">NEXT</div><div class="v" style="font-size:20px;line-height:1.4">' + esc((jobs.find(j=>j.next)||{}).next || '—') + '</div><div class="sub">upcoming</div></div>' +
-      '<div class="stat"><div class="lbl">JOBS</div><div class="v">' + jobs.length + '</div><div class="sub">cron-tracked</div></div>' +
+      '<div class="stat"><div class="lbl">LAST ERRORS</div><div class="v" style="color:' + (errRuns ? 'var(--err)' : 'var(--fg-3)') + '">' + errRuns + '</div><div class="sub">' + (errRuns ? 'failing jobs' : 'all healthy') + '</div></div>' +
     '</div>' +
     runningStrip +
     '<div class="card-grid">' +
       jobs.map(j => {
-        const errLast = (j.last || '').toLowerCase().startsWith('err');
+        const errLast = j.lastStatus === 'err' || (j.last || '').toLowerCase().startsWith('err');
         const hits = Array.isArray(j.hits) ? j.hits.slice(-15) : null;
         // Only render heatmap if the server returned real run history; otherwise skip misleading squares.
         const heatmap = (hits && hits.length)
@@ -3674,8 +3719,9 @@ function renderSchedulerView() {
           heatmap +
           '<div class="kv-grid" style="font-size:11px">' +
             '<span class="k">next</span><span class="v">' + esc(j.next || '—') + '</span>' +
-            (j.last ? '<span class="k">last</span><span class="v" style="color:' + (errLast ? 'var(--err)' : 'var(--ok)') + '">' + esc(j.last) + '</span>' : '') +
-            (j.runs ? '<span class="k">runs</span><span class="v">' + (j.runs||0).toLocaleString() + '</span>' : '') +
+            (j.lastRun ? '<span class="k">last run</span><span class="v mono">' + esc(j.lastRun) + '</span>' : '') +
+            (j.last ? '<span class="k">status</span><span class="v" style="color:' + (errLast ? 'var(--err)' : 'var(--ok)') + '">' + esc(j.last) + '</span>' : '') +
+            '<span class="k">runs</span><span class="v">' + (j.runs||0).toLocaleString() + '</span>' +
           '</div></div>';
       }).join('') +
       (!jobs.length ? '<div style="grid-column:1/-1;padding:60px 0;text-align:center;color:var(--fg-4)">No scheduled jobs yet.</div>' : '') +
@@ -4988,11 +5034,38 @@ function wireModal() {
   document.querySelectorAll('[data-stop]').forEach(b => { b.onclick = (e) => e.stopPropagation(); });
   document.querySelectorAll('[data-modal-action]').forEach(b => {
     b.onclick = () => {
+      // Re-entry guard: once a handler is in flight, block further clicks
+      // on ANY modal action button until it resolves. Without this, a slow
+      // onClick (e.g. scheduler dry-run that takes 30s) lets impatient users
+      // click "Create" multiple times and create duplicate jobs.
+      if (b.dataset.busy === '1') return;
       const i = parseInt(b.dataset.modalAction, 10);
       const a = (state.modal && state.modal.actions || [])[i];
       if (!a) return;
-      // If action returns false, keep modal open; otherwise close
-      Promise.resolve().then(() => a.onClick && a.onClick()).then(keep => { if (keep !== false) closeModal(); });
+      // Disable every action button + show progress text on the clicked one.
+      const allBtns = document.querySelectorAll('[data-modal-action]');
+      const originalLabel = b.textContent;
+      b.dataset.busy = '1';
+      b.textContent = a.busyLabel || 'Working…';
+      allBtns.forEach(x => x.setAttribute('disabled', 'disabled'));
+      Promise.resolve()
+        .then(() => a.onClick && a.onClick())
+        .then(keep => {
+          if (keep !== false) { closeModal(); return; }
+          // Handler chose to keep modal open (usually validation error) —
+          // re-enable the buttons so the user can fix inputs and retry.
+          b.textContent = originalLabel;
+          b.dataset.busy = '';
+          allBtns.forEach(x => x.removeAttribute('disabled'));
+        })
+        .catch(err => {
+          // onClick itself threw — surface it and let the user retry.
+          console.error('modal action failed', err);
+          toast('action failed', 'err');
+          b.textContent = originalLabel;
+          b.dataset.busy = '';
+          allBtns.forEach(x => x.removeAttribute('disabled'));
+        });
     };
   });
 }
