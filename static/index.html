@@ -5024,7 +5024,11 @@ function renderModal() {
     '<button class="' + (a.primary ? 'btn-primary' : (a.danger ? 'btn-danger' : 'btn-secondary')) +
     '" data-modal-action="' + i + '"' + (a.disabled ? ' disabled' : '') + '>' + esc(a.label) + '</button>'
   ).join('');
-  return '<div class="modal-overlay" data-modal-close>' +
+  // Overlay deliberately has NO data-modal-close: clicking the dim backdrop
+  // must NOT discard form state. Users fill in cron/MCP/trait modals for
+  // 30+ seconds and an accidental outside-click wiping that out was the
+  // top modal complaint. Close paths now: Cancel button, × button, ESC.
+  return '<div class="modal-overlay">' +
     '<div class="modal-panel' + (m.wide ? ' wide' : '') + '" data-stop>' +
       '<div class="modal-head"><h2>' + esc(m.title || '') + '</h2>' +
         '<button class="icon-btn modal-close" data-modal-close>' + ico('close', 14) + '</button>' +
