@@ -241,28 +241,81 @@ def is_verified() -> bool:
     return get_owner_id() is not None
 
 
+def _coerce_chat_id(v) -> int | None:
+    """Normalise chat-id input (str or int) into a signed int, or None."""
+    try:
+        return int(str(v).strip())
+    except (ValueError, TypeError):
+        return None
+
+
 def get_allowed_groups() -> list[int]:
-    """Get list of allowed group chat IDs."""
+    """Get list of allowed group chat IDs as a flat list of ints.
+
+    Back-compat: older UI versions saved chat IDs as strings
+    (``["-1003803066123"]``) which made ``chat_id not in allowed_groups``
+    always true — Telegram's updates deliver ``chat_id`` as int, so the
+    "in" check never matched and bots silently ignored every group
+    message. Force int coercion on read so old data heals itself.
+    """
     raw = db.kv_get("telegram:allowed_groups")
     if not raw:
         return []
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:
         return []
+    out: list[int] = []
+    for v in parsed or []:
+        iv = _coerce_chat_id(v)
+        if iv is not None:
+            out.append(iv)
+    return out
 
 
-def set_allowed_groups(group_ids: list[int]):
-    db.kv_set("telegram:allowed_groups", json.dumps(group_ids))
+def set_allowed_groups(group_ids) -> None:
+    """Save allowed chat IDs. Coerces str input to int, filters garbage."""
+    cleaned: list[int] = []
+    for g in group_ids or []:
+        iv = _coerce_chat_id(g)
+        if iv is not None:
+            cleaned.append(iv)
+    db.kv_set("telegram:allowed_groups", json.dumps(cleaned))
+
+
+# Canonical group-mode values. "any" is a legacy alias kept for back-compat
+# with old settings saved by the v2 UI (which incorrectly exposed
+# "disabled/allowlist/any" instead of "off/mention/all"). Normalise to the
+# canonical set on read.
+_GROUP_MODE_ALIASES = {
+    "any": "all",         # old UI sent this; meant the same as "all"
+    "disabled": "off",    # old UI sent this; "off" is the canonical name
+    "allowlist": "all",   # whitelist filtering is a separate setting
+                          # (allowed_groups); "allowlist" as a mode was a
+                          # mixup, map to "all" so existing saves respond.
+}
 
 
 def get_group_mode() -> str:
-    """How bot responds in groups: 'mention' (only when mentioned) or 'all' (every message)."""
-    return db.kv_get("telegram:group_mode") or "mention"
+    """How bot responds in groups.
+
+    Returns one of:
+      - "all" (default) — respond to every message in allowed groups
+      - "mention"       — respond only when @mentioned or replied to
+      - "off"           — never respond in groups
+
+    Legacy aliases ("any", "disabled", "allowlist") are normalised.
+    """
+    raw = db.kv_get("telegram:group_mode") or "all"
+    return _GROUP_MODE_ALIASES.get(raw, raw)
 
 
 def set_group_mode(mode: str):
-    db.kv_set("telegram:group_mode", mode)
+    # Normalise on save too so `get_group_mode` always returns canonical.
+    canonical = _GROUP_MODE_ALIASES.get(mode, mode)
+    if canonical not in ("all", "mention", "off"):
+        canonical = "all"
+    db.kv_set("telegram:group_mode", canonical)
 
 
 def is_topics_enabled() -> bool:
@@ -1604,12 +1657,13 @@ def _handle_update(update: dict, token: str, bot_username: str):
         if allowed_groups and chat_id not in allowed_groups:
             return  # silently ignore non-allowed groups
 
-        # Check if bot should respond
+        # Check if bot should respond. get_group_mode() normalises legacy
+        # aliases (any/disabled/allowlist) to the canonical all/mention/off.
         group_mode = get_group_mode()
         should_respond = False
 
-        if group_mode == "all":
-            should_respond = True
+        if group_mode == "off":
+            return  # bot never responds in groups
         elif group_mode == "mention":
             # Respond only if mentioned or replied to
             if f"@{bot_username}" in text:
@@ -1617,6 +1671,10 @@ def _handle_update(update: dict, token: str, bot_username: str):
                 should_respond = True
             elif msg.get("reply_to_message", {}).get("from", {}).get("username") == bot_username:
                 should_respond = True
+        else:
+            # "all" (default) + any future unknown mode → respond. Safer
+            # to over-respond than to go silent when config is misread.
+            should_respond = True
 
         if not should_respond:
             return

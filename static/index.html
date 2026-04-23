@@ -4557,7 +4557,11 @@ function renderTabTelegram() {
   const running = !!t.running;
   const verified = !!t.verified;
   const username = t.username || '';
-  const groupMode = t.group_mode || 'disabled';
+  // Normalise legacy values saved by older UI versions so the dropdown
+  // reflects the real state coming back from the bot.
+  const rawMode = t.group_mode || 'all';
+  const legacyAlias = { any: 'all', disabled: 'off', allowlist: 'all' };
+  const groupMode = legacyAlias[rawMode] || rawMode;
   const topicsOn = !!t.topics_enabled;
   const allowed = t.allowed_groups || [];
   const statusCls = verified && running ? 'ok' : (hasToken ? 'warn' : 'err');
@@ -4581,12 +4585,15 @@ function renderTabTelegram() {
         : '')
     ) +
     settingsSection('Groups',
-      settingRow('Mode', '<span class="mono">disabled</span> · <span class="mono">allowlist</span> · <span class="mono">any</span>',
+      settingRow('Respond mode',
+        'How the bot behaves in group chats. <span class="mono">all</span> = reply to every message · <span class="mono">mention</span> = only when @mentioned or replied to · <span class="mono">off</span> = never respond in groups.',
         '<select class="setting-input mono" data-tg-group-mode>' +
-          ['disabled','allowlist','any'].map(m => '<option value="' + m + '"' + (m === groupMode ? ' selected' : '') + '>' + m + '</option>').join('') + '</select>') +
+          [['all','all messages'], ['mention','mentions & replies only'], ['off','off (ignore groups)']]
+            .map(([v, lbl]) => '<option value="' + v + '"' + (v === groupMode ? ' selected' : '') + '>' + lbl + '</option>').join('') +
+        '</select>') +
       settingRow('Topic threads', 'When on, group topics map to separate threads.',
         '<button class="toggle ' + (topicsOn ? 'on' : '') + '" data-act="tg-toggle-topics"><span class="knob"></span></button>') +
-      settingRow('Allowed groups', 'Comma-separated chat IDs. Used when mode = allowlist.',
+      settingRow('Allowed groups', 'Comma-separated chat IDs. When empty, all groups are allowed (respond mode still applies). When set, non-listed groups are silently ignored.',
         '<input class="setting-input mono" id="tg-allowed" value="' + esc(allowed.join(', ')) + '" placeholder="-100123, -100456">')
     );
 }

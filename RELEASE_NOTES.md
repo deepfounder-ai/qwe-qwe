@@ -1,43 +1,61 @@
-# v0.17.28 — auto-recall actually filters by relevance now
+# v0.17.29 — scheduler analytics, cron-creation that actually works, Telegram groups unblocked
 
-Bugfix release. One behavioral fix in the memory pipeline, two UI cleanups in the inspector, plus +20 tests backfilling coverage for surfaces that shipped untested.
+Three compound bugs shipped in v0.17.28 that each looked like a different problem to the user but were rooted in the same place: a feature landed without enough plumbing. This release fixes all three and backfills 25 tests that would have caught them.
 
-## 🧠 Auto-recall: dense-only with a real semantic threshold
+## 📅 Scheduler got real analytics
 
-**Symptom**: asking the agent a programming question would inject memories about evolution / travel notes / anything-in-the-same-language into the system prompt. Nonsense relevance, wasted context.
+Before: `TOTAL RUNS: 0` no matter how long jobs had been firing. Cards showed `next` but no `last run`, no status, no duration. The `scheduled_tasks` table had exactly one metric column (`last_run`) and the execution loop never even wrote to it on success — only on completion of a repeat cycle.
 
-**Root cause**: `_auto_context()` in `agent.py` was using the hybrid (dense + sparse SPLADE++ + BM25 → Qdrant RRF fusion) path with a `score_threshold=0.45`. Qdrant's RRF-fused scores are **rank-normalized** — the top result is always ≈1.0 regardless of absolute relevance. A 0.45 threshold on those scores meant "top 55% by rank", not "≥0.45 semantically similar". Garbage sailed through.
+After: every run writes a full row of metrics.
 
-**Fix** (`agent.py:_auto_context`):
+- **`migrations/003_scheduled_tasks_metrics.sql`** — adds `run_count`, `last_status` (`ok`/`err`), `last_error`, `last_duration_ms`, `last_result`. Safe on legacy installs that predate the migrations system (guards with `CREATE TABLE IF NOT EXISTS` first).
+- **`_check_and_run`** now times the execution, catches exceptions so one bad job doesn't freeze the loop, classifies the outcome via the new `_looks_like_error` heuristic (shared with dry-run), and updates all five columns in one statement.
+- **`list_tasks()`** returns the full shape plus a precomposed `last` field (`"ok · 42ms"` / `"err · <short>"`) that the UI can render without caring about internals.
+- **UI** stats row replaces the always-0 "JOBS" with **LAST ERRORS** (red when >0, grey "all healthy" otherwise). Each card now shows `last run` timestamp + `status` colour-coded + real `runs` count.
 
-- Switched every auto-recall search to **dense-only** by dropping `query_text=` from the `memory.search_by_vector` calls (the function routes to hybrid iff `query_text` is passed). Dense-only returns raw cosine similarity on the 0..1 range.
-- Raised `MEMORY_SCORE_MIN` 0.45 → **0.6** (the cosine bar where semantic closeness starts to mean something) and `EXPERIENCE_SCORE_MIN` 0.5 → **0.65**.
-- Unified the entity-lookup threshold with `MEMORY_SCORE_MIN` (was hardcoded 0.5).
-- Long comment in the source explaining why mixing RRF scores with absolute thresholds is a trap — so the next person doesn't "fix" it by switching back to hybrid.
+## 🔧 New-scheduled-job modal that doesn't create duplicates
 
-**Hybrid RRF is unchanged** for the explicit `memory_search` tool, where the agent explicitly wants keyword + semantic and isn't trying to apply an absolute threshold.
+Three different ways this was broken in v0.17.28:
 
-Verified live: programming question → empty recall. Question about evolution → evolution memories, high cosine. Exactly what you want.
+1. **Schedule format mismatch.** The modal offered 5-field cron presets (`0 9 * * *`) but the parser only understood qwe-qwe's DSL (`every 1h`, `daily 09:00`). Every submit rejected with `{"error": "Can't parse schedule"}` — and the UI didn't check the response, so "job created" toasted while nothing was saved.
+2. **No re-entry guard.** Clicking Create triggered a 30-120 second LLM dry-run. During the wait, the modal stayed open and the button stayed enabled. Impatient clicks = duplicate jobs.
+3. **No escape hatch for complex tasks.** Dry-run hit `max_rounds=5` on anything moderately real (e.g. "send error logs to telegram" needed 6 rounds just to explore the filesystem) and its "did-send confirmation" check was English-only, rejecting tasks where the agent confirmed in Russian.
 
-## 🎨 Inspector cleanup
+All fixed:
 
-- **Recalled memories**: removed the knowledge-base "preview" mode. When the thread has no live recall yet, the section now shows a clean empty state ("Send a message — the agent's live recall will stream here") instead of hitting `/api/knowledge/search` on the last user message and displaying unrelated KB hits with a "preview" badge. The preview was confusing users — making them think the agent had recalled things it hadn't. Real recalls still stream in via the WS `recall` event with the green **live** badge.
-- **Context window header**: removed the duplicate `X%` tag from the section header. The same percentage was already rendered by the `.pct` span inside the gauge right below.
+- **Modal primitive** (`wireModal`) now sets `data-busy=1` on the clicked action, disables every action button in the footer, and shows a custom `busyLabel` (Create → `"Creating… (running dry-run)"`). The synchronous re-entry guard means even a 5-click hammer produces exactly one POST. If the handler returns `false` (validation error) or throws, buttons re-enable for retry.
+- **Schedule presets** rewritten to the DSL the parser actually speaks (`every 1h`, `every 4h`, `daily 09:00`, `in 30m`, `in 2h`).
+- **`skip_dry_run`** checkbox wired through from modal → `POST /api/cron` → `scheduler.add(..., skip_dry_run=bool)`. Trivial tasks now save in ~200ms.
+- **Dry-run tuning**: `max_rounds` bumped 5 → 8; `"task completed (max rounds)"` removed from the strict failure markers (complex ≠ broken); send-task confirmation check recognises 9 RU + 8 EN phrases (`отправил`, `успешно`, `готово`, `delivered`, `posted`, `message_id`, …).
+- **Auto-skip offer**: when dry-run fails with a confirmation-check miss, server returns `offer_skip: true`. UI auto-checks the Skip Validation box, flashes an amber outline around it, and the next Create click saves without re-running — no form re-typing.
 
-## 🧪 +20 tests — backfill for UI↔server contract + freshly-fixed bugs
+## 💬 Telegram groups unblocked (two compound bugs, one symptom)
 
-Every one of these guards a surface that recently shipped without coverage.
+User reported: "bot added to group, group whitelisted in settings, I write there, bot doesn't see anything." Two bugs stacking up:
 
-- `tests/test_endpoint_consistency.py` (3) — walks every `/api/...` call site in `static/index.html` and asserts a matching FastAPI route is mounted. Segment-wise matcher handles both literal fills (`/api/kv/spicy_duck ↔ /api/kv/{key}`) and concat prefixes (`/api/threads/' + id + '/switch`). Fault-injected: flipping one path to `/api/threds` fails the test as intended.
-- `tests/test_providers_list.py` (11) — locks in `list_all()` shape, **parallel ping behavior** (timing-based guard: serial 2×0.7s = 1.4s would trip the 1.2s ceiling, parallel ~0.75s passes — fault-injection confirmed), ping cache hit + invalidation, embedding-model block in `set_model`, and `switch()` guards (unknown / keyless cloud / keyless local).
-- `tests/test_ws_attachments.py` (6) — end-to-end WebSocket `document` + `image_b64` round-trip: bytes land in `UPLOADS_DIR`, `[File attached: …]` reference injected into `user_input`, filename sanitizer blocks `../../etc/passwd\x00.txt`, image + document coexist in one turn.
+1. **Mode dropdown semantics mismatch.** The v2 UI offered `disabled / allowlist / any` as `group_mode`, but `_handle_group_message` only checked for `all` or `mention`. Every saved value from the UI was unknown → `should_respond` stayed False → bot silently ignored every group message with no log line. The "respond to all / mentions only" option that users remembered was simply gone from the UI.
+2. **Allowed-groups int coercion missing.** The UI sent chat IDs as strings (`["-1003803066123"]`) and `set_allowed_groups` just `json.dumps`'d them through. Telegram delivers `chat_id` as int. `chat_id not in ["-100..."]` was always True → silently ignored even with the correct mode.
 
-Suite: 186 → **206 passing** (23s local, single pass).
+Fixes:
+
+- **`group_mode`** canonicalised to `all` / `mention` / `off`; default changed from `"mention"` to `"all"` (what users actually expect for a personal bot). Legacy values (`any`, `disabled`, `allowlist`) auto-heal on read AND on save via `_GROUP_MODE_ALIASES`. Unknown modes fall back to `all` — safer to over-respond than to go silent.
+- **`get_allowed_groups()` / `set_allowed_groups()`** coerce to `int` on both sides, filter garbage (non-numeric entries dropped). Legacy stringified lists heal on first read.
+- **Group handler** explicitly handles `"off"` (return without touching chat) and treats any unknown mode as `"all"`.
+- **UI dropdown** rewritten with human labels: "all messages" / "mentions & replies only" / "off (ignore groups)". "Allowed groups" description clarified — empty = all groups allowed, mode still decides reply.
+
+Existing installs heal on first read of each affected KV key. No manual migration needed.
+
+## 🧪 +25 tests
+
+- `tests/test_telegram_groups.py` (13) — default is `all`, every legacy alias normalises to canonical on read AND write, unknown modes safe-default, allowed-groups int coercion on set + get, empty-list = all-allowed, junk filtering, and a compound regression: `chat_id in healed_allowed_groups` must be True (the symptom).
+- `tests/test_scheduler_cron.py` (12) — skip_dry_run saves fast, bad schedule clean error, `every Nh` format accepted, list_tasks returns every expected metric field, _check_and_run stamps ok/err states with run_count+1 + duration + last_run, last_status=err when output matches an error marker, max-rounds no longer a failure, RU + EN send confirmations pass, `offer_skip` path, legacy-schema heals via migration.
+
+Suite: 206 → **231 passing** (~44s local).
 
 ## Upgrade
 
 ```bash
-pip install --upgrade qwe-qwe        # or re-run ./setup.sh
+pip install --upgrade qwe-qwe   # or re-run ./setup.sh
 ```
 
-No migrations. No config changes. Ship it.
+Migration runs automatically on first DB touch. Stringified `allowed_groups` and legacy `group_mode` values heal transparently — if your bot was silent in v0.17.28 with groups configured, it'll start responding as soon as you restart the server.
