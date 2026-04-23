@@ -1919,16 +1919,15 @@ const handleWsMessage = (msg) => {
     // that would blow away chat-scroll and reset scrollTop.
     loadThreads({ silent: true });
     loadStatus({ silent: true });
-    fetchRecalledMemories({ silent: true }).then(() => {
-      // After recalls come back, surgically update inspector only
-      const inspEl = document.querySelector('aside.inspector');
-      if (inspEl && state.view === 'chat' && state.inspectorOn) {
-        const tmp = document.createElement('div');
-        tmp.innerHTML = renderInspector();
-        const next = tmp.firstElementChild;
-        if (next) inspEl.replaceWith(next);
-      }
-    });
+    // Surgically update inspector to show live recalled memories + latency
+    // without a full render() that would reset chat scroll.
+    { const _el = document.querySelector('aside.inspector');
+      if (_el && state.view === 'chat' && state.inspectorOn) {
+        const _t = document.createElement('div');
+        _t.innerHTML = renderInspector();
+        const _n = _t.firstElementChild;
+        if (_n) _el.replaceWith(_n);
+      } }
     if (state.voiceLive && state._voiceAwaiting) {
       state._voiceAwaiting = false;
       voicePlayReply(finalContent || '');
@@ -2384,8 +2383,6 @@ function hydrateInspectorFromHistory() {
     };
   }
   if (state.tokenTimeline.length > 12) state.tokenTimeline = state.tokenTimeline.slice(-12);
-  // Re-fetch recalled memories for the last user prompt in this thread (runs in bg)
-  fetchRecalledMemories();
 }
 
 async function switchThread(id) {
@@ -3277,9 +3274,7 @@ function renderInspector() {
     // reference below. Over-budget = agent will start compacting / truncating
     // tool results. Over-model-ctx = provider would error (we warn).
     '<div class="insp-section">' +
-      '<div class="insp-section-hdr"><h3>Context window</h3>' +
-        '<span class="tag" style="font-size:9px;color:' + pctColor + ';border-color:' + pctColor + '" title="Last prompt tokens / agent context_budget. Compaction triggers at ~100%.">' + pct.toFixed(1) + '%</span>' +
-      '</div>' +
+      '<div class="insp-section-hdr"><h3>Context window</h3></div>' +
       '<div class="token-gauge">' +
         '<div class="row"><div><span class="used">' + lastPrompt.toLocaleString() + '</span>' +
           '<span class="total">/ ' + (budget/1000).toFixed(0) + 'k</span></div>' +
@@ -3316,12 +3311,11 @@ function renderInspector() {
     // Recalled memories — live from agent._build_context() via WS 'recall'
     // event. Shows the EXACT items the agent saw in its system prompt this
     // turn (thread-scoped + wiki + entity + cross-thread synthesized +
-    // experience). Fallback is a knowledge-base preview (marked as such).
-    '<div class="insp-section"><div class="insp-section-hdr"><h3>Recalled memories</h3><span class="count">' + pills.length + '</span>' +
-      (state.memoryPillsReal
-        ? '<span class="tag" style="font-size:9px;color:var(--ok);border-color:var(--ok)" title="What the agent actually recalled in this turn\'s system prompt">live</span>'
-        : (pills.length ? '<span class="tag" style="font-size:9px;color:var(--fg-4)" title="Preview from knowledge-base index — not what the agent itself saw. A real recall will show when the agent next runs.">preview</span>' : '')) +
-      '<button class="icon-btn" data-act="recall-refresh" title="Refresh">' + ico('refresh', 11) + '</button></div>' +
+    // experience).
+    '<div class="insp-section"><div class="insp-section-hdr"><h3>Recalled memories</h3>' +
+      (pills.length ? '<span class="count">' + pills.length + '</span>' : '') +
+      (state.memoryPillsReal ? '<span class="tag" style="font-size:9px;color:var(--ok);border-color:var(--ok)" title="What the agent actually recalled in this turn\'s system prompt">live</span>' : '') +
+    '</div>' +
       (pills.length
         ? pills.map(m =>
             '<div class="mem-pill"><div class="hdr">' +

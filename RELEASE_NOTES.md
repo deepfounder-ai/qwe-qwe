@@ -1,92 +1,43 @@
-# v0.17.27 — JS lint, coverage floor, release automation
+# v0.17.28 — auto-recall actually filters by relevance now
 
-Three more tech-debt items closed. These are the last "nearly-free wins" from the audit.
+Bugfix release. One behavioral fix in the memory pipeline, two UI cleanups in the inspector, plus +20 tests backfilling coverage for surfaces that shipped untested.
 
-## 🟨 D1. JS syntax check for `static/index.html`
+## 🧠 Auto-recall: dense-only with a real semantic threshold
 
-5500-line inline vanilla JS + zero build step = bugs caught only by manual review. Now automated.
+**Symptom**: asking the agent a programming question would inject memories about evolution / travel notes / anything-in-the-same-language into the system prompt. Nonsense relevance, wasted context.
 
-- **`scripts/check_js.py`** — pure Python helper that extracts every `<script>` block, writes to temp `.js`, runs `node --check`, remaps stderr line numbers back onto the HTML. No npm, no node_modules.
-- **`.pre-commit-config.yaml`** — two hooks (ruff + check_js.py). `pip install pre-commit && pre-commit install` to opt in.
-- **CI step** — runs `python scripts/check_js.py` between the AST syntax check and the import-time smoke. Node is preinstalled on GitHub runners; local dev without Node gets a friendly "skipped" (not a hard fail).
+**Root cause**: `_auto_context()` in `agent.py` was using the hybrid (dense + sparse SPLADE++ + BM25 → Qdrant RRF fusion) path with a `score_threshold=0.45`. Qdrant's RRF-fused scores are **rank-normalized** — the top result is always ≈1.0 regardless of absolute relevance. A 0.45 threshold on those scores meant "top 55% by rank", not "≥0.45 semantically similar". Garbage sailed through.
 
-Verified: injecting `stae.x = 1 let bad;` produces `static/index.html:1396: SyntaxError: Unexpected identifier 'let'`.
+**Fix** (`agent.py:_auto_context`):
 
-eslint skipped — `npx eslint` would add an npm download for zero additional bug-catching beyond `node --check` on our codebase.
+- Switched every auto-recall search to **dense-only** by dropping `query_text=` from the `memory.search_by_vector` calls (the function routes to hybrid iff `query_text` is passed). Dense-only returns raw cosine similarity on the 0..1 range.
+- Raised `MEMORY_SCORE_MIN` 0.45 → **0.6** (the cosine bar where semantic closeness starts to mean something) and `EXPERIENCE_SCORE_MIN` 0.5 → **0.65**.
+- Unified the entity-lookup threshold with `MEMORY_SCORE_MIN` (was hardcoded 0.5).
+- Long comment in the source explaining why mixing RRF scores with absolute thresholds is a trap — so the next person doesn't "fix" it by switching back to hybrid.
 
-## 📊 D2. pytest-cov + 24% coverage floor
+**Hybrid RRF is unchanged** for the explicit `memory_search` tool, where the agent explicitly wants keyword + semantic and isn't trying to apply an absolute threshold.
 
-Measure + hold-the-line. Not chasing 90% — just ensuring regressions get caught.
+Verified live: programming question → empty recall. Question about evolution → evolution memories, high cosine. Exactly what you want.
 
-- `pytest-cov` added to `[dev]` extras.
-- `[tool.coverage.run]` + `[tool.coverage.report]` in `pyproject.toml` — source=`.`, omit tests/venv/build/static/setup, exclude `pragma: no cover` + `if __name__ == "__main__":` + stubs. `fail_under = 24` (2pp below the measured 25.95% baseline).
-- CI replaces the `pytest -v` step with `pytest -v --cov --cov-report=term --cov-report=xml`. XML goes to the job summary for visibility.
-- `CONTRIBUTING.md` documents `pytest --cov` as the canonical local run and states the floor policy.
+## 🎨 Inspector cleanup
 
-**Baseline: 25.95% total**. 186/186 tests pass with or without `--cov`.
+- **Recalled memories**: removed the knowledge-base "preview" mode. When the thread has no live recall yet, the section now shows a clean empty state ("Send a message — the agent's live recall will stream here") instead of hitting `/api/knowledge/search` on the last user message and displaying unrelated KB hits with a "preview" badge. The preview was confusing users — making them think the agent had recalled things it hadn't. Real recalls still stream in via the WS `recall` event with the green **live** badge.
+- **Context window header**: removed the duplicate `X%` tag from the section header. The same percentage was already rendered by the `.pct` span inside the gauge right below.
 
-### Top 3 by coverage
-1. `agent_budget.py` — 81%
-2. `threads.py` — 80%
-3. `logger.py` — 80%
+## 🧪 +20 tests — backfill for UI↔server contract + freshly-fixed bugs
 
-### At 0% (useful data, not lies)
-1. `cli.py` (1476 stmts) — entry point, not exercised by unit tests
-2. `inference_setup.py` (159 stmts)
-3. `synthesis.py` (173 stmts) — the night-synthesis job
-4. `skills/browser.py` (300 stmts) — Playwright, env-dependent
-5. `skills/mcp_manager.py`, `skills/spicy_duck.py`
+Every one of these guards a surface that recently shipped without coverage.
 
-These are candidates for future integration tests (the `skills/` ones are easy — just exercise `execute()` with mocked I/O). Not today.
+- `tests/test_endpoint_consistency.py` (3) — walks every `/api/...` call site in `static/index.html` and asserts a matching FastAPI route is mounted. Segment-wise matcher handles both literal fills (`/api/kv/spicy_duck ↔ /api/kv/{key}`) and concat prefixes (`/api/threads/' + id + '/switch`). Fault-injected: flipping one path to `/api/threds` fails the test as intended.
+- `tests/test_providers_list.py` (11) — locks in `list_all()` shape, **parallel ping behavior** (timing-based guard: serial 2×0.7s = 1.4s would trip the 1.2s ceiling, parallel ~0.75s passes — fault-injection confirmed), ping cache hit + invalidation, embedding-model block in `set_model`, and `switch()` guards (unknown / keyless cloud / keyless local).
+- `tests/test_ws_attachments.py` (6) — end-to-end WebSocket `document` + `image_b64` round-trip: bytes land in `UPLOADS_DIR`, `[File attached: …]` reference injected into `user_input`, filename sanitizer blocks `../../etc/passwd\x00.txt`, image + document coexist in one turn.
 
-## 🤖 D3. Release automation workflow
+Suite: 186 → **206 passing** (23s local, single pass).
 
-I hand-released 14 times today. Every one: bump VERSION in 3 files, write RELEASE_NOTES, commit, tag, push, `gh release create`. Error-prone — I hit merge conflicts on version bumps in parallel worktrees.
-
-New `.github/workflows/release.yml` — triggers via `workflow_run: Tests completed success`. If `config.py` VERSION changed and the tag doesn't exist yet, auto-creates tag + GitHub release from `RELEASE_NOTES.md`.
-
-### Gating chain
-1. Push to main → `Tests` workflow runs (ruff → AST 3.11 check → JS check → import smoke → pytest --cov).
-2. On green, `Release` workflow fires.
-3. If `config.py` VERSION == `pyproject.toml` version ≠ any existing tag, tag + release.
-4. If VERSION unchanged OR tag exists, no-op cleanly.
-5. If `RELEASE_NOTES.md` is missing/empty when a new version is being released, fail loudly with a clear message.
-
-### Idempotency (3 layers)
-1. `git rev-parse --verify refs/tags/v$VERSION` — skip if tag already local
-2. `gh api /repos/.../git/refs/tags/v$VERSION` — skip if tag on remote
-3. `gh release view v$VERSION` — skip if release already exists (handles "tag pushed but release create failed" retry)
-
-### This release is the first test
-
-v0.17.27 is the first release where the workflow will fire. I'm still doing the manual bump + push (because the workflow doesn't exist yet on `main`); next release should be auto-cut by the workflow itself.
-
-## 📊 Totals
-
-```
-ruff check .        — 0 errors
-JS syntax           — 1 script, parses clean
-pytest --cov        — 186 passed, 25.93% coverage (floor 24.0% ✓)
-Python 3.11 AST     — 0 findings
-import smoke        — all modules + FastAPI app
-```
-
-CI pipeline final form:
-
-```yaml
-1. Lint with ruff
-2. Syntax check against Python 3.11 grammar
-3. JS syntax check for static/index.html
-4. Import-time smoke
-5. Run tests with coverage (fail_under=24)
-→ release.yml fires on green + VERSION change
-```
-
-## 📦 Upgrade
+## Upgrade
 
 ```bash
-git pull && pip install -e .[dev] --upgrade  # pytest-cov lands here
-pre-commit install                            # optional local hooks
+pip install --upgrade qwe-qwe        # or re-run ./setup.sh
 ```
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+No migrations. No config changes. Ship it.

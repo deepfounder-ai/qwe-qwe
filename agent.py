@@ -745,15 +745,22 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
 
     Strategy:
     1. Compute embedding once (FastEmbed, local)
-    2. Thread-scoped hybrid search (score >= 0.45) — up to 2 results
-    3. Global hybrid search (score >= 0.45) — fill remaining slots
-    4. Experience search (score >= 0.5) — only proven patterns
+    2. Thread-scoped hybrid search (score >= 0.6) — up to 2 results
+    3. Global hybrid search (score >= 0.6) — fill remaining slots
+    4. Experience search (score >= 0.65) — only proven patterns
     5. Deduplicate by content across all results
     """
-    # Score thresholds — higher = fewer but more precise results.
-    # For RRF fusion scores, 0.45 is a good cutoff (tested empirically).
-    MEMORY_SCORE_MIN = 0.45
-    EXPERIENCE_SCORE_MIN = 0.5
+    # IMPORTANT — auto-recall must use DENSE-ONLY search, not hybrid RRF.
+    # Qdrant's RRF-fused scores are normalized (top result = 1.0) and don't
+    # correspond to absolute semantic similarity. A threshold of 0.6 on
+    # RRF scores means "top 40% by rank", not "≥0.6 cosine similar" — so
+    # unrelated memories (Russian travel notes for a Russian programming
+    # question) sail through. We bypass hybrid by calling search_by_vector
+    # WITHOUT query_text, which drops to pure dense cosine similarity
+    # filtering on the 0..1 range below. Hybrid search stays available for
+    # the explicit memory_search tool where the agent WANTS keyword+semantic.
+    MEMORY_SCORE_MIN = 0.6
+    EXPERIENCE_SCORE_MIN = 0.65
 
     try:
         seen_texts = set()
@@ -787,11 +794,17 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         except Exception:
             return ""  # embedding unavailable
 
+        # NOTE: every search_by_vector call below deliberately OMITS
+        # `query_text=` so we stay on the dense-only path. With query_text
+        # set, memory.py routes to hybrid RRF whose fused scores are
+        # rank-normalized (top=1.0) and can't be thresholded meaningfully.
+        # Dense-only returns raw cosine similarity where 0.6 actually means
+        # "semantically close", not "top 40% by rank".
+
         # Thread-scoped search first (prioritize local context)
         if thread_id:
             thread_results = memory.search_by_vector(
                 vector, limit=2, thread_id=thread_id,
-                query_text=user_input,
                 score_threshold=MEMORY_SCORE_MIN,
             )
             for r in thread_results:
@@ -800,7 +813,6 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         # Wiki/entity search first (synthesized knowledge = higher quality)
         wiki_results = memory.search_by_vector(
             vector, limit=2, tag="wiki",
-            query_text=user_input,
             score_threshold=MEMORY_SCORE_MIN,
         )
         for r in wiki_results:
@@ -809,8 +821,7 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         # Relation expansion: if entity found, follow links to related wiki
         entity_results = memory.search_by_vector(
             vector, limit=1, tag="entity",
-            query_text=user_input,
-            score_threshold=0.5,
+            score_threshold=MEMORY_SCORE_MIN,
         )
         for e in entity_results:
             relations = e.get("relations", [])
@@ -829,7 +840,6 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
                     break
                 tag_results = memory.search_by_vector(
                     vector, limit=2, tag=_tag,
-                    query_text=user_input,
                     score_threshold=MEMORY_SCORE_MIN,
                 )
                 for r in tag_results:
@@ -841,7 +851,6 @@ def _auto_context(user_input: str, thread_id: str | None = None) -> str:
         if config.get("experience_learning"):
             exp_hits = memory.search_by_vector(
                 vector, limit=config.MAX_EXPERIENCE_RESULTS + 1, tag="experience",
-                query_text=user_input,
                 score_threshold=EXPERIENCE_SCORE_MIN,
             )
             exp_lines = []

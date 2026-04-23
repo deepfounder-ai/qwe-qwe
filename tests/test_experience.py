@@ -368,11 +368,17 @@ def test_4_3_failed_outcome_score(agent_mod, experience_enabled, monkeypatch):
 
 
 def test_4_4_success_beats_failed_by_composite_score(agent_mod, experience_enabled, monkeypatch):
-    """Success case with lower similarity wins over failed case with higher similarity."""
+    """Success case with lower similarity wins over failed case with higher similarity.
+
+    Both scores must clear ``EXPERIENCE_SCORE_MIN`` (0.65) so the mock's
+    threshold filter doesn't drop them before the composite-score logic
+    even sees them. The point of the test is the outcome-score weighting:
+    0.7*1.0=0.7 beats 0.9*0.2=0.18 even though raw similarity is lower.
+    """
     success_case = _make_exp_result(
-        "[EXP] Task: good | Tools: shell | Steps: 1 | Result: success", 0.6, outcome_score=1.0)
+        "[EXP] Task: good | Tools: shell | Steps: 1 | Result: success", 0.7, outcome_score=1.0)
     failed_case = _make_exp_result(
-        "[EXP] Task: bad | Tools: shell | Steps: 1 | Result: failed", 0.8, outcome_score=0.2)
+        "[EXP] Task: bad | Tools: shell | Steps: 1 | Result: failed", 0.9, outcome_score=0.2)
 
     def _search(query, limit=3, tag=None, thread_id=None):
         if tag == "experience":
