@@ -605,6 +605,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "telegram_notify_owner",
+            "description": "Send a Telegram message to the verified owner via the already-configured bot. Use this instead of http_request+Bot API when the user asks to 'send X to telegram', 'notify me', 'пришли в телегу'. No token or chat_id needed — handled from KV. Returns 'Sent.' on success, or an error if telegram isn't configured.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Message body (under 4000 chars; longer is auto-chunked)"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "schedule_task",
             "description": "Schedule a task to run later or repeatedly. Auto-validates via dry-run before saving. Formats: 'in 5m', 'in 2h', 'every 30m', 'daily 09:00', '14:30'.",
             "parameters": {
@@ -1126,6 +1140,24 @@ def execute(name: str, args: dict) -> str:
                 return f"Opened {url} in desktop browser."
             except Exception as e:
                 return f"Error opening URL: {e}"
+
+        elif name == "telegram_notify_owner":
+            text = args.get("text", "")
+            if not text:
+                return "Error: text required"
+            try:
+                import telegram_bot
+                owner_id = telegram_bot.get_owner_id()
+                if not owner_id:
+                    return ("Error: telegram owner not verified. Open Settings → "
+                            "Telegram, set token, and complete activation first.")
+                token = telegram_bot.get_token()
+                if not token:
+                    return "Error: telegram bot token not configured."
+                telegram_bot.send_message(int(owner_id), text, token=token)
+                return f"Sent. delivered to owner_id={owner_id} ({len(text)} chars)"
+            except Exception as e:
+                return f"Error: telegram send failed: {e}"
 
         elif name == "camera_capture":
             frame = _camera_grab_frame()
