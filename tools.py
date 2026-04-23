@@ -129,6 +129,67 @@ def _get_path_arg(args: dict) -> str | None:
     return args.get("path") or args.get("file_path") or args.get("filepath") or args.get("file")
 
 
+def _integrity_block_reason(p: Path) -> str | None:
+    """Return a reason string if writing to ``p`` would damage agent integrity.
+
+    Applied AFTER the whitelist check — a path inside the allowed dirs
+    can still be blocked here if it points at something whose corruption
+    is irreversible:
+
+    - qwe-qwe's SQLite DB (qwe_qwe.db and its WAL sidecars)
+    - Vault files (encrypted secrets)
+    - Qdrant's binary memory store under ``~/.qwe-qwe/memory/``
+    - qwe-qwe's own source tree (the package containing this file).
+      Overridable via ``QWE_ALLOW_SELF_MODIFY=1`` for users who
+      explicitly want the agent to refactor the project.
+    - Anything under a ``.git/`` directory
+
+    Returns ``None`` if the write is safe.
+    """
+    s = str(p)
+    name = p.name
+    parts = p.parts
+
+    # SQLite DB + WAL/SHM sidecars
+    if name == "qwe_qwe.db" or name.startswith("qwe_qwe.db-"):
+        return ("Direct writes to qwe_qwe.db are blocked (use memory_save, "
+                "schedule_task, or other dedicated tools)")
+
+    # Vault — encrypted secrets file
+    if name.startswith("vault") and ("secret" in s.lower() or "qwe-qwe" in s.lower()):
+        return "Direct writes to the secret vault are blocked — use secret_save"
+
+    # Qdrant on-disk index. Corruption here wipes every synthesised memory,
+    # wiki, and entity. Users touching this intentionally would shut qwe-qwe
+    # down first anyway.
+    try:
+        data_dir = str(config.DATA_DIR.resolve())
+        if s.startswith(os.path.join(data_dir, "memory") + os.sep):
+            return "Direct writes to the Qdrant memory store are blocked — use memory_save"
+    except Exception:
+        pass
+
+    # .git anywhere in the path
+    if ".git" in parts:
+        return "Writing inside a .git directory is blocked"
+
+    # Agent's own source tree — overridable
+    if os.environ.get("QWE_ALLOW_SELF_MODIFY") != "1":
+        try:
+            pkg_dir = Path(__file__).parent.resolve()
+            pkg_str = str(pkg_dir)
+            if (s == pkg_str or s.startswith(pkg_str + os.sep)) and (
+                p.suffix in (".py", ".toml", ".cfg", ".ini") or name in ("pyproject.toml",)
+            ):
+                return ("Writing to qwe-qwe's own source tree is blocked. "
+                        "Set QWE_ALLOW_SELF_MODIFY=1 to allow the agent to "
+                        "self-modify (intended for interactive dev sessions).")
+        except Exception:
+            pass
+
+    return None
+
+
 def _resolve_path(raw: str, for_write: bool = False) -> Path:
     """Resolve a file path for agent operations.
 
@@ -136,6 +197,8 @@ def _resolve_path(raw: str, for_write: bool = False) -> Path:
     - Relative paths -> workspace (~/.qwe-qwe/workspace/)
     - ~ expands to home
     - For writes: only allow workspace, data dir, and cwd (whitelist)
+    - For writes: additionally block paths that would irreversibly damage
+      qwe-qwe itself (DB, vault, memory store, source tree, .git).
     """
     # Convert Git Bash / MSYS2 paths to Windows: /c/Users/... → C:/Users/...
     if sys.platform == "win32" and len(raw) >= 3 and raw[0] == "/" and raw[2] == "/":
@@ -154,6 +217,9 @@ def _resolve_path(raw: str, for_write: bool = False) -> Path:
                 f"Cannot write outside allowed directories. Path: {p}\n"
                 f"Allowed: workspace, data dir (~/.qwe-qwe/), project dir"
             )
+        reason = _integrity_block_reason(p)
+        if reason is not None:
+            raise PermissionError(reason)
     return p
 
 
@@ -188,7 +254,37 @@ _SHELL_BLOCKED_EXACT = [
     "rm -rf /", "rm -rf /*", "rm -rf ~", "rm -rf $HOME",
     ":(){:|:&};:",   # fork bomb
     ":(){ :|:& };:", # fork bomb variant
+    # Agent-integrity wipes — destroying ~/.qwe-qwe erases every memory,
+    # scheduled task, preset, and vault secret. No recovery.
+    "rm -rf ~/.qwe-qwe", "rm -rf $HOME/.qwe-qwe",
 ]
+
+
+# Agent-integrity destruction patterns. Target: paths whose loss is
+# irreversible — SQLite DB, Qdrant memory store, vault, source tree, .git.
+#
+# ``(?![a-zA-Z0-9_-])`` after ``.qwe-qwe`` is load-bearing — without it
+# ``~/.qwe-qwe-backup`` (legitimate user dir, not ours) would get caught
+# by the ``.qwe-qwe`` prefix match.
+_QWE_DIR = r"\.qwe-qwe(?![a-zA-Z0-9_-])"
+
+_AGENT_INTEGRITY_PATTERNS = re.compile(
+    r"(?:"
+    # rm (with or without flags) targeting the SQLite DB or vault file.
+    # Deleting those files alone is enough to wipe the agent's state; the
+    # recursive flag isn't required to do irreversible damage.
+    r"\brm\s+(?:-[a-zA-Z]+\s+)*[^\n;&|]*(?:qwe_qwe\.db|" + _QWE_DIR + r"/vault)"
+    # rm -r targeting the qwe-qwe data dir or its known subdirs
+    r"|\brm\s+-[rRf]*[rRf][rRf]*\s+[^\n;&|]*(?:~/" + _QWE_DIR + r"|\$HOME/" + _QWE_DIR + r"|" + _QWE_DIR + r"/memory|" + _QWE_DIR + r"/vault|\.git(?:/|\s|$))"
+    # Redirect-truncate onto the DB or vault
+    r"|>\s*[^\n;&|<>]*(?:qwe_qwe\.db|" + _QWE_DIR + r"/vault)"
+    # dd of=<agent file>
+    r"|\bdd\s+[^\n;&|]*of=[^\n;&|]*(?:qwe_qwe\.db|" + _QWE_DIR + r"/)"
+    # sqlite3 DROP / DELETE on the agent DB
+    r"|\bsqlite3\s+[^\n;&|]*qwe_qwe\.db[^\n;&|]*(?:DROP|DELETE\s+FROM\s+messages)"
+    r")",
+    re.IGNORECASE,
+)
 
 # Additional hardening patterns — applied to the NORMALIZED command (after
 # NFKC folding, empty-quote stripping, and bounded hex unescaping) so the
@@ -319,6 +415,13 @@ def _check_shell_safety(cmd: str) -> str | None:
     # python/perl/ruby/node indirection, base64-decode-pipe.
     if _SHELL_HARDENED_PATTERNS.search(norm):
         return "Blocked: obfuscated or indirect dangerous command."
+    # Agent-integrity checks — refuse operations that wipe qwe-qwe's own
+    # data dir / DB / memory / vault / source tree / .git. Checked against
+    # both raw and normalised so obfuscation variants fail too.
+    if _AGENT_INTEGRITY_PATTERNS.search(cmd) or _AGENT_INTEGRITY_PATTERNS.search(norm):
+        return ("Blocked: operation would irreversibly damage qwe-qwe "
+                "(data dir, DB, memory store, vault, or .git). If you "
+                "really need to do this, do it manually outside the agent.")
     return None
 
 
