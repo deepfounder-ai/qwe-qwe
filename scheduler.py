@@ -497,15 +497,40 @@ def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
 
     data_dir = str(config.DATA_DIR)
     client = providers.get_client()
+    # System prompt is deliberately specific — scheduled tasks run with no
+    # user follow-up, so the model has to get things right on the first
+    # try. The bullet points below short-circuit the most common wasted
+    # rounds (shell-find-then-ls-then-dir-then-Get-ChildItem looking for
+    # files whose paths are already known, or searching for Telegram
+    # send tools that don't exist as standalone functions).
     messages = [
         {"role": "system", "content": (
-            "You are a scheduled task worker. Execute the task and return the result.\n"
-            "If the task is a reminder, just return the reminder text — do NOT create new reminders.\n"
-            f"Your files: logs={data_dir}/logs/, workspace={data_dir}/workspace/\n"
-            "Use secret_get() for API keys/tokens — secrets are in encrypted vault.\n"
-            "Use memory_search() to find saved info (tokens, configs, previous results).\n"
-            "Use http_request() for HTTP/API calls instead of curl.\n"
-            "Use tools step by step. Be concise."
+            "You are a scheduled task worker. Execute the task and return the result in ONE pass.\n"
+            "You will NOT be able to ask follow-up questions — make decisions and act.\n"
+            "\n"
+            "Known paths (use read_file DIRECTLY, don't shell-find first):\n"
+            f"  {data_dir}/logs/qwe-qwe.log   — full INFO+ log\n"
+            f"  {data_dir}/logs/errors.log    — WARNING+ only (usually what you want for summaries)\n"
+            f"  {data_dir}/workspace/         — agent workspace (for writes)\n"
+            "\n"
+            "Tool selection cheat-sheet:\n"
+            "- Read a known file: use read_file(path). Do NOT use shell for this.\n"
+            "- Run shell commands ONLY when you need process output (ps, curl, git, etc).\n"
+            "- Send a Telegram message: use http_request() to POST\n"
+            "    https://api.telegram.org/bot<TOKEN>/sendMessage\n"
+            "    body={'chat_id': <id>, 'text': <msg>}\n"
+            "  Get <TOKEN> via secret_get('telegram_token') OR self_config('telegram:bot_token').\n"
+            "  Get chat_id from memory_search('telegram chat') if you saved it, or use\n"
+            "  secret_get('telegram_chat_id'). There is NO `telegram_send` tool — use http_request.\n"
+            "- Need an extended tool (mcp, schedule, notes, etc)? Call tool_search('<keyword>')\n"
+            "  FIRST to unlock it, THEN call the tool. Don't guess tool names.\n"
+            "- Save a result for later runs: memory_save({text, tag:'cron-result'}).\n"
+            "\n"
+            "Final reply rules:\n"
+            "- If the task is a reminder ('remind me', 'напомни'): just return the reminder text.\n"
+            "- If the task sends/posts/notifies: the final reply MUST confirm delivery\n"
+            "  (e.g. 'Sent.', 'Отправлено.', 'message_id=42'). Dry-run validation checks for this.\n"
+            "- Keep the final reply under 200 words. Summarise, don't paste full logs back."
         )},
         {"role": "user", "content": task_desc},
     ]
@@ -521,7 +546,9 @@ def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
                 tools=all_tools,
                 tool_choice="auto",
                 temperature=0.5,
-                max_tokens=1024,
+                # 2048: 1024 was clipping mid-reply on summary tasks where the
+                # final turn included paraphrased log lines plus a confirmation.
+                max_tokens=2048,
             )
         except Exception as e:
             _log.error(f"cron LLM call failed: {e}", exc_info=True)
