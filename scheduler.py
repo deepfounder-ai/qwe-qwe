@@ -59,7 +59,8 @@ def _ensure_table():
             last_status TEXT,
             last_error TEXT,
             last_duration_ms INTEGER,
-            last_result TEXT
+            last_result TEXT,
+            thread_id TEXT
         )
     """)
 
@@ -107,13 +108,35 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
             }
         _log.info(f"dry-run passed for '{name}': {dry_result[:100]}")
 
+    # One thread per routine, created at save time and reused on every
+    # firing. System tasks (heartbeat, synthesis) and quick reminders
+    # don't get a thread — they're stateless and noise to surface as
+    # chat logs.
+    routine_thread_id: str | None = None
+    if _is_routine(task):
+        try:
+            import threads
+            t = threads.create(f"Routine · {name}", meta={
+                "kind": "routine",
+                "routine_name": name,
+                "schedule": schedule,
+                "created_at": time.time(),
+            })
+            routine_thread_id = t["id"]
+        except Exception as e:
+            _log.warning(f"failed to create routine thread for '{name}': {e}")
+
     db.execute(
-        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,?,1)",
-        (name, task, schedule, next_run, 1 if repeat else 0)
+        "INSERT INTO scheduled_tasks "
+        "(name, task, schedule, next_run, repeat, enabled, thread_id) "
+        "VALUES (?,?,?,?,?,1,?)",
+        (name, task, schedule, next_run, 1 if repeat else 0, routine_thread_id)
     )
 
     dt = datetime.fromtimestamp(next_run, _tz()).strftime("%H:%M:%S")
     result = {"ok": True, "name": name, "next_run": dt, "repeat": bool(repeat)}
+    if routine_thread_id:
+        result["thread_id"] = routine_thread_id
     if not skip_dry_run:
         result["dry_run"] = "passed"
         result["preview"] = dry_result[:200]
@@ -255,12 +278,14 @@ def list_tasks() -> list[dict]:
     _ensure_table()
     rows = db.fetchall(
         "SELECT id, name, task, schedule, next_run, last_run, repeat, enabled, "
-        "       run_count, last_status, last_error, last_duration_ms, last_result "
+        "       run_count, last_status, last_error, last_duration_ms, last_result, "
+        "       thread_id "
         "FROM scheduled_tasks ORDER BY next_run"
     )
     tasks = []
     for (id_, name, task, schedule, next_run, last_run, repeat, enabled,
-         run_count, last_status, last_error, last_duration_ms, last_result) in rows:
+         run_count, last_status, last_error, last_duration_ms, last_result,
+         thread_id) in rows:
         next_dt = datetime.fromtimestamp(next_run, _tz()).strftime("%Y-%m-%d %H:%M")
         last_dt = (datetime.fromtimestamp(last_run, _tz()).strftime("%Y-%m-%d %H:%M")
                     if last_run else "")
@@ -282,18 +307,31 @@ def list_tasks() -> list[dict]:
             "last_error": last_error or "",
             "last_duration_ms": int(last_duration_ms or 0),
             "last_result": (last_result or "")[:200],
+            # thread_id: the routine's permanent chat thread. UI links the
+            # routine card to this so users can scroll through past runs.
+            "thread_id": thread_id or "",
         })
     return tasks
 
 
 def remove(task_id: int) -> str:
     _ensure_table()
-    row = db.fetchone("SELECT name FROM scheduled_tasks WHERE id=?", (task_id,))
+    row = db.fetchone("SELECT name, thread_id FROM scheduled_tasks WHERE id=?",
+                       (task_id,))
     if not row:
         return f"✗ Task #{task_id} not found"
-    if row[0] == HEARTBEAT_TASK_NAME:
+    name, thread_id = row
+    if name == HEARTBEAT_TASK_NAME:
         return f"✗ Heartbeat task cannot be removed. Use settings to disable it."
     db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
+    # Archive the routine's chat thread so the UI drops it from the active
+    # list but history is still accessible for "recent runs" digests.
+    if thread_id:
+        try:
+            import threads as _threads
+            _threads.archive(thread_id)
+        except Exception as e:
+            _log.debug(f"thread archive failed for routine {task_id}: {e}")
     return f"✓ Task #{task_id} removed"
 
 
@@ -414,11 +452,12 @@ def _check_and_run():
     now = time.time()
 
     rows = db.fetchall(
-        "SELECT id, name, task, schedule, repeat FROM scheduled_tasks WHERE enabled=1 AND next_run<=?",
+        "SELECT id, name, task, schedule, repeat, thread_id FROM scheduled_tasks "
+        "WHERE enabled=1 AND next_run<=?",
         (now,)
     )
 
-    for id_, name, task, schedule, repeat in rows:
+    for id_, name, task, schedule, repeat, thread_id in rows:
         # Pre-reschedule to prevent duplicate execution if task takes >30s
         if repeat:
             _, interval = _parse_schedule(schedule)
@@ -438,7 +477,19 @@ def _check_and_run():
         result = ""
         error_msg = None
         try:
-            result = _execute_task(task)
+            # Routines (user-created repeating jobs) run through agent.run
+            # in their permanent thread — every firing appends a new turn
+            # there, so the thread grows into a chat log of all runs.
+            # System jobs (heartbeat/synthesis) and reminders keep the fast
+            # stateless path.
+            if _is_routine(task):
+                # Legacy rows (created before migration 004) have NULL
+                # thread_id — lazy-create one now and stamp back.
+                if not thread_id:
+                    thread_id = _ensure_routine_thread(id_, name, schedule)
+                result = _execute_routine(task, name, id_, thread_id)
+            else:
+                result = _execute_task(task)
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
             _log.warning(f"cron crashed: #{id_} '{name}' → {error_msg}", exc_info=True)
@@ -468,6 +519,69 @@ def _check_and_run():
             )
         else:
             db.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
+
+
+def _is_routine(task_desc: str) -> bool:
+    """True if this is a user-created routine (runs through agent.run in a
+    dedicated thread), False for system tasks (heartbeat, synthesis) and
+    trivial reminders which keep the fast stateless path."""
+    if task_desc == HEARTBEAT_TASK_NAME:
+        return False
+    if task_desc == SYNTHESIS_TASK_NAME:
+        return False
+    low = task_desc.lower()
+    reminder_markers = ("remind", "напомни", "напоминание", "напомнить",
+                        "выпить", "drink", "stretch", "break")
+    if any(m in low for m in reminder_markers) and len(task_desc) < 200:
+        return False
+    return True
+
+
+def _ensure_routine_thread(cron_id: int, routine_name: str, schedule: str) -> str:
+    """Back-fill a thread for a routine that predates migration 004.
+
+    Routines created before v0.17.30 were saved without a thread_id
+    column. On first post-migration firing we create one, stamp it
+    back, and return it. Empty string on failure → caller falls back
+    to agent.run's default active thread (ugly but non-fatal).
+    """
+    try:
+        import threads
+        t = threads.create(f"Routine · {routine_name}", meta={
+            "kind": "routine",
+            "routine_name": routine_name,
+            "schedule": schedule,
+            "backfilled": True,
+        })
+        tid = t["id"]
+        db.execute("UPDATE scheduled_tasks SET thread_id=? WHERE id=?",
+                   (tid, cron_id))
+        _log.info(f"back-filled thread_id for routine #{cron_id} '{routine_name}' → {tid}")
+        return tid
+    except Exception as e:
+        _log.warning(f"routine #{cron_id}: thread back-fill failed: {e}")
+        return ""
+
+
+def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
+                      thread_id: str) -> str:
+    """Run a routine firing through agent.run inside its permanent thread.
+
+    Each firing appends a fresh user → assistant turn to ``thread_id``,
+    so the thread grows into a chat log of all past runs. Users see this
+    as a normal conversation when they open the routine card.
+
+    Returns the reply text. Exceptions propagate to `_check_and_run`
+    which logs and marks the run as failed.
+    """
+    import agent
+    from turn_context import TurnContext
+
+    # Headless ctx — no WS client to stream to; messages persist via
+    # agent.run's own db.save_message calls.
+    ctx = TurnContext(source="routine")
+    result = agent.run(task_desc, thread_id=thread_id, source="routine", ctx=ctx)
+    return getattr(result, "reply", "") or ""
 
 
 def _execute_task(task_desc: str, max_rounds: int = 10) -> str:

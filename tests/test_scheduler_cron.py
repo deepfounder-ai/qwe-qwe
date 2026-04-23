@@ -84,9 +84,13 @@ def test_list_tasks_returns_zeroed_metrics_for_fresh_task(fresh_scheduler):
 def test_check_and_run_stamps_metrics_on_success(fresh_scheduler, monkeypatch):
     """A successful execution increments run_count + sets last_status=ok."""
     sched = fresh_scheduler
-    # Mock the heavy LLM execution with a fast success
+    # Mock both execution paths — routine (agent.run) + stateless
+    # (_execute_task). "send status" is a routine task, so this test's
+    # subject is the routine path; the other stub exists as insurance.
     monkeypatch.setattr(sched, "_execute_task",
                          lambda task, max_rounds=10: "Task done. Sent summary.")
+    monkeypatch.setattr(sched, "_execute_routine",
+                         lambda task, name, cron_id, thread_id: "Task done. Sent summary.")
 
     sched.add("ping", "send status", "every 1h", skip_dry_run=True)
 
@@ -109,10 +113,14 @@ def test_check_and_run_stamps_error_on_exception(fresh_scheduler, monkeypatch):
     """A crashing task → last_status=err + last_error captured, run_count still bumped."""
     sched = fresh_scheduler
 
-    def _boom(task, max_rounds=10):
+    def _boom(*_a, **_kw):
         raise RuntimeError("network is on fire")
 
+    # Both execution paths must explode consistently — "do stuff" is a
+    # routine task, but tests other routing (reminders etc) by tag
+    # would hit _execute_task.
     monkeypatch.setattr(sched, "_execute_task", _boom)
+    monkeypatch.setattr(sched, "_execute_routine", _boom)
 
     sched.add("broken", "do stuff", "every 1h", skip_dry_run=True)
     import db
@@ -131,8 +139,11 @@ def test_check_and_run_stamps_error_on_exception(fresh_scheduler, monkeypatch):
 def test_check_and_run_stamps_error_when_output_looks_like_error(fresh_scheduler, monkeypatch):
     """Task returned text that matches a failure marker → err."""
     sched = fresh_scheduler
+    faulty_output = "Traceback (most recent call last):\n  File …"
     monkeypatch.setattr(sched, "_execute_task",
-                         lambda task, max_rounds=10: "Traceback (most recent call last):\n  File …")
+                         lambda task, max_rounds=10: faulty_output)
+    monkeypatch.setattr(sched, "_execute_routine",
+                         lambda task, name, cron_id, thread_id: faulty_output)
 
     sched.add("fragile", "x", "every 1h", skip_dry_run=True)
     import db
@@ -195,6 +206,55 @@ def test_send_task_without_confirmation_offers_skip(fresh_scheduler):
 
 
 # ── Migration back-compat ─────────────────────────────────────────────
+
+
+def test_routine_gets_dedicated_thread_on_create(fresh_scheduler):
+    """Adding a real routine creates a permanent thread for it.
+
+    v0.17.30 shift: one routine = one thread. The thread_id is stamped
+    at save time and returned so the UI can link the routine card to
+    it. Every firing reuses this thread_id.
+    """
+    sched = fresh_scheduler
+    r = sched.add("digest", "summarise my inbox daily",
+                  "daily 09:00", skip_dry_run=True)
+    assert r.get("ok") is True
+    assert r.get("thread_id"), "routine must be bound to a thread at save time"
+    assert r["thread_id"].startswith("t_"), "thread_id must look like a real thread id"
+
+    # list_tasks exposes the same thread_id so the UI can deep-link
+    entry = next(t for t in sched.list_tasks() if t["name"] == "digest")
+    assert entry["thread_id"] == r["thread_id"]
+
+
+def test_routine_thread_persists_across_multiple_firings(fresh_scheduler, monkeypatch):
+    """Every firing appends to the SAME thread; the thread_id never changes.
+
+    Two synthetic firings → thread_id stays stable → routine view shows
+    a growing chat log, not a pile of disconnected threads.
+    """
+    sched = fresh_scheduler
+    # Stub out the LLM-heavy routine execution
+    monkeypatch.setattr(sched, "_execute_routine",
+                         lambda task, name, cron_id, thread_id: "ok run")
+
+    r = sched.add("daily digest", "run a digest", "every 1h", skip_dry_run=True)
+    original_tid = r["thread_id"]
+    assert original_tid
+
+    # Force due + fire twice
+    import db
+    import time as _t
+    for _ in range(2):
+        db.execute("UPDATE scheduled_tasks SET next_run=? WHERE name=?",
+                   (_t.time() - 10, "daily digest"))
+        sched._check_and_run()
+
+    entry = next(t for t in sched.list_tasks() if t["name"] == "daily digest")
+    assert entry["thread_id"] == original_tid, (
+        "thread_id must be stable across firings (one routine = one thread)"
+    )
+    assert entry["run_count"] == 2
 
 
 def test_legacy_schema_heals_via_ensure_table(qwe_temp_data_dir):

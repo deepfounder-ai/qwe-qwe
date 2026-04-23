@@ -2766,6 +2766,7 @@ async function loadCron() {
       lastResult: j.last_result || '',
       runs: typeof j.run_count === 'number' ? j.run_count : (j.runs || 0),
       hits: j.recent || null,
+      threadId: j.thread_id || '',        // permanent thread for this routine
     }));
     render();
   } catch { state.cronJobs = []; render(); }
@@ -2777,58 +2778,83 @@ async function loadCron() {
 }
 
 function openNewCronModal() {
-  // Schedule syntax is the qwe-qwe scheduler's own DSL, NOT 5-field cron.
-  // Supported formats (see scheduler._parse_schedule):
-  //   in 5m / in 2h / in 30s     — one-off relative
-  //   every 30m / every 2h       — repeat every N units
-  //   daily HH:MM                — every day at that time
-  //   HH:MM                      — one-off today/tomorrow at that time
-  const presets = [
-    { label: 'Every hour',     expr: 'every 1h' },
-    { label: 'Every 4 hours',  expr: 'every 4h' },
-    { label: 'Daily at 9am',   expr: 'daily 09:00' },
-    { label: 'Nightly at 3am', expr: 'daily 03:00' },
-    { label: 'In 30 min',      expr: 'in 30m' },
-    { label: 'In 2 hours',     expr: 'in 2h' },
-  ];
+  // Schedule DSL understood by scheduler._parse_schedule:
+  //   in 5m / in 2h            — one-off relative
+  //   every 30m / every 2h     — repeat every N units
+  //   daily HH:MM              — every day at that time
+  //   HH:MM                    — one-off today/tomorrow at that time
+  // The UI here exposes a "Frequency" dropdown mapped to those formats.
   const body =
-    '<div class="field"><div class="label">Name</div><input type="text" id="cr-name" placeholder="Daily brief" autofocus></div>' +
-    '<div class="field"><div class="label">Schedule</div><input type="text" id="cr-schedule" class="mono" placeholder="daily 09:00"><div class="hint">Formats: <span class="mono">in 5m</span> · <span class="mono">every 2h</span> · <span class="mono">daily 09:00</span> · <span class="mono">14:30</span></div></div>' +
-    '<div class="field"><div class="label">Presets</div>' +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">' +
-        presets.map(p => '<button class="chip" data-cr-preset="' + esc(p.expr) + '">' + esc(p.label) + '</button>').join('') +
-      '</div></div>' +
-    '<div class="field"><div class="label">Task prompt</div><textarea id="cr-task" placeholder="e.g. Check GitHub notifications, summarize, and DM me on Telegram if anything looks urgent."></textarea></div>' +
-    '<div class="field"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer"><input type="checkbox" id="cr-skip-dryrun" style="margin-top:3px"><div><div style="font-size:13px;color:var(--fg-2)">Skip validation</div>' +
-      '<div class="hint" style="margin-top:2px">By default the scheduler runs your task once right now through the LLM to check it works — this takes 20-60s and has <b>real side effects</b> (sends messages, writes files, etc.). Skip if the task is trivial or you don\'t want the side effect.</div></div></label></div>';
+    '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;background:var(--surface-2);border:1px solid var(--line-2);margin-bottom:16px;font-size:12px;color:var(--fg-3)">' +
+      ico('shield', 13) + '<span>Local routines only run while your computer is awake.</span>' +
+    '</div>' +
+    '<div class="field"><div class="label">Name <span style="color:var(--err)">*</span></div>' +
+      '<input type="text" id="cr-name" placeholder="daily-code-review" autofocus></div>' +
+    '<div class="field"><div class="label">Description <span style="color:var(--err)">*</span></div>' +
+      '<input type="text" id="cr-desc" placeholder="Review yesterday\'s commits and flag anything concerning"></div>' +
+    '<div class="field"><div class="label">Task prompt</div>' +
+      '<textarea id="cr-task" rows="5" placeholder="Long-form instructions for the agent. Paths, tools, and expected final output if it matters. e.g. &#10;&#10;Look at the commits from the last 24 hours. Summarise what changed, call out any risky patterns or missing tests, and note anything worth following up on."></textarea></div>' +
+    '<div class="field"><div class="label">Frequency</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 120px;gap:8px;align-items:start">' +
+        '<select class="setting-input mono" id="cr-freq">' +
+          '<option value="daily">Daily</option>' +
+          '<option value="hourly">Hourly</option>' +
+          '<option value="every2h">Every 2 hours</option>' +
+          '<option value="every4h">Every 4 hours</option>' +
+          '<option value="every30m">Every 30 minutes</option>' +
+          '<option value="once-in">Once, in…</option>' +
+          '<option value="custom">Custom (raw DSL)</option>' +
+        '</select>' +
+        '<input type="time" id="cr-time" class="mono" value="09:00">' +
+      '</div>' +
+      '<div class="hint" id="cr-schedule-preview" style="margin-top:6px;font-family:var(--font-mono);color:var(--fg-4)">= daily 09:00</div>' +
+      '<input type="text" id="cr-custom" class="mono" placeholder="e.g. every 90m" style="display:none;margin-top:8px">' +
+    '</div>' +
+    '<div class="hint" style="font-size:11px;color:var(--fg-5);margin-top:-4px">Scheduled routines use a small randomised delay (a few minutes) so server load stays even.</div>' +
+    '<div class="field" style="margin-top:14px"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer"><input type="checkbox" id="cr-skip-dryrun" style="margin-top:3px"><div><div style="font-size:13px;color:var(--fg-2)">Skip validation</div>' +
+      '<div class="hint" style="margin-top:2px">By default the scheduler runs your task once right now through the LLM to check it works — this takes 20-60s and has <b>real side effects</b>. Skip for trivial tasks or to avoid the dry-run side effect.</div></div></label></div>';
+  // Frequency-picker → raw scheduler DSL.
+  const freqToDSL = (freq, timeStr, custom) => {
+    if (freq === 'custom') return (custom || '').trim();
+    if (freq === 'daily') return 'daily ' + (timeStr || '09:00');
+    if (freq === 'hourly') return 'every 1h';
+    if (freq === 'every2h') return 'every 2h';
+    if (freq === 'every4h') return 'every 4h';
+    if (freq === 'every30m') return 'every 30m';
+    if (freq === 'once-in') return 'in 1h'; // simple default; user can tweak via custom
+    return '';
+  };
+
   openModal({
-    title: 'New scheduled job',
+    title: 'New routine',
     body,
     wide: true,
     actions: [
       { label: 'Cancel' },
       { label: 'Create', primary: true, busyLabel: 'Creating… (running dry-run)', onClick: async () => {
           const name = document.getElementById('cr-name').value.trim();
-          const schedule = document.getElementById('cr-schedule').value.trim();
+          const desc = document.getElementById('cr-desc').value.trim();
           const task = document.getElementById('cr-task').value.trim();
+          const freq = document.getElementById('cr-freq').value;
+          const timeStr = document.getElementById('cr-time').value;
+          const custom = document.getElementById('cr-custom').value;
+          const schedule = freqToDSL(freq, timeStr, custom);
           const skipEl = document.getElementById('cr-skip-dryrun');
           const skip = skipEl.checked;
-          if (!name || !schedule || !task) { toast('name, schedule, task required', 'err'); return false; }
+
+          if (!name) { toast('name is required', 'err'); return false; }
+          if (!desc) { toast('description is required', 'err'); return false; }
+          if (!schedule) { toast('frequency is required', 'err'); return false; }
+          // Fall back to description if no long task prompt — matches UI
+          // semantics of "description = one-liner, task prompt = details".
+          const finalTask = task || desc;
+
           let r;
-          try { r = await api('/api/cron', { method: 'POST', body: { name, schedule, task, skip_dry_run: skip } }); }
+          try { r = await api('/api/cron', { method: 'POST', body: { name, schedule, task: finalTask, skip_dry_run: skip } }); }
           catch { toast('create failed — server error', 'err'); return false; }
-          // Server signals failure with { error: "..." } — don't close the
-          // modal, show the error so the user can fix and retry.
           if (r && r.error) {
-            // Server offers the user a "save anyway" escape hatch when
-            // dry-run failed but the task might still be correct (e.g.
-            // complex task that hit the round cap while exploring).
-            // Auto-check the Skip-validation box and highlight it — user's
-            // next click on Create will save without re-running dry-run.
             if (r.offer_skip && !skip) {
               skipEl.checked = true;
-              // Visual nudge — flash the checkbox label border so the user
-              // notices what changed.
               const lbl = skipEl.closest('label');
               if (lbl) {
                 lbl.style.outline = '2px solid var(--warn)';
@@ -2843,16 +2869,29 @@ function openNewCronModal() {
             }
             return false;
           }
-          toast('job created · next: ' + (r.next_run || '?'));
+          toast('routine created · next: ' + (r.next_run || '?'));
           loadCron();
+          loadThreads({ silent: true });  // the new routine's thread appears in the list
       }},
     ],
   });
-  // Preset clicks fill schedule field
+  // Wire up live preview of the effective schedule + toggle custom field
   setTimeout(() => {
-    document.querySelectorAll('[data-cr-preset]').forEach(b => {
-      b.onclick = (e) => { e.preventDefault(); const sc = document.getElementById('cr-schedule'); if (sc) sc.value = b.dataset.crPreset; };
-    });
+    const freqEl = document.getElementById('cr-freq');
+    const timeEl = document.getElementById('cr-time');
+    const customEl = document.getElementById('cr-custom');
+    const preview = document.getElementById('cr-schedule-preview');
+    const refresh = () => {
+      const dsl = freqToDSL(freqEl.value, timeEl.value, customEl.value);
+      if (preview) preview.textContent = '= ' + (dsl || '—');
+      // Time picker only relevant for daily; hide for others
+      timeEl.style.visibility = (freqEl.value === 'daily') ? 'visible' : 'hidden';
+      customEl.style.display = (freqEl.value === 'custom') ? '' : 'none';
+    };
+    if (freqEl) freqEl.onchange = refresh;
+    if (timeEl) timeEl.oninput = refresh;
+    if (customEl) customEl.oninput = refresh;
+    refresh();
   }, 40);
 }
 
@@ -2932,7 +2971,7 @@ function renderRail() {
   const items = [
     { id: 'chat', icon: 'chat', label: 'Threads' },
     { id: 'memory', icon: 'brain', label: 'Memory' },
-    { id: 'scheduler', icon: 'clock', label: 'Scheduler' },
+    { id: 'scheduler', icon: 'clock', label: 'Routines' },
     { id: 'presets', icon: 'package', label: 'Presets' },
   ];
   const bottom = [{ id: 'settings', icon: 'settings', label: 'Settings' }];
@@ -3678,53 +3717,77 @@ function renderSchedulerView() {
           '</span>').join('') +
       '</div>'
     : '';
+  // Human-friendly schedule label — "Every day at ~9:00" style.
+  // Parses the scheduler DSL (every Nh, daily HH:MM, in Nh, HH:MM) into
+  // a natural English summary for the card's subtitle line.
+  const scheduleHuman = (s) => {
+    const t = (s || '').trim().toLowerCase();
+    let m;
+    if ((m = t.match(/^daily\s+(\d{1,2}):(\d{2})$/))) return `Every day at ~${m[1]}:${m[2]}`;
+    if ((m = t.match(/^every\s+(\d+)\s*(s|m|h)$/))) {
+      const unit = { s: 'second', m: 'minute', h: 'hour' }[m[2]];
+      const n = parseInt(m[1], 10);
+      return `Every ${n === 1 ? '' : n + ' '}${unit}${n === 1 ? '' : 's'}`;
+    }
+    if ((m = t.match(/^in\s+(\d+)\s*(s|m|h)$/))) {
+      const unit = { s: 'second', m: 'minute', h: 'hour' }[m[2]];
+      return `Once, in ${m[1]} ${unit}${m[1] === '1' ? '' : 's'}`;
+    }
+    if ((m = t.match(/^(\d{1,2}):(\d{2})$/))) return `Once at ~${m[1]}:${m[2]}`;
+    return s;
+  };
+
+  // Split system tasks (heartbeat, synthesis) off from user routines —
+  // they're infrastructure, not user-facing routines. Show count only.
+  const sysJobs = jobs.filter(j => j.name && j.name.startsWith('__'));
+  const userJobs = jobs.filter(j => !j.name || !j.name.startsWith('__'));
+  const activeUser = userJobs.filter(j => j.status === 'active').length;
+
   return '<div class="scroll-col"><div class="inner-wide">' +
     '<div class="page-hdr"><div class="copy">' +
-      '<div class="eyebrow">SCHEDULER · ' + jobs.length + ' jobs · ' + active + ' active</div>' +
-      '<h1>Scheduled work</h1>' +
-      '<p class="sub">Cron-triggered workflows that run in the background. Results stream into threads just like any other turn.</p>' +
-    '</div><button class="page-primary" data-act="new-cron">' + ico('plusSmall', 12) + ' New job</button></div>' +
+      '<div class="eyebrow">ROUTINES · ' + userJobs.length + ' total · ' + activeUser + ' active' +
+        (sysJobs.length ? ' · ' + sysJobs.length + ' system' : '') + '</div>' +
+      '<h1>Routines</h1>' +
+      '<p class="sub">Templated tasks that run on schedule. Each routine has its own chat thread — every run streams in as a new turn with full tool-call history.</p>' +
+    '</div><button class="page-primary" data-act="new-cron">' + ico('plusSmall', 12) + ' New routine</button></div>' +
+
+    // Awake-only banner — borrowed from Claude Routines, sets correct
+    // expectation: qwe-qwe is local-first, no cloud cron daemon.
+    '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;background:var(--surface);border:1px solid var(--line-2);margin:18px 0 12px;font-size:12px;color:var(--fg-3)">' +
+      ico('shield', 14) + '<span>Local routines only run while your computer is awake.</span>' +
+    '</div>' +
+
     '<div class="stats-row">' +
-      '<div class="stat"><div class="lbl">ACTIVE</div><div class="v" style="color:var(--ok)">' + active + '</div><div class="sub">' + paused + ' paused</div></div>' +
+      '<div class="stat"><div class="lbl">ACTIVE</div><div class="v" style="color:var(--ok)">' + activeUser + '</div><div class="sub">' + (userJobs.length - activeUser) + ' paused</div></div>' +
       '<div class="stat"><div class="lbl">TOTAL RUNS</div><div class="v">' + totalRuns.toLocaleString() + '</div><div class="sub">all time</div></div>' +
-      '<div class="stat"><div class="lbl">NEXT</div><div class="v" style="font-size:20px;line-height:1.4">' + esc((jobs.find(j=>j.next)||{}).next || '—') + '</div><div class="sub">upcoming</div></div>' +
-      '<div class="stat"><div class="lbl">LAST ERRORS</div><div class="v" style="color:' + (errRuns ? 'var(--err)' : 'var(--fg-3)') + '">' + errRuns + '</div><div class="sub">' + (errRuns ? 'failing jobs' : 'all healthy') + '</div></div>' +
+      '<div class="stat"><div class="lbl">NEXT</div><div class="v" style="font-size:20px;line-height:1.4">' + esc((userJobs.find(j=>j.next)||{}).next || '—') + '</div><div class="sub">upcoming</div></div>' +
+      '<div class="stat"><div class="lbl">LAST ERRORS</div><div class="v" style="color:' + (errRuns ? 'var(--err)' : 'var(--fg-3)') + '">' + errRuns + '</div><div class="sub">' + (errRuns ? 'failing routines' : 'all healthy') + '</div></div>' +
     '</div>' +
     runningStrip +
     '<div class="card-grid">' +
-      jobs.map(j => {
+      userJobs.map(j => {
         const errLast = j.lastStatus === 'err' || (j.last || '').toLowerCase().startsWith('err');
-        const hits = Array.isArray(j.hits) ? j.hits.slice(-15) : null;
-        // Only render heatmap if the server returned real run history; otherwise skip misleading squares.
-        const heatmap = (hits && hits.length)
-          ? '<div class="heatmap" title="Recent runs — rightmost = most recent. Orange = last ' + Math.min(3, hits.length) + ' runs.">' +
-              hits.map((h,i) => '<div class="cell ' + (h ? (i > hits.length - 3 ? 'recent' : 'hit') : '') + '"></div>').join('') +
-            '</div>'
-          : '';
-        const taskPreview = j.task
-          ? '<div style="font-size:12px;color:var(--fg-3);line-height:1.5;margin-bottom:10px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(j.task) + '</div>'
-          : '';
-        return '<div class="job-card">' +
+        const hasThread = !!j.threadId;
+        const schedLine = scheduleHuman(j.cron);
+        const nextLine = j.next ? ' · Next run ' + esc(j.next) : '';
+        // Click-to-open: whole card is an anchor to the routine's thread.
+        // Delete button stops propagation so it doesn't navigate-on-delete.
+        return '<div class="job-card"' + (hasThread ? ' data-open-thread="' + esc(j.threadId) + '" style="cursor:pointer"' : '') + '>' +
           '<div class="job-hdr"><div style="flex:1">' +
             '<div class="job-title-row">' +
-              '<span class="status-dot ' + (j.status === 'active' ? 'ok' : '') + '"></span>' +
+              '<span class="status-dot ' + (j.status === 'active' ? 'ok' : '') + (errLast ? ' err' : '') + '"></span>' +
               '<span class="job-title">' + esc(j.name) + '</span>' +
-              (j.repeat ? '<span class="tag" style="margin-left:4px">repeat</span>' : '<span class="tag accent" style="margin-left:4px">once</span>') +
             '</div>' +
-            '<span class="job-cron">' + esc(j.cron) + '</span></div>' +
+            '<span class="job-cron">' + esc(schedLine) + nextLine + '</span></div>' +
             '<div style="display:flex;gap:2px;opacity:0.5">' +
-              '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="delete" title="Delete">' + ico('trash', 11) + '</button>' +
+              '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="delete" title="Delete routine (archives the thread)">' + ico('trash', 11) + '</button>' +
             '</div></div>' +
-          taskPreview +
-          heatmap +
-          '<div class="kv-grid" style="font-size:11px">' +
-            '<span class="k">next</span><span class="v">' + esc(j.next || '—') + '</span>' +
-            (j.lastRun ? '<span class="k">last run</span><span class="v mono">' + esc(j.lastRun) + '</span>' : '') +
-            (j.last ? '<span class="k">status</span><span class="v" style="color:' + (errLast ? 'var(--err)' : 'var(--ok)') + '">' + esc(j.last) + '</span>' : '') +
-            '<span class="k">runs</span><span class="v">' + (j.runs||0).toLocaleString() + '</span>' +
-          '</div></div>';
+          (j.last
+            ? '<div style="font-size:11px;color:' + (errLast ? 'var(--err)' : 'var(--fg-4)') + ';margin-top:6px;font-family:var(--font-mono)">last ' + esc(j.last) + ' · ' + (j.runs||0).toLocaleString() + ' runs</div>'
+            : '<div style="font-size:11px;color:var(--fg-5);margin-top:6px;font-family:var(--font-mono)">not run yet</div>') +
+          '</div>';
       }).join('') +
-      (!jobs.length ? '<div style="grid-column:1/-1;padding:60px 0;text-align:center;color:var(--fg-4)">No scheduled jobs yet.</div>' : '') +
+      (!userJobs.length ? '<div style="grid-column:1/-1;padding:60px 0;text-align:center;color:var(--fg-4)">No routines yet. Click <span class="mono">New routine</span> to create one.</div>' : '') +
     '</div></div></div>';
 }
 
@@ -4965,13 +5028,13 @@ function renderPalette() {
   const items = [
     { group: 'go', label: 'Go to Threads', icon: 'chat', act: () => go('chat'), kbd: ALT_MOD + ' T' },
     { group: 'go', label: 'Go to Memory', icon: 'brain', act: () => go('memory'), kbd: ALT_MOD + ' M' },
-    { group: 'go', label: 'Go to Scheduler', icon: 'clock', act: () => go('scheduler'), kbd: ALT_MOD + ' S' },
+    { group: 'go', label: 'Go to Routines', icon: 'clock', act: () => go('scheduler'), kbd: ALT_MOD + ' S' },
     { group: 'go', label: 'Go to Presets', icon: 'package', act: () => go('presets'), kbd: ALT_MOD + ' P' },
     { group: 'go', label: 'Go to Settings', icon: 'settings', act: () => go('settings'), kbd: ALT_MOD + ' ,' },
     { group: 'action', label: 'New thread', icon: 'plusSmall', act: () => newThread(), kbd: MOD + ' N' },
     { group: 'action', label: (state.inspectorOn ? 'Hide' : 'Show') + ' right-side inspector (token gauge, memories, tools)', icon: 'eye', act: () => { state.inspectorOn = !state.inspectorOn; render(); } },
     { group: 'action', label: (state.anim ? 'Pause' : 'Resume') + ' duck animations', icon: 'sparkle', act: () => { state.anim = !state.anim; render(); } },
-    { group: 'action', label: 'New scheduled job', icon: 'clock', act: () => { go('scheduler'); setTimeout(openNewCronModal, 80); } },
+    { group: 'action', label: 'New routine', icon: 'clock', act: () => { go('scheduler'); setTimeout(openNewCronModal, 80); } },
     { group: 'action', label: 'Install preset', icon: 'package', act: () => { go('presets'); setTimeout(() => document.querySelectorAll('[data-act="preset-install"]')[0]?.click(), 80); } },
     { group: 'ask', label: 'Ask: ' + (q || 'what can you do?'), icon: 'sparkle', ask: true, act: () => { go('chat'); setTimeout(() => sendMessage(q || 'what can you do?'), 60); } },
   ];
@@ -6120,13 +6183,25 @@ function wireEvents() {
   }
 
   document.querySelectorAll('[data-cron]').forEach(b => {
-    b.onclick = async () => {
+    b.onclick = async (e) => {
+      // Delete button lives INSIDE a click-to-open-thread card — don't let
+      // the click bubble up and navigate after confirming the delete.
+      e.stopPropagation();
       const id = b.dataset.cron, act = b.dataset.cronAct;
       if (act === 'delete') {
-        if (!confirm('Delete this job?')) return;
-        try { await api('/api/cron/' + id, { method: 'DELETE' }); toast('deleted'); loadCron(); }
+        if (!confirm('Delete this routine?\n\nThe routine\'s chat thread will be archived (still readable from All threads), but the routine itself will stop firing.')) return;
+        try { await api('/api/cron/' + id, { method: 'DELETE' }); toast('deleted'); loadCron(); loadThreads({ silent: true }); }
         catch { toast('delete failed', 'err'); }
       }
+    };
+  });
+  // Click on a routine card → switch to that routine's thread, go to chat.
+  document.querySelectorAll('[data-open-thread]').forEach(card => {
+    card.onclick = async () => {
+      const tid = card.dataset.openThread;
+      if (!tid) return;
+      try { await switchThread(tid); go('chat'); }
+      catch { toast('could not open thread', 'err'); }
     };
   });
   document.querySelectorAll('[data-act="new-cron"]').forEach(b => { b.onclick = openNewCronModal; });
