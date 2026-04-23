@@ -232,8 +232,53 @@ def _validate_dry_run(result: str, task_description: str) -> dict:
     return {"ok": True}
 
 
+# Day-of-week aliases used by the weekly schedule parser.
+# Python's datetime.weekday(): Monday=0 ... Sunday=6.
+_DOW = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    # Russian short names — users write schedules in their language.
+    "пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6,
+}
+_DOW_ALIASES = {
+    "weekdays": "mon,tue,wed,thu,fri",
+    "weekends": "sat,sun",
+    "будни": "mon,tue,wed,thu,fri",
+    "выходные": "sat,sun",
+}
+
+
+def _next_weekly_run(days: list[int], h: int, mi: int, now: float) -> float:
+    """Given a set of weekdays (0=Mon..6=Sun) and HH:MM, return the next
+    fire timestamp >= now. Repeat interval for weekly is always 1 week
+    (604800s) — the loop finds the next matching day each time."""
+    nowdt = datetime.fromtimestamp(now, _tz())
+    today_wd = nowdt.weekday()
+    for offset in range(8):  # 7 days ahead + today
+        candidate_wd = (today_wd + offset) % 7
+        if candidate_wd not in days:
+            continue
+        candidate = nowdt.replace(hour=h, minute=mi, second=0, microsecond=0) + \
+                    timedelta(days=offset)
+        if candidate.timestamp() > now:
+            return candidate.timestamp()
+    # Shouldn't reach here — fallback to one week from now
+    return now + 7 * 86400
+
+
 def _parse_schedule(schedule: str) -> tuple:
-    """Parse schedule string → (next_run_timestamp, repeat_seconds_or_0)."""
+    """Parse schedule string → (next_run_timestamp, repeat_seconds_or_0).
+
+    Supported grammar:
+      in 5m / in 2h / in 30s            — one-off, relative
+      every 30m / every 2h              — repeat every N units
+      every 2 days 09:00                — every N days at that time
+      daily HH:MM                       — every day at HH:MM
+      weekdays HH:MM / weekends HH:MM   — Mon-Fri / Sat-Sun at HH:MM
+      mon HH:MM                         — every Monday at HH:MM (short
+                                          names: mon tue wed thu fri sat sun)
+      mon,wed,fri HH:MM                 — any subset, comma-separated
+      HH:MM                             — one-off today/tomorrow at that time
+    """
     now = time.time()
     s = schedule.strip().lower()
 
@@ -244,15 +289,26 @@ def _parse_schedule(schedule: str) -> tuple:
         secs = val * {"s": 1, "m": 60, "h": 3600}[unit]
         return (now + secs, 0)
 
-    # "every 30m", "every 2h"
-    m = re.match(r"every\s+(\d+)\s*(s|m|h)", s)
+    # "every N days HH:MM" — check BEFORE "every Nm/h" so days/hours don't
+    # both match "every 2 d..." (they can't, but explicit ordering is safer).
+    m = re.match(r"every\s+(\d+)\s+days?\s+(\d{1,2}):(\d{2})$", s)
+    if m:
+        n, h, mi = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        today = datetime.now(_tz()).replace(hour=h, minute=mi, second=0, microsecond=0)
+        ts = today.timestamp()
+        if ts <= now:
+            ts += n * 86400
+        return (ts, n * 86400)
+
+    # "every 30m", "every 2h", "every 30s"
+    m = re.match(r"every\s+(\d+)\s*(s|m|h)$", s)
     if m:
         val, unit = int(m.group(1)), m.group(2)
         secs = val * {"s": 1, "m": 60, "h": 3600}[unit]
         return (now + secs, secs)
 
     # "daily HH:MM"
-    m = re.match(r"daily\s+(\d{1,2}):(\d{2})", s)
+    m = re.match(r"daily\s+(\d{1,2}):(\d{2})$", s)
     if m:
         h, mi = int(m.group(1)), int(m.group(2))
         today = datetime.now(_tz()).replace(hour=h, minute=mi, second=0, microsecond=0)
@@ -260,6 +316,22 @@ def _parse_schedule(schedule: str) -> tuple:
         if ts <= now:
             ts += 86400
         return (ts, 86400)
+
+    # Weekly: "weekdays HH:MM", "weekends HH:MM", "mon HH:MM",
+    # "mon,wed,fri HH:MM". Aliases expand before day parsing.
+    m = re.match(r"([a-z,а-яё]+)\s+(\d{1,2}):(\d{2})$", s)
+    if m:
+        days_spec = _DOW_ALIASES.get(m.group(1), m.group(1))
+        h, mi = int(m.group(2)), int(m.group(3))
+        day_tokens = [d.strip() for d in days_spec.split(",") if d.strip()]
+        if day_tokens and all(tok in _DOW for tok in day_tokens):
+            days = sorted({_DOW[tok] for tok in day_tokens})
+            ts = _next_weekly_run(days, h, mi, now)
+            # Weekly repeat: scheduler re-computes next fire each time via
+            # _parse_schedule, so the "interval" we return just tells the
+            # loop not to delete this as a one-off. 7 days is the natural
+            # cadence for a weekly schedule.
+            return (ts, 7 * 86400)
 
     # "HH:MM" — one-time
     m = re.match(r"(\d{1,2}):(\d{2})$", s)
@@ -460,8 +532,15 @@ def _check_and_run():
     for id_, name, task, schedule, repeat, thread_id in rows:
         # Pre-reschedule to prevent duplicate execution if task takes >30s
         if repeat:
-            _, interval = _parse_schedule(schedule)
-            next_run = now + (interval if interval else 3600)
+            # Use _parse_schedule to compute the NEXT actual fire time —
+            # important for calendar schedules (weekly Mon/Wed/Fri, every
+            # N days at HH:MM) where `now + interval` would skip over the
+            # correct next weekday.
+            next_run, interval = _parse_schedule(schedule)
+            if next_run is None:
+                # Parser rejected the schedule; fall back to 1h so the
+                # row doesn't fire in a tight loop on each scheduler tick.
+                next_run = now + 3600
             db.execute(
                 "UPDATE scheduled_tasks SET next_run=? WHERE id=?",
                 (next_run, id_)

@@ -2795,33 +2795,83 @@ function openNewCronModal() {
     '<div class="field"><div class="label">Task prompt</div>' +
       '<textarea id="cr-task" rows="5" placeholder="Long-form instructions for the agent. Paths, tools, and expected final output if it matters. e.g. &#10;&#10;Look at the commits from the last 24 hours. Summarise what changed, call out any risky patterns or missing tests, and note anything worth following up on."></textarea></div>' +
     '<div class="field"><div class="label">Frequency</div>' +
-      '<div style="display:grid;grid-template-columns:1fr 120px;gap:8px;align-items:start">' +
-        '<select class="setting-input mono" id="cr-freq">' +
-          '<option value="daily">Daily</option>' +
-          '<option value="hourly">Hourly</option>' +
-          '<option value="every2h">Every 2 hours</option>' +
-          '<option value="every4h">Every 4 hours</option>' +
-          '<option value="every30m">Every 30 minutes</option>' +
-          '<option value="once-in">Once, in…</option>' +
-          '<option value="custom">Custom (raw DSL)</option>' +
-        '</select>' +
-        '<input type="time" id="cr-time" class="mono" value="09:00">' +
+      // Mode dropdown — picks the family of schedule. Each mode shows
+      // different sub-controls below (day chips for Weekly, N input for
+      // Every, time picker for time-anchored modes).
+      '<select class="setting-input mono" id="cr-freq" style="margin-bottom:10px">' +
+        '<option value="daily">Daily</option>' +
+        '<option value="weekly">Weekly (pick days)</option>' +
+        '<option value="every-days">Every N days</option>' +
+        '<option value="every-hours">Every N hours</option>' +
+        '<option value="every-mins">Every N minutes</option>' +
+        '<option value="once">Once (today/tomorrow)</option>' +
+        '<option value="custom">Custom (raw DSL)</option>' +
+      '</select>' +
+      // Sub-controls containers — shown/hidden based on mode.
+      '<div id="cr-sub-time" style="display:flex;align-items:center;gap:10px">' +
+        '<span style="font-size:12px;color:var(--fg-3);min-width:50px">at</span>' +
+        '<input type="time" id="cr-time" class="mono" value="09:00" style="width:120px">' +
       '</div>' +
-      '<div class="hint" id="cr-schedule-preview" style="margin-top:6px;font-family:var(--font-mono);color:var(--fg-4)">= daily 09:00</div>' +
-      '<input type="text" id="cr-custom" class="mono" placeholder="e.g. every 90m" style="display:none;margin-top:8px">' +
+      '<div id="cr-sub-weekly" style="display:none">' +
+        '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px" id="cr-day-chips">' +
+          ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((d, i) =>
+            '<button type="button" class="chip" data-day="' + i + '">' + d + '</button>'
+          ).join('') +
+        '</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;font-size:11px">' +
+          '<button type="button" class="chip" data-dayset="weekdays">Weekdays</button>' +
+          '<button type="button" class="chip" data-dayset="weekends">Weekends</button>' +
+          '<button type="button" class="chip" data-dayset="all">All</button>' +
+          '<button type="button" class="chip" data-dayset="clear">Clear</button>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<span style="font-size:12px;color:var(--fg-3);min-width:50px">at</span>' +
+          '<input type="time" id="cr-time-weekly" class="mono" value="09:00" style="width:120px">' +
+        '</div>' +
+      '</div>' +
+      '<div id="cr-sub-every-days" style="display:none;align-items:center;gap:10px">' +
+        '<span style="font-size:12px;color:var(--fg-3)">every</span>' +
+        '<input type="number" id="cr-n-days" class="mono" value="2" min="1" max="90" style="width:70px">' +
+        '<span style="font-size:12px;color:var(--fg-3)">days at</span>' +
+        '<input type="time" id="cr-time-days" class="mono" value="09:00" style="width:120px">' +
+      '</div>' +
+      '<div id="cr-sub-every-hours" style="display:none;align-items:center;gap:10px">' +
+        '<span style="font-size:12px;color:var(--fg-3)">every</span>' +
+        '<input type="number" id="cr-n-hours" class="mono" value="2" min="1" max="48" style="width:70px">' +
+        '<span style="font-size:12px;color:var(--fg-3)">hours</span>' +
+      '</div>' +
+      '<div id="cr-sub-every-mins" style="display:none;align-items:center;gap:10px">' +
+        '<span style="font-size:12px;color:var(--fg-3)">every</span>' +
+        '<input type="number" id="cr-n-mins" class="mono" value="30" min="1" max="1440" style="width:70px">' +
+        '<span style="font-size:12px;color:var(--fg-3)">minutes</span>' +
+      '</div>' +
+      '<input type="text" id="cr-custom" class="mono" placeholder="e.g. every 90m, weekdays 08:30, every 2 days 14:00" style="display:none;width:100%">' +
+      '<div class="hint" id="cr-schedule-preview" style="margin-top:10px;font-family:var(--font-mono);color:var(--fg-4)">= daily 09:00</div>' +
     '</div>' +
     '<div class="hint" style="font-size:11px;color:var(--fg-5);margin-top:-4px">Scheduled routines use a small randomised delay (a few minutes) so server load stays even.</div>' +
     '<div class="field" style="margin-top:14px"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer"><input type="checkbox" id="cr-skip-dryrun" style="margin-top:3px"><div><div style="font-size:13px;color:var(--fg-2)">Skip validation</div>' +
       '<div class="hint" style="margin-top:2px">By default the scheduler runs your task once right now through the LLM to check it works — this takes 20-60s and has <b>real side effects</b>. Skip for trivial tasks or to avoid the dry-run side effect.</div></div></label></div>';
-  // Frequency-picker → raw scheduler DSL.
-  const freqToDSL = (freq, timeStr, custom) => {
-    if (freq === 'custom') return (custom || '').trim();
-    if (freq === 'daily') return 'daily ' + (timeStr || '09:00');
-    if (freq === 'hourly') return 'every 1h';
-    if (freq === 'every2h') return 'every 2h';
-    if (freq === 'every4h') return 'every 4h';
-    if (freq === 'every30m') return 'every 30m';
-    if (freq === 'once-in') return 'in 1h'; // simple default; user can tweak via custom
+  // Frequency picker state → raw scheduler DSL.
+  // ``opts`` collects every sub-control's value (time, selected days,
+  // N for every-N-days/hours/mins, custom text). The mode dropdown
+  // decides which fields are meaningful.
+  const DAY_SHORT = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+  const freqToDSL = (freq, opts) => {
+    const time = opts.time || '09:00';
+    if (freq === 'custom') return (opts.custom || '').trim();
+    if (freq === 'daily') return 'daily ' + time;
+    if (freq === 'weekly') {
+      const days = (opts.days || []).slice().sort();
+      if (!days.length) return '';  // user must pick at least one day
+      // Prefer human aliases so the DSL is readable in the card label.
+      if (days.length === 5 && days.every((d, i) => d === i)) return 'weekdays ' + time;
+      if (days.length === 2 && days[0] === 5 && days[1] === 6) return 'weekends ' + time;
+      return days.map(d => DAY_SHORT[d]).join(',') + ' ' + time;
+    }
+    if (freq === 'every-days') return 'every ' + (opts.nDays || 1) + ' days ' + time;
+    if (freq === 'every-hours') return 'every ' + (opts.nHours || 1) + 'h';
+    if (freq === 'every-mins') return 'every ' + (opts.nMins || 1) + 'm';
+    if (freq === 'once') return time;
     return '';
   };
 
@@ -2836,15 +2886,30 @@ function openNewCronModal() {
           const desc = document.getElementById('cr-desc').value.trim();
           const task = document.getElementById('cr-task').value.trim();
           const freq = document.getElementById('cr-freq').value;
-          const timeStr = document.getElementById('cr-time').value;
-          const custom = document.getElementById('cr-custom').value;
-          const schedule = freqToDSL(freq, timeStr, custom);
+          const opts = {
+            time: (freq === 'weekly'
+                    ? document.getElementById('cr-time-weekly').value
+                    : freq === 'every-days'
+                      ? document.getElementById('cr-time-days').value
+                      : document.getElementById('cr-time').value),
+            days: Array.from(document.querySelectorAll('#cr-day-chips [data-day].active'))
+                       .map(el => parseInt(el.dataset.day, 10)),
+            nDays: parseInt(document.getElementById('cr-n-days').value || '1', 10),
+            nHours: parseInt(document.getElementById('cr-n-hours').value || '1', 10),
+            nMins: parseInt(document.getElementById('cr-n-mins').value || '1', 10),
+            custom: document.getElementById('cr-custom').value,
+          };
+          const schedule = freqToDSL(freq, opts);
           const skipEl = document.getElementById('cr-skip-dryrun');
           const skip = skipEl.checked;
 
           if (!name) { toast('name is required', 'err'); return false; }
           if (!desc) { toast('description is required', 'err'); return false; }
-          if (!schedule) { toast('frequency is required', 'err'); return false; }
+          if (!schedule) {
+            if (freq === 'weekly' && !opts.days.length) toast('pick at least one weekday', 'err');
+            else toast('frequency is required', 'err');
+            return false;
+          }
           // Fall back to description if no long task prompt — matches UI
           // semantics of "description = one-liner, task prompt = details".
           const finalTask = task || desc;
@@ -2875,22 +2940,86 @@ function openNewCronModal() {
       }},
     ],
   });
-  // Wire up live preview of the effective schedule + toggle custom field
+  // Wire sub-control visibility, day-chip toggle, and live DSL preview.
   setTimeout(() => {
     const freqEl = document.getElementById('cr-freq');
-    const timeEl = document.getElementById('cr-time');
-    const customEl = document.getElementById('cr-custom');
     const preview = document.getElementById('cr-schedule-preview');
-    const refresh = () => {
-      const dsl = freqToDSL(freqEl.value, timeEl.value, customEl.value);
-      if (preview) preview.textContent = '= ' + (dsl || '—');
-      // Time picker only relevant for daily; hide for others
-      timeEl.style.visibility = (freqEl.value === 'daily') ? 'visible' : 'hidden';
-      customEl.style.display = (freqEl.value === 'custom') ? '' : 'none';
+    const customEl = document.getElementById('cr-custom');
+    const chipContainer = document.getElementById('cr-day-chips');
+
+    // Map mode → which sub-control container is visible
+    const subContainers = {
+      daily:         'cr-sub-time',
+      weekly:        'cr-sub-weekly',
+      'every-days':  'cr-sub-every-days',
+      'every-hours': 'cr-sub-every-hours',
+      'every-mins':  'cr-sub-every-mins',
+      once:          'cr-sub-time',
+      custom:        null,  // custom field is separate (always visible when mode=custom)
     };
+
+    const collectOpts = () => ({
+      time: (freqEl.value === 'weekly'
+              ? document.getElementById('cr-time-weekly').value
+              : freqEl.value === 'every-days'
+                ? document.getElementById('cr-time-days').value
+                : document.getElementById('cr-time').value),
+      days: Array.from(chipContainer.querySelectorAll('[data-day].active'))
+                 .map(el => parseInt(el.dataset.day, 10)),
+      nDays: parseInt(document.getElementById('cr-n-days').value || '1', 10),
+      nHours: parseInt(document.getElementById('cr-n-hours').value || '1', 10),
+      nMins: parseInt(document.getElementById('cr-n-mins').value || '1', 10),
+      custom: customEl.value,
+    });
+
+    const refresh = () => {
+      const mode = freqEl.value;
+      // Show/hide sub-containers
+      Object.values(subContainers).forEach(id => {
+        if (!id) return;
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+      });
+      const activeSubId = subContainers[mode];
+      if (activeSubId) {
+        const el = document.getElementById(activeSubId);
+        if (el) el.style.display = (mode === 'weekly' ? 'block' : 'flex');
+      }
+      customEl.style.display = (mode === 'custom') ? '' : 'none';
+      const dsl = freqToDSL(mode, collectOpts());
+      if (preview) preview.textContent = '= ' + (dsl || '(pick at least one day)');
+    };
+
     if (freqEl) freqEl.onchange = refresh;
-    if (timeEl) timeEl.oninput = refresh;
-    if (customEl) customEl.oninput = refresh;
+    // Wire every sub-control that can change the DSL
+    ['cr-time', 'cr-time-weekly', 'cr-time-days', 'cr-n-days',
+     'cr-n-hours', 'cr-n-mins', 'cr-custom'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.oninput = refresh;
+    });
+    // Day chips — toggle individual
+    chipContainer.querySelectorAll('[data-day]').forEach(ch => {
+      ch.onclick = (e) => { e.preventDefault(); ch.classList.toggle('active'); refresh(); };
+    });
+    // Day-set quick buttons (Weekdays / Weekends / All / Clear)
+    document.querySelectorAll('[data-dayset]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        const set = btn.dataset.dayset;
+        const chips = chipContainer.querySelectorAll('[data-day]');
+        chips.forEach((c, i) => {
+          if (set === 'weekdays') c.classList.toggle('active', i < 5);
+          else if (set === 'weekends') c.classList.toggle('active', i >= 5);
+          else if (set === 'all') c.classList.add('active');
+          else if (set === 'clear') c.classList.remove('active');
+        });
+        refresh();
+      };
+    });
+
+    // Initial: default to weekdays pre-selected when someone switches to weekly.
+    // Leave unchecked on first render — user has to click days explicitly so
+    // we don't silently create a schedule they didn't intend.
     refresh();
   }, 40);
 }
@@ -3788,7 +3917,33 @@ function renderSchedulerView() {
           '</div>';
       }).join('') +
       (!userJobs.length ? '<div style="grid-column:1/-1;padding:60px 0;text-align:center;color:var(--fg-4)">No routines yet. Click <span class="mono">New routine</span> to create one.</div>' : '') +
-    '</div></div></div>';
+    '</div>' +
+
+    // System tasks — qwe-qwe's own maintenance routines (heartbeat, nightly
+    // synthesis). Visually demoted (smaller, dimmed, no click-to-open) so
+    // they don't visually compete with user routines. Still visible so
+    // users can see run counts / status and confirm the agent is healthy.
+    (sysJobs.length
+      ? '<div style="margin-top:32px">' +
+          '<div class="eyebrow" style="margin-bottom:10px">SYSTEM · ' + sysJobs.length + ' task' + (sysJobs.length === 1 ? '' : 's') + '</div>' +
+          '<div style="display:flex;flex-direction:column;gap:6px">' +
+            sysJobs.map(j => {
+              const errLast = j.lastStatus === 'err';
+              const label = j.name.replace(/^__|__$/g, '');  // __heartbeat__ → heartbeat
+              return '<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;background:var(--surface);border:1px solid var(--line-2);font-size:12px;opacity:0.75">' +
+                '<span class="status-dot ' + (j.status === 'active' ? 'ok' : '') + (errLast ? ' err' : '') + '" style="flex-shrink:0"></span>' +
+                '<span style="font-weight:500;color:var(--fg-2);min-width:90px">' + esc(label) + '</span>' +
+                '<span class="mono" style="color:var(--fg-4);min-width:90px">' + esc(j.cron) + '</span>' +
+                '<span style="color:var(--fg-4);flex:1">next ' + esc(j.next || '—') + '</span>' +
+                (j.last
+                  ? '<span class="mono" style="color:' + (errLast ? 'var(--err)' : 'var(--fg-3)') + '">' + esc(j.last) + ' · ' + (j.runs||0).toLocaleString() + ' runs</span>'
+                  : '<span style="color:var(--fg-5)">not run yet</span>') +
+                '</div>';
+            }).join('') +
+          '</div>' +
+        '</div>'
+      : '') +
+    '</div></div>';
 }
 
 function renderPresetsView() {
