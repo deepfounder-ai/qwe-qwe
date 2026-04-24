@@ -69,6 +69,33 @@ PRESETS = {
         "key": "",
         "models": ["deepseek-chat", "deepseek-reasoner"],
     },
+    # ── Added v0.17.33 — the three most-requested external providers
+    #     that the core team doesn't run themselves ──
+    "perplexity": {
+        # Built-in web search — "sonar" models return grounded answers
+        # with citations. Unique value vs pure-LLM providers.
+        "name": "Perplexity",
+        "url": "https://api.perplexity.ai",
+        "key": "",
+        "models": ["sonar-pro", "sonar-reasoning", "sonar", "sonar-reasoning-pro"],
+    },
+    "cerebras": {
+        # Fastest hosted inference by a wide margin — Llama-3 @ ~2000 tok/s.
+        # Trade-off: smaller catalogue, no tool-call on every model.
+        "name": "Cerebras",
+        "url": "https://api.cerebras.ai/v1",
+        "key": "",
+        "models": ["llama-3.3-70b", "llama3.1-8b", "qwen-3-32b"],
+    },
+    "mistral": {
+        # European host (EU data residency) — useful when that matters.
+        # "codestral" is code-specialist; "mistral-large" the flagship.
+        "name": "Mistral",
+        "url": "https://api.mistral.ai/v1",
+        "key": "",
+        "models": ["mistral-large-latest", "mistral-small-latest",
+                   "codestral-latest", "ministral-8b-latest"],
+    },
 }
 
 # Provider capabilities — not all support all features
@@ -80,6 +107,14 @@ CAPABILITIES = {
     "groq":       {"supports_response_format": True},
     "together":   {"supports_response_format": True},
     "deepseek":   {"supports_response_format": True},
+    # Perplexity sonar models return grounded responses but don't officially
+    # support response_format — the assistant should just be asked for JSON.
+    "perplexity": {"supports_response_format": False},
+    # Cerebras supports response_format: json_object on the llama-3 models;
+    # qwen-3 variants differ. Assume supported; structured-output failure
+    # cache in agent.py will remember per-run if not.
+    "cerebras":   {"supports_response_format": True},
+    "mistral":    {"supports_response_format": True},
 }
 
 

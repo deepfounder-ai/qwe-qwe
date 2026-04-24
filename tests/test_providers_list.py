@@ -61,6 +61,26 @@ def _fake_urlopen_ok():
 # ── list_all() shape ────────────────────────────────────────────────────────
 
 
+def test_presets_include_newly_added_cloud_providers(fresh_providers):
+    """v0.17.33: Perplexity / Cerebras / Mistral — each a simple config preset."""
+    p = fresh_providers.PRESETS
+    for name in ("perplexity", "cerebras", "mistral"):
+        assert name in p, f"preset {name!r} missing from PRESETS"
+        entry = p[name]
+        assert entry["url"].startswith("https://"), f"{name} must be HTTPS"
+        assert entry["key"] == "", f"{name} must ship with empty key (user-supplied)"
+        assert entry["models"], f"{name} must list at least one default model"
+
+
+def test_new_provider_capabilities_registered(fresh_providers):
+    """Each new preset has a CAPABILITIES entry so `supports()` doesn't
+    silently default to False for everyone."""
+    caps = fresh_providers.CAPABILITIES
+    for name in ("perplexity", "cerebras", "mistral"):
+        assert name in caps, f"{name} missing from CAPABILITIES"
+        assert "supports_response_format" in caps[name]
+
+
 def test_list_all_returns_expected_shape_for_every_provider(fresh_providers, monkeypatch):
     """Each entry has the keys the Web UI reads + correct local/has_key flags."""
     # Stub pings so the test doesn't depend on whether LM Studio is running.
