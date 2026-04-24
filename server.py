@@ -2341,6 +2341,22 @@ async def delete_thread(thread_id: str):
     return {"result": threads.delete(thread_id)}
 
 
+@app.post("/api/threads/{thread_id}/folder")
+async def thread_set_folder(thread_id: str, data: dict):
+    """Move a thread to a folder. ``{folder: "Name"}`` or
+    ``{folder: null}`` / ``{folder: ""}`` to ungroup."""
+    result = threads.set_folder(thread_id, data.get("folder"))
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    return result
+
+
+@app.get("/api/folders")
+async def list_thread_folders():
+    """All distinct non-empty folder names currently in use."""
+    return {"folders": threads.list_folders()}
+
+
 @app.post("/api/threads/{thread_id}/regenerate")
 async def regenerate_turn(thread_id: str):
     """Erase the last user → assistant turn so the client can re-send a fresh prompt.

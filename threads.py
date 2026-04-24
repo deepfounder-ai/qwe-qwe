@@ -142,6 +142,52 @@ def rename(tid: str, name: str) -> str:
     return f"✓ Renamed to '{name}'"
 
 
+def set_folder(tid: str, folder: str | None) -> dict:
+    """Move a thread into a folder (string name) or ungroup (None / "").
+
+    Folders are stored inside ``threads.meta.folder`` — no separate
+    schema. The folder list in the UI is derived from ``DISTINCT
+    meta.folder`` across all threads. Empty string / None clears the
+    folder membership so the thread renders in the ungrouped section.
+    """
+    _ensure_table()
+    row = db.fetchone("SELECT meta FROM threads WHERE id=?", (tid,))
+    if not row:
+        return {"error": f"thread {tid} not found"}
+    meta = {}
+    try:
+        meta = json.loads(row[0] or "{}")
+    except Exception:
+        meta = {}
+    clean = (folder or "").strip()
+    if clean:
+        meta["folder"] = clean[:60]  # sanity cap on length
+    else:
+        meta.pop("folder", None)
+    db.execute(
+        "UPDATE threads SET meta=?, updated_at=? WHERE id=?",
+        (json.dumps(meta), time.time(), tid),
+    )
+    _log.info(f"thread {tid}: folder → {meta.get('folder') or '(none)'}")
+    return {"ok": True, "folder": meta.get("folder", "")}
+
+
+def list_folders() -> list[str]:
+    """Return distinct non-empty folder names across all non-archived threads."""
+    _ensure_table()
+    rows = db.fetchall("SELECT meta FROM threads WHERE archived=0")
+    names = set()
+    for (meta_raw,) in rows:
+        try:
+            m = json.loads(meta_raw or "{}")
+            f = (m.get("folder") or "").strip()
+            if f:
+                names.add(f)
+        except Exception:
+            pass
+    return sorted(names, key=str.lower)
+
+
 def archive(tid: str) -> str:
     """Archive a thread (hide from default list)."""
     _ensure_table()

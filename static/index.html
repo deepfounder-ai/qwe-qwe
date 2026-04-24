@@ -231,6 +231,19 @@ main.canvas { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 }
 .tl-search input { flex: 1; font-size: 11.5px; color: var(--fg); }
 .tl-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+/* Thread-list folder headers — user-defined groups. Clickable to collapse. */
+.tl-folder-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 14px 6px; cursor: pointer;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--fg-4); letter-spacing: 0.08em;
+  text-transform: uppercase;
+  user-select: none;
+}
+.tl-folder-head:hover { color: var(--fg-2); }
+.tl-folder-head .tl-chev { display: inline-flex; transition: transform 0.15s; color: var(--fg-5); }
+.tl-folder-head .tl-folder-name { flex: 1; letter-spacing: 0.05em; text-transform: none; color: var(--fg-3); font-weight: 500; font-family: var(--font-sans); font-size: 11px; }
+.tl-folder-head .tl-folder-count { color: var(--fg-5); font-variant-numeric: tabular-nums; }
 .tl-group-label {
   padding: 10px 14px 6px; font-size: 9.5px; font-family: var(--font-mono);
   color: var(--fg-4); letter-spacing: 0.1em; font-weight: 600; text-transform: uppercase;
@@ -3307,10 +3320,37 @@ function renderThreadList() {
       '</div>' +
       '<div class="tl-preview">' + esc(t.preview || t.last_message || '') + '</div>' +
       '<div class="tl-actions">' +
+        '<button class="icon-btn" data-thread-act="folder" data-id="' + esc(t.id) + '" title="Move to folder">' + ico('package', 12) + '</button>' +
         '<button class="icon-btn" data-thread-act="rename" data-id="' + esc(t.id) + '" title="Rename">' + ico('edit', 12) + '</button>' +
         '<button class="icon-btn" data-thread-act="delete" data-id="' + esc(t.id) + '" title="Delete">' + ico('trash', 12) + '</button>' +
       '</div>' +
     '</div>';
+
+  // Bucket non-pinned threads by meta.folder. Each folder is a
+  // collapsible group; threads without a folder fall under "RECENT".
+  // Collapse state persists in localStorage per folder name.
+  const collapsed = (() => {
+    try { return new Set(JSON.parse(localStorage.getItem('tl-collapsed') || '[]')); }
+    catch { return new Set(); }
+  })();
+  const groups = {};
+  for (const t of rest) {
+    const f = (t.meta && t.meta.folder) || '';
+    (groups[f] = groups[f] || []).push(t);
+  }
+  const folderNames = Object.keys(groups).filter(f => f).sort((a, b) => a.localeCompare(b));
+  const ungrouped = groups[''] || [];
+
+  const folderSection = (name, items) => {
+    const isCollapsed = collapsed.has(name);
+    return '<div class="tl-folder-head" data-folder-collapse="' + esc(name) + '">' +
+        '<span class="tl-chev" style="' + (isCollapsed ? 'transform:rotate(-90deg)' : '') + '">' + ico('arrow', 8) + '</span>' +
+        '<span class="tl-folder-name">' + esc(name) + '</span>' +
+        '<span class="tl-folder-count">' + items.length + '</span>' +
+      '</div>' +
+      (isCollapsed ? '' : items.map(row).join(''));
+  };
+
   return '<aside class="threadlist ' + (state.threadlistOpen ? 'open' : '') + '">' +
     '<div class="tl-head">' +
       '<div class="tl-head-row"><h2>Threads</h2><span class="tl-count">'+state.threads.length+'</span>' +
@@ -3320,7 +3360,10 @@ function renderThreadList() {
     '</div>' +
     '<div class="tl-list">' +
       (pinned.length ? '<div class="tl-group-label">PINNED · '+pinned.length+'</div>' + pinned.map(row).join('') : '') +
-      (rest.length ? '<div class="tl-group-label">RECENT</div>' + rest.map(row).join('') : '') +
+      folderNames.map(n => folderSection(n, groups[n])).join('') +
+      (ungrouped.length
+        ? '<div class="tl-group-label">RECENT</div>' + ungrouped.map(row).join('')
+        : '') +
       (!state.threads.length ? '<div style="padding:20px 14px;font-size:11.5px;color:var(--fg-4)">No threads yet.</div>' : '') +
     '</div>' +
     '<div class="tl-foot">' + ico('package',11,'style="color:var(--fg-4)"') + '<span>'+state.threads.length+' threads</span></div>' +
@@ -5629,7 +5672,53 @@ function wireEvents() {
           // a row over there.
           if (isRoutine) loadCron();
         } catch { toast('delete failed', 'err'); }
+      } else if (act === 'folder') {
+        // Move-to-folder modal — pick from existing folders or type a
+        // new one. Empty input = ungroup (clear meta.folder).
+        let existing = [];
+        try { const r = await api('/api/folders'); existing = r.folders || []; } catch {}
+        const currentFolder = (t && t.meta && t.meta.folder) || '';
+        const body =
+          '<div class="field"><div class="label">Folder</div>' +
+            '<input type="text" id="th-folder" list="th-folder-options" placeholder="e.g. Work · leave blank to ungroup" value="' + esc(currentFolder) + '" autofocus>' +
+            '<datalist id="th-folder-options">' +
+              existing.map(f => '<option value="' + esc(f) + '">').join('') +
+            '</datalist>' +
+            '<div class="hint" style="margin-top:6px">' +
+              (existing.length
+                ? 'Existing folders: ' + existing.map(f => '<span class="mono" style="color:var(--fg-3)">' + esc(f) + '</span>').join(', ')
+                : 'No folders yet — type a name to create one.') +
+            '</div>' +
+          '</div>';
+        openModal({
+          title: 'Move to folder', body,
+          actions: [
+            { label: 'Cancel' },
+            (currentFolder ? { label: 'Ungroup', danger: true, onClick: async () => {
+                try { await api('/api/threads/' + encodeURIComponent(id) + '/folder', { method: 'POST', body: { folder: '' } }); toast('ungrouped'); await loadThreads(); }
+                catch { toast('ungroup failed', 'err'); return false; }
+            }} : null),
+            { label: 'Save', primary: true, onClick: async () => {
+                const folder = (document.getElementById('th-folder').value || '').trim();
+                try { await api('/api/threads/' + encodeURIComponent(id) + '/folder', { method: 'POST', body: { folder } }); toast(folder ? ('moved → ' + folder) : 'ungrouped'); await loadThreads(); }
+                catch { toast('move failed', 'err'); return false; }
+            }},
+          ].filter(Boolean),
+        });
       }
+    };
+  });
+  // Folder collapse toggles
+  document.querySelectorAll('[data-folder-collapse]').forEach(h => {
+    h.onclick = () => {
+      const name = h.dataset.folderCollapse;
+      let set;
+      try { set = new Set(JSON.parse(localStorage.getItem('tl-collapsed') || '[]')); }
+      catch { set = new Set(); }
+      if (set.has(name)) set.delete(name);
+      else set.add(name);
+      try { localStorage.setItem('tl-collapsed', JSON.stringify([...set])); } catch {}
+      render();
     };
   });
   document.querySelectorAll('[data-act="new-thread"]').forEach(b => { b.onclick = newThread; });
