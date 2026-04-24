@@ -1886,13 +1886,24 @@ const handleWsMessage = (msg) => {
       if (typeof msg.text === 'string' && msg.text) s.content = msg.text;
       if (typeof msg.thinking === 'string' && msg.thinking) s.thinking = msg.thinking;
       if (Array.isArray(msg.tools) && msg.tools.length) {
-        s.tools = msg.tools.map((tc, i) => ({
-          id: tc.id || (tc.name + '-final-' + i),
-          name: tc.name || 'tool',
-          status: tc.error ? 'err' : 'ok',
-          args: tc.args || tc.input || {},
-          result: tc.result || tc.output || '',
-        }));
+        // Server's reply.tools is result.tool_calls_made — a list of name
+        // strings ("shell", "self_config", ...). Older code mapped each
+        // string through ``tc.name`` which is undefined on a string, so
+        // every reloaded tool row rendered as name="tool". Treat strings
+        // as the name directly; preserve the object shape if the server
+        // ever upgrades to sending richer per-call dicts.
+        s.tools = msg.tools.map((tc, i) => {
+          if (typeof tc === 'string') {
+            return { id: tc + '-final-' + i, name: tc, status: 'ok', args: {}, result: '' };
+          }
+          return {
+            id: tc.id || ((tc.name || 'tool') + '-final-' + i),
+            name: tc.name || 'tool',
+            status: tc.error ? 'err' : 'ok',
+            args: tc.args || tc.input || {},
+            result: tc.result || tc.output || '',
+          };
+        });
       }
       const split = splitFiles(msg.files);
       if (split.images.length) s._images = (s._images || []).concat(split.images);
