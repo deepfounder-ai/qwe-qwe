@@ -82,15 +82,20 @@ def test_list_tasks_returns_zeroed_metrics_for_fresh_task(fresh_scheduler):
 
 
 def test_check_and_run_stamps_metrics_on_success(fresh_scheduler, monkeypatch):
-    """A successful execution increments run_count + sets last_status=ok."""
+    """A successful execution increments run_count + sets last_status=ok.
+
+    _execute_routine now owns metrics updates, so we mock agent.run
+    (one layer below) and let the real metrics-update path run.
+    """
     sched = fresh_scheduler
-    # Mock both execution paths — routine (agent.run) + stateless
-    # (_execute_task). "send status" is a routine task, so this test's
-    # subject is the routine path; the other stub exists as insurance.
     monkeypatch.setattr(sched, "_execute_task",
                          lambda task, max_rounds=10: "Task done. Sent summary.")
-    monkeypatch.setattr(sched, "_execute_routine",
-                         lambda task, name, cron_id, thread_id: "Task done. Sent summary.")
+    import agent
+
+    class _FakeResult:
+        def __init__(self, r): self.reply = r
+    monkeypatch.setattr(agent, "run",
+                         lambda user_input, **kw: _FakeResult("Task done. Sent summary."))
 
     sched.add("ping", "send status", "every 1h", skip_dry_run=True)
 
@@ -116,11 +121,9 @@ def test_check_and_run_stamps_error_on_exception(fresh_scheduler, monkeypatch):
     def _boom(*_a, **_kw):
         raise RuntimeError("network is on fire")
 
-    # Both execution paths must explode consistently — "do stuff" is a
-    # routine task, but tests other routing (reminders etc) by tag
-    # would hit _execute_task.
     monkeypatch.setattr(sched, "_execute_task", _boom)
-    monkeypatch.setattr(sched, "_execute_routine", _boom)
+    import agent
+    monkeypatch.setattr(agent, "run", _boom)
 
     sched.add("broken", "do stuff", "every 1h", skip_dry_run=True)
     import db
@@ -142,8 +145,12 @@ def test_check_and_run_stamps_error_when_output_looks_like_error(fresh_scheduler
     faulty_output = "Traceback (most recent call last):\n  File …"
     monkeypatch.setattr(sched, "_execute_task",
                          lambda task, max_rounds=10: faulty_output)
-    monkeypatch.setattr(sched, "_execute_routine",
-                         lambda task, name, cron_id, thread_id: faulty_output)
+    import agent
+
+    class _FakeResult:
+        def __init__(self, r): self.reply = r
+    monkeypatch.setattr(agent, "run",
+                         lambda user_input, **kw: _FakeResult(faulty_output))
 
     sched.add("fragile", "x", "every 1h", skip_dry_run=True)
     import db
@@ -234,9 +241,14 @@ def test_routine_thread_persists_across_multiple_firings(fresh_scheduler, monkey
     a growing chat log, not a pile of disconnected threads.
     """
     sched = fresh_scheduler
-    # Stub out the LLM-heavy routine execution
-    monkeypatch.setattr(sched, "_execute_routine",
-                         lambda task, name, cron_id, thread_id: "ok run")
+    # Stub agent.run one layer below so _execute_routine's metrics-update
+    # path runs and run_count actually increments.
+    import agent
+
+    class _FakeResult:
+        def __init__(self, r): self.reply = r
+    monkeypatch.setattr(agent, "run",
+                         lambda user_input, **kw: _FakeResult("ok run"))
 
     r = sched.add("daily digest", "run a digest", "every 1h", skip_dry_run=True)
     original_tid = r["thread_id"]

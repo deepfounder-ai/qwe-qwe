@@ -615,15 +615,23 @@ def _check_and_run():
             except Exception:
                 _log.warning(f"cron callback error for #{id_}", exc_info=True)
 
-        # Finalize: metrics update for repeating tasks, delete one-offs.
+        # Finalize:
+        #   - Repeating ROUTINES get their metrics updated inside
+        #     _execute_routine (every fire source — manual Run, auto-run
+        #     on create, scheduler tick — all count the same way).
+        #   - Repeating SYSTEM tasks (heartbeat, synthesis, reminders)
+        #     don't go through _execute_routine, so we still update them
+        #     here.
+        #   - One-off tasks get deleted after execution regardless.
         if repeat:
-            db.execute(
-                "UPDATE scheduled_tasks "
-                "SET last_run=?, run_count=COALESCE(run_count,0)+1, "
-                "    last_status=?, last_error=?, last_duration_ms=?, last_result=? "
-                "WHERE id=?",
-                (now, status, error_msg, duration_ms, last_result_preview, id_),
-            )
+            if not _is_routine(task):
+                db.execute(
+                    "UPDATE scheduled_tasks "
+                    "SET last_run=?, run_count=COALESCE(run_count,0)+1, "
+                    "    last_status=?, last_error=?, last_duration_ms=?, last_result=? "
+                    "WHERE id=?",
+                    (now, status, error_msg, duration_ms, last_result_preview, id_),
+                )
         else:
             db.execute("DELETE FROM scheduled_tasks WHERE id=?", (id_,))
 
@@ -691,14 +699,16 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     """Run a routine firing through agent.run inside its permanent thread.
 
     Each firing appends a fresh user → assistant turn to ``thread_id``,
-    so the thread grows into a chat log of all past runs. Users see this
-    as a normal conversation when they open the routine card.
+    so the thread grows into a chat log of all past runs.
 
-    Held behind a per-thread lock — two concurrent fires on the same
-    thread would both save their own user message + race over the
-    assistant write, producing the "3 user messages, no reply" state
-    users have hit. The lock serialises them: second caller waits out
-    the first, then fires cleanly.
+    Held behind a per-thread lock — two concurrent fires would race over
+    the user/assistant writes. Second caller no-ops cleanly instead.
+
+    Metrics update (run_count++, last_run, last_status, last_error,
+    last_duration_ms, last_result) happens HERE for every successful
+    fire regardless of trigger source — scheduler tick, manual Run,
+    auto-fire at create. ``_check_and_run`` used to do this itself but
+    that meant manual + auto fires never incremented the counter.
 
     Returns the reply text (empty string if another fire was in progress
     and we chose to skip rather than queue).
@@ -709,19 +719,46 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     lock = _get_fire_lock(thread_id)
     # Non-blocking acquire: if another fire is already in flight for
     # this routine's thread, skip this one rather than queuing up a
-    # runaway backlog. The scheduler will retry on the next tick.
+    # runaway backlog.
     if not lock.acquire(blocking=False):
         _log.info(f"routine #{cron_id} '{routine_name}': skipped (fire already in progress)")
         return ""
 
+    t0 = time.time()
+    reply = ""
+    error_msg: str | None = None
     try:
         # Headless ctx — no WS client to stream to; messages persist via
         # agent.run's own db.save_message calls.
         ctx = TurnContext(source="routine")
         result = agent.run(task_desc, thread_id=thread_id, source="routine", ctx=ctx)
-        return getattr(result, "reply", "") or ""
+        reply = getattr(result, "reply", "") or ""
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        _log.warning(f"routine #{cron_id} '{routine_name}' crashed: {error_msg}",
+                     exc_info=True)
     finally:
+        duration_ms = int((time.time() - t0) * 1000)
         lock.release()
+
+    # Metrics update — same shape as _check_and_run produces, but runs
+    # for every fire source. cron_id=0 is used when the caller doesn't
+    # have a real id (some legacy paths) — skip the DB write in that case.
+    if cron_id:
+        status = "err" if (error_msg or _looks_like_error(reply)) else "ok"
+        last_result_preview = (error_msg or reply or "")[:500]
+        try:
+            db.execute(
+                "UPDATE scheduled_tasks "
+                "SET last_run=?, run_count=COALESCE(run_count,0)+1, "
+                "    last_status=?, last_error=?, last_duration_ms=?, last_result=? "
+                "WHERE id=?",
+                (time.time(), status, error_msg, duration_ms,
+                 last_result_preview, cron_id),
+            )
+        except Exception as e:
+            _log.debug(f"routine metrics update failed for #{cron_id}: {e}")
+    return reply
 
 
 def is_routine_firing(thread_id: str) -> bool:
