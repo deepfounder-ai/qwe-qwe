@@ -719,6 +719,16 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
         lock.release()
 
 
+def is_routine_firing(thread_id: str) -> bool:
+    """True if a fire is currently in progress for this routine's thread.
+
+    Used by the ``/run`` endpoint to tell the UI that clicking Run twice
+    is a no-op instead of letting users see a silent skip.
+    """
+    lock = _ROUTINE_FIRE_LOCKS.get(thread_id)
+    return bool(lock and lock.locked())
+
+
 def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
     """Run a task through the LLM.
 

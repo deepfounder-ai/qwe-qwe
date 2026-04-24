@@ -5510,11 +5510,15 @@ function wireEvents() {
       const orig = b.innerHTML;
       b.innerHTML = ico('play', 11) + 'Running…';
       try {
-        await api('/api/cron/' + rid + '/run', { method: 'POST' });
-        toast('routine firing…');
-        // Kick an immediate history refresh so the user sees the new
-        // user message + assistant stream as soon as agent.run writes.
-        setTimeout(() => loadActiveMessages({ silent: true }), 400);
+        const r = await api('/api/cron/' + rid + '/run', { method: 'POST' });
+        if (r && r.already_running) {
+          toast(r.hint || 'already running — wait for current turn', 'warn');
+        } else {
+          toast('routine firing…');
+          // Kick an immediate history refresh so the user sees the new
+          // user message + assistant stream as soon as agent.run writes.
+          setTimeout(() => loadActiveMessages({ silent: true }), 400);
+        }
       } catch { toast('run failed', 'err'); }
       finally { setTimeout(() => { b.disabled = false; b.innerHTML = orig; }, 1500); }
     };
@@ -6414,7 +6418,11 @@ function wireEvents() {
         // auto-navigate so the user watches progress live.
         try {
           const r = await api('/api/cron/' + id + '/run', { method: 'POST' });
-          toast('running…');
+          if (r && r.already_running) {
+            toast(r.hint || 'already running — wait', 'warn');
+          } else {
+            toast('running…');
+          }
           if (r && r.thread_id) { await switchThread(r.thread_id); go('chat'); }
         } catch { toast('run failed', 'err'); }
       }
