@@ -5363,13 +5363,23 @@ function wireEvents() {
           ],
         });
       } else if (act === 'delete') {
-        if (!confirm('Delete thread "' + ((t && t.name) || id) + '"?\nThis removes all messages.')) return;
+        // Routine threads are tightly bound: deleting the thread also
+        // deletes the routine (symmetric with scheduler.remove). Warn
+        // the user with a clearer message when that's what's happening.
+        const isRoutine = t && t.name && t.name.startsWith('Routine · ');
+        const prompt = isRoutine
+          ? 'Delete thread "' + t.name + '"?\n\nThis also deletes the routine — it will stop firing.'
+          : 'Delete thread "' + ((t && t.name) || id) + '"?\nThis removes all messages.';
+        if (!confirm(prompt)) return;
         try {
           await api('/api/threads/' + encodeURIComponent(id), { method: 'DELETE' });
           toast('deleted');
           if (state.activeThreadId === id) state.activeThreadId = null;
           await loadThreads();
           await loadActiveMessages();
+          // Refresh the Routines view too — the cascaded delete dropped
+          // a row over there.
+          if (isRoutine) loadCron();
         } catch { toast('delete failed', 'err'); }
       }
     };
@@ -6339,7 +6349,7 @@ function wireEvents() {
       e.stopPropagation();
       const id = b.dataset.cron, act = b.dataset.cronAct;
       if (act === 'delete') {
-        if (!confirm('Delete this routine?\n\nThe routine\'s chat thread will be archived (still readable from All threads), but the routine itself will stop firing.')) return;
+        if (!confirm('Delete this routine?\n\nThe routine and its chat thread (including all run history) will be permanently removed.')) return;
         try { await api('/api/cron/' + id, { method: 'DELETE' }); toast('deleted'); loadCron(); loadThreads({ silent: true }); }
         catch { toast('delete failed', 'err'); }
       } else if (act === 'run-now') {

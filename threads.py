@@ -158,10 +158,29 @@ def archive(tid: str) -> str:
 
 
 def delete(tid: str) -> str:
-    """Delete a thread and all its messages."""
+    """Delete a thread, its messages, and any routine bound to it.
+
+    Routines are bound 1:1 to their thread (migration 004). Deleting the
+    thread without also removing the routine would leave the routine
+    firing into a non-existent thread forever — the user's "delete thread
+    = delete routine" request closes that loop symmetrically with
+    ``scheduler.remove`` (which already deletes the thread).
+    """
     _ensure_table()
     if tid == DEFAULT_THREAD_ID:
         return "✗ Can't delete the default thread"
+
+    # Cascade: remove any routine pointing at this thread BEFORE deleting
+    # the thread row, so the scheduler doesn't fire into a dead id in
+    # the race between the two DELETEs.
+    try:
+        import scheduler as _sched
+        n = _sched.remove_by_thread(tid)
+        if n:
+            _log.info(f"thread delete cascaded to {n} routine(s)")
+    except Exception as e:
+        _log.debug(f"routine cascade skipped for thread {tid}: {e}")
+
     db.execute("DELETE FROM messages WHERE thread_id=?", (tid,))
     db.execute("DELETE FROM threads WHERE id=?", (tid,))
 

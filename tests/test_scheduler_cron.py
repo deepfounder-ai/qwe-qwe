@@ -257,6 +257,62 @@ def test_routine_thread_persists_across_multiple_firings(fresh_scheduler, monkey
     assert entry["run_count"] == 2
 
 
+def test_delete_routine_also_deletes_its_thread(fresh_scheduler):
+    """scheduler.remove() must cascade the thread delete, not just archive.
+
+    Pre-0.17.30.2 this called threads.archive() which left the thread
+    lingering in the sidebar. User request: tightly-coupled lifecycle —
+    routine gone = thread gone.
+    """
+    sched = fresh_scheduler
+    r = sched.add("ephemeral", "ping", "daily 09:00", skip_dry_run=True)
+    tid = r["thread_id"]
+    assert tid
+
+    import threads as _threads
+    assert _threads.get(tid) is not None, "thread exists right after create"
+
+    out = sched.remove([t["id"] for t in sched.list_tasks() if t["name"] == "ephemeral"][0])
+    assert out.startswith("✓")
+    assert _threads.get(tid) is None, "thread must be gone after routine delete"
+
+
+def test_delete_thread_removes_bound_routine(fresh_scheduler):
+    """threads.delete() must cascade to the routine pointing at it.
+
+    The reverse link: user deletes a Routine thread from the sidebar →
+    the routine stops firing. Without this, the scheduler loop would
+    tick forever into a dead thread id.
+    """
+    sched = fresh_scheduler
+    r = sched.add("bound", "ping", "daily 09:00", skip_dry_run=True)
+    tid = r["thread_id"]
+    cron_id = [t["id"] for t in sched.list_tasks() if t["name"] == "bound"][0]
+
+    import threads as _threads
+    _threads.delete(tid)
+
+    remaining = [t for t in sched.list_tasks() if t["id"] == cron_id]
+    assert not remaining, "routine must be gone after its thread is deleted"
+
+
+def test_delete_thread_leaves_system_tasks_alone(fresh_scheduler):
+    """Deleting a thread never touches the heartbeat / synthesis rows."""
+    sched = fresh_scheduler
+    # Register a system task the same way prod does
+    import db
+    db.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) "
+        "VALUES (?, ?, ?, ?, 1, 1)",
+        (sched.HEARTBEAT_TASK_NAME, sched.HEARTBEAT_TASK_NAME, "every 30m",
+         9999999999.0),  # far future
+    )
+    # Now remove_by_thread with an unrelated thread_id — heartbeat must survive
+    n = sched.remove_by_thread("t_nonexistent")
+    assert n == 0
+    assert any(t["name"] == sched.HEARTBEAT_TASK_NAME for t in sched.list_tasks())
+
+
 def test_legacy_schema_heals_via_ensure_table(qwe_temp_data_dir):
     """A DB that only has the pre-metrics columns auto-upgrades on first use.
 

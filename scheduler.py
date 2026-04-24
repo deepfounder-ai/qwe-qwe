@@ -396,15 +396,38 @@ def remove(task_id: int) -> str:
     if name == HEARTBEAT_TASK_NAME:
         return f"✗ Heartbeat task cannot be removed. Use settings to disable it."
     db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
-    # Archive the routine's chat thread so the UI drops it from the active
-    # list but history is still accessible for "recent runs" digests.
+    # Delete the routine's chat thread too — tightly coupled lifecycle.
+    # The user explicitly asked: deleting a routine drops its thread.
     if thread_id:
         try:
             import threads as _threads
-            _threads.archive(thread_id)
+            _threads.delete(thread_id)
         except Exception as e:
-            _log.debug(f"thread archive failed for routine {task_id}: {e}")
+            _log.debug(f"thread delete failed for routine {task_id}: {e}")
     return f"✓ Task #{task_id} removed"
+
+
+def remove_by_thread(thread_id: str) -> int:
+    """Reverse-link cleanup: when a thread is deleted directly, the
+    routine pointing at it must also go — otherwise the next tick fires
+    into a dead thread. Called from ``threads.delete``.
+
+    Returns the number of routines removed. Safely handles legacy rows
+    that predate migration 004 (thread_id column) — they're just skipped.
+    """
+    _ensure_table()
+    rows = db.fetchall(
+        "SELECT id, name FROM scheduled_tasks WHERE thread_id=?",
+        (thread_id,),
+    )
+    removed = 0
+    for rid, name in rows:
+        if name == HEARTBEAT_TASK_NAME or name == SYNTHESIS_TASK_NAME:
+            continue  # system tasks survive even if their thread vanishes
+        db.execute("DELETE FROM scheduled_tasks WHERE id=?", (rid,))
+        _log.info(f"routine #{rid} '{name}' removed: its thread {thread_id} was deleted")
+        removed += 1
+    return removed
 
 
 def on_complete(fn):
