@@ -2448,6 +2448,12 @@ async function switchThread(id) {
   // poll is the only way to see progress.
   const t = state.threads.find(x => x.id === id);
   if (t && t.name && t.name.startsWith('Routine · ')) {
+    // Initial fetch so the thread header has `routineJob` available on
+    // the very first render (schedule line + Run button + running
+    // badge). Without this the header renders as bare "ROUTINE" tag
+    // for ~2s until the poll ticks in.
+    await loadCron();
+    // Then poll every 2s for new history + firing-state changes.
     state._routinePollTimer = setInterval(() => {
       if (state.activeThreadId !== id || state.view !== 'chat') return;
       loadActiveMessages({ silent: true }).catch(() => {});
@@ -2856,17 +2862,28 @@ function patchThreadHeader() {
         : '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">' +
             ico('play', 11) + 'Run now</button>')
     : '';
-  const runningBadge = routineJob && routineJob.firing
-    ? '<span class="status-badge warn" style="margin-left:8px"><span class="sbdot"></span>running</span>'
+  const routineBadge = routineJob
+    ? (routineJob.firing
+        ? '<span class="status-badge warn" style="margin-left:8px"><span class="sbdot"></span>running</span>'
+        : (routineJob.status === 'paused' || routineJob.enabled === false
+            ? '<span class="status-badge" style="margin-left:8px"><span class="sbdot"></span>paused</span>'
+            : (routineJob.lastStatus === 'err'
+                ? '<span class="status-badge err" style="margin-left:8px"><span class="sbdot"></span>last run failed</span>'
+                : '<span class="status-badge ok" style="margin-left:8px"><span class="sbdot"></span>active</span>')))
     : '';
   const headerHtml =
-    '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center"><span class="tag">routine</span>' +
-    runningBadge +
+    '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center;flex-wrap:wrap;gap:6px"><span class="tag">routine</span>' +
+    routineBadge +
     '<span class="meta">' + esc(fmtTime(t.created_at)) + ' · ' + state.messages.length + ' messages · ~' + Math.round(charCount/4).toLocaleString() + ' tokens</span>' +
     runBtn + '</div>' +
     '<h1>' + esc(t.name || 'New thread') + '</h1>' +
     (routineJob
-      ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' + esc(routineJob.cron) + ' · ' + (routineJob.runs || 0) + ' runs · next ' + esc(routineJob.next || '—') + '</p>'
+      ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' +
+          esc(routineJob.cron) + ' · ' +
+          (routineJob.runs || 0) + ' run' + (routineJob.runs === 1 ? '' : 's') +
+          (routineJob.last ? ' · last ' + esc(routineJob.last) : '') +
+          ' · next ' + esc(routineJob.next || '—') +
+        '</p>'
       : '') +
     '</div>';
   const tmp = document.createElement('div');
@@ -3512,17 +3529,31 @@ function renderChatView() {
         : '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">' +
             ico('play', 11) + 'Run now</button>')
     : '';
-  const runningBadge = routineJob && routineJob.firing
-    ? '<span class="status-badge warn" style="margin-left:8px"><span class="sbdot"></span>running</span>'
+  // Always-on status badge for routine threads. Three states so the
+  // user can tell at a glance: actively firing now, scheduled & healthy,
+  // or paused/disabled.
+  const routineBadge = routineJob
+    ? (routineJob.firing
+        ? '<span class="status-badge warn" style="margin-left:8px"><span class="sbdot"></span>running</span>'
+        : (routineJob.status === 'paused' || routineJob.enabled === false
+            ? '<span class="status-badge" style="margin-left:8px"><span class="sbdot"></span>paused</span>'
+            : (routineJob.lastStatus === 'err'
+                ? '<span class="status-badge err" style="margin-left:8px"><span class="sbdot"></span>last run failed</span>'
+                : '<span class="status-badge ok" style="margin-left:8px"><span class="sbdot"></span>active</span>')))
     : '';
   const header = t
-    ? '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center"><span class="tag">' + (isRoutine ? 'routine' : 'thread') + '</span>' +
-      runningBadge +
+    ? '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center;flex-wrap:wrap;gap:6px"><span class="tag">' + (isRoutine ? 'routine' : 'thread') + '</span>' +
+      routineBadge +
       '<span class="meta">' + esc(fmtTime(t.created_at)) + ' · ' + state.messages.length + ' messages · ~' + Math.round(charCount/4).toLocaleString() + ' tokens</span>' +
       runBtn + '</div>' +
       '<h1>' + esc(t.name || 'New thread') + '</h1>' +
       (routineJob
-        ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' + esc(routineJob.cron) + ' · ' + (routineJob.runs || 0) + ' runs · next ' + esc(routineJob.next || '—') + '</p>'
+        ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' +
+            esc(routineJob.cron) + ' · ' +
+            (routineJob.runs || 0) + ' run' + (routineJob.runs === 1 ? '' : 's') +
+            (routineJob.last ? ' · last ' + esc(routineJob.last) : '') +
+            ' · next ' + esc(routineJob.next || '—') +
+          '</p>'
         : '') +
       '</div>'
     : '<div class="thread-header"><div class="meta-row"><span class="tag accent">new</span></div><h1>Start a new thread</h1></div>';
