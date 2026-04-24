@@ -3423,7 +3423,18 @@ function renderMessage(m) {
         '<button class="icon-btn" data-act="msg-save" data-text="' + encodeURIComponent(m.content || '') + '" title="Save to memory">' + ico('book', 13) + '</button>' +
       '</div>'
     : '';
-  return '<section class="msg' + (isUser ? ' user' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + thinking + body + images + files + tools + actions + '</section>';
+  // Section order inside a message (top → bottom):
+  //   1. head (avatar + timestamp + generating-tag)
+  //   2. tools — what the agent DID (shell/read_file/http_request calls)
+  //   3. thinking — internal reasoning, collapsed by default after turn ends
+  //   4. body — the final reply text (what the user actually "reads")
+  //   5. images / files — attachments returned by send_file etc
+  //   6. actions — copy / regenerate / save-to-memory on hover
+  // Rationale: users asked for tool-calls FIRST so the "what happened"
+  // summary is the first thing visible, then reasoning, then the prose
+  // reply. Previous order (thinking → body → tools) buried the concrete
+  // actions under a wall of reasoning text.
+  return '<section class="msg' + (isUser ? ' user' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + images + files + actions + '</section>';
 }
 
 function renderChatView() {
