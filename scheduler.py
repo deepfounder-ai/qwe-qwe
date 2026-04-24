@@ -382,6 +382,11 @@ def list_tasks() -> list[dict]:
             # thread_id: the routine's permanent chat thread. UI links the
             # routine card to this so users can scroll through past runs.
             "thread_id": thread_id or "",
+            # firing: true iff an agent.run is currently executing in this
+            # routine's thread. UI shows a "running" badge + disables
+            # the Run button while this is true so users don't pile up
+            # concurrent-click attempts that'll just get lock-rejected.
+            "firing": is_routine_firing(thread_id) if thread_id else False,
         })
     return tasks
 
