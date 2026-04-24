@@ -1476,46 +1476,39 @@ async def list_cron():
 
 @app.post("/api/cron")
 async def add_cron(data: dict):
-    """Create a routine (scheduled task) and optionally fire it immediately.
+    """Create a routine (scheduled task).
 
-    ``skip_dry_run`` (default False for legacy API callers) bypasses the
-    pre-save LLM validation. The Web UI always sends True — routines
-    save instantly.
+    The task body is saved as a user message in the newly-created thread
+    so the thread is non-empty when the user navigates in. No agent run
+    is kicked off here — firing is explicit (Run-now button in UI, cron
+    tick at scheduled time, or POST /api/cron/{id}/run).
 
-    ``auto_run`` (default True): after a successful save, immediately
-    fire the routine in a background thread so the user's first run
-    streams into the new thread while they navigate into it. Agent
-    reply persists via agent.run's normal ``db.save_message``; the
-    caller sees streaming via WebSocket if they open the thread in
-    time, or the final reply on reload.
+    ``skip_dry_run`` legacy kwarg: the Web UI always sends True. The old
+    dry-run validation path is kept for API callers but shouldn't be used
+    — the whole dry-run concept was a source of confusion.
     """
+    name = data.get("name", "")
+    task = data.get("task", "")
     result = scheduler.add(
-        data.get("name", ""),
-        data.get("task", ""),
+        name,
+        task,
         data.get("schedule", ""),
         skip_dry_run=bool(data.get("skip_dry_run", False)),
     )
-    if result.get("ok") and data.get("auto_run", True) and result.get("thread_id"):
-        import threading as _th
-        name = data.get("name", "")
-        task = data.get("task", "")
-        thread_id = result["thread_id"]
-        # Look up the newly-inserted row's id for run bookkeeping
-        row = scheduler.db.fetchone(
-            "SELECT id FROM scheduled_tasks WHERE name=? AND thread_id=? "
-            "ORDER BY id DESC LIMIT 1",
-            (name, thread_id),
-        )
-        cron_id = row[0] if row else 0
-
-        def _fire_first_run():
-            try:
-                scheduler._execute_routine(task, name, cron_id, thread_id)
-            except Exception as e:
-                scheduler._log.warning(
-                    f"routine auto-run failed #{cron_id}: {e}", exc_info=True
-                )
-        _th.Thread(target=_fire_first_run, daemon=True).start()
+    # Seed the routine's thread with the task as a user message so the
+    # user sees what will fire when they open the thread. Actual agent
+    # replies are appended by _execute_routine on each fire.
+    if result.get("ok") and result.get("thread_id") and task:
+        try:
+            import db as _db
+            import time as _t
+            _db.execute(
+                "INSERT INTO messages (role, content, ts, thread_id) "
+                "VALUES (?, ?, ?, ?)",
+                ("user", task, _t.time(), result["thread_id"]),
+            )
+        except Exception as e:
+            scheduler._log.debug(f"routine thread seed failed: {e}")
     return result
 
 

@@ -665,6 +665,22 @@ def _ensure_routine_thread(cron_id: int, routine_name: str, schedule: str) -> st
         return ""
 
 
+# Per-thread fire locks — prevents concurrent agent.run's on the same
+# routine thread (which was creating duplicate user messages + racing
+# assistant writes). Also catches the user clicking "Run now" twice.
+_ROUTINE_FIRE_LOCKS: dict[str, threading.Lock] = {}
+_ROUTINE_FIRE_LOCKS_MUTEX = threading.Lock()
+
+
+def _get_fire_lock(thread_id: str) -> threading.Lock:
+    with _ROUTINE_FIRE_LOCKS_MUTEX:
+        lk = _ROUTINE_FIRE_LOCKS.get(thread_id)
+        if lk is None:
+            lk = threading.Lock()
+            _ROUTINE_FIRE_LOCKS[thread_id] = lk
+        return lk
+
+
 def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
                       thread_id: str) -> str:
     """Run a routine firing through agent.run inside its permanent thread.
@@ -673,17 +689,34 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     so the thread grows into a chat log of all past runs. Users see this
     as a normal conversation when they open the routine card.
 
-    Returns the reply text. Exceptions propagate to `_check_and_run`
-    which logs and marks the run as failed.
+    Held behind a per-thread lock — two concurrent fires on the same
+    thread would both save their own user message + race over the
+    assistant write, producing the "3 user messages, no reply" state
+    users have hit. The lock serialises them: second caller waits out
+    the first, then fires cleanly.
+
+    Returns the reply text (empty string if another fire was in progress
+    and we chose to skip rather than queue).
     """
     import agent
     from turn_context import TurnContext
 
-    # Headless ctx — no WS client to stream to; messages persist via
-    # agent.run's own db.save_message calls.
-    ctx = TurnContext(source="routine")
-    result = agent.run(task_desc, thread_id=thread_id, source="routine", ctx=ctx)
-    return getattr(result, "reply", "") or ""
+    lock = _get_fire_lock(thread_id)
+    # Non-blocking acquire: if another fire is already in flight for
+    # this routine's thread, skip this one rather than queuing up a
+    # runaway backlog. The scheduler will retry on the next tick.
+    if not lock.acquire(blocking=False):
+        _log.info(f"routine #{cron_id} '{routine_name}': skipped (fire already in progress)")
+        return ""
+
+    try:
+        # Headless ctx — no WS client to stream to; messages persist via
+        # agent.run's own db.save_message calls.
+        ctx = TurnContext(source="routine")
+        result = agent.run(task_desc, thread_id=thread_id, source="routine", ctx=ctx)
+        return getattr(result, "reply", "") or ""
+    finally:
+        lock.release()
 
 
 def _execute_task(task_desc: str, max_rounds: int = 10) -> str:

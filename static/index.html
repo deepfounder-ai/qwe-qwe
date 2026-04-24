@@ -2315,11 +2315,16 @@ function patchThreadList() {
   if (search) search.addEventListener('input', (e) => { state.threadSearch = e.target.value; render(); });
 }
 
-async function loadActiveMessages() {
+async function loadActiveMessages(opts) {
+  opts = opts || {};
   if (!state.activeThreadId) { state.messages = []; hydrateInspectorFromHistory(); return; }
   try {
     const h = await api('/api/history?thread_id=' + state.activeThreadId + '&limit=200');
     const items = Array.isArray(h) ? h : (h.messages || h.history || []);
+    // Silent polls (used by routine-thread auto-refresh) skip the hydrate
+    // + scroll-to-bottom steps if the message count hasn't changed — that
+    // way a user scrolled mid-history isn't yanked every 3 seconds.
+    if (opts.silent && state.messages.length === items.length) return;
     state.messages = items.map((m, i) => {
       const meta = m.meta || {};
       // Server stores tool details inside meta; surface them so the chat UI
@@ -2397,11 +2402,27 @@ async function switchThread(id) {
   state.memoryPills = [];
   state.memoryPillsReal = false;
   state.kbRecallSessionTotal = 0;
+  // Stop any previously running poll (from the thread we're leaving)
+  if (state._routinePollTimer) {
+    clearInterval(state._routinePollTimer);
+    state._routinePollTimer = null;
+  }
   render();
   try { await api('/api/threads/' + id + '/switch', { method: 'POST' }); } catch {}
   // Refresh the threads list — new active thread's est_tokens / message count shows in inspector
   await loadThreads();
   await loadActiveMessages();
+  // If this is a routine thread, poll history every 3s so in-flight
+  // agent.run (manual Run or cron fire) writes appear without a reload.
+  // Backend agent.run is headless (no WS streaming to this client), so
+  // poll is the pragmatic way to catch the final assistant reply.
+  const t = state.threads.find(x => x.id === id);
+  if (t && t.name && t.name.startsWith('Routine · ')) {
+    state._routinePollTimer = setInterval(() => {
+      if (state.activeThreadId !== id || state.view !== 'chat') return;
+      loadActiveMessages({ silent: true }).catch(() => {});
+    }, 3000);
+  }
 }
 
 async function newThread() {
@@ -3344,10 +3365,28 @@ function renderMessage(m) {
 function renderChatView() {
   const t = activeThread();
   const charCount = state.messages.reduce((n, m) => n + (m.content || '').length, 0);
+  // Routine threads — the name starts with "Routine · <name>" — grow an
+  // inline Run button in the header so the user can fire the routine
+  // without going back to the Routines tab first. The corresponding
+  // cron row is found via the cached state.cronJobs list loaded for the
+  // Routines view.
+  const isRoutine = t && t.name && t.name.startsWith('Routine · ');
+  const routineJob = isRoutine
+    ? (state.cronJobs || []).find(j => j.threadId === t.id)
+    : null;
+  const runBtn = routineJob
+    ? '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">' +
+        ico('play', 11) + 'Run now</button>'
+    : '';
   const header = t
-    ? '<div class="thread-header"><div class="meta-row"><span class="tag">thread</span>' +
-      '<span class="meta">' + esc(fmtTime(t.created_at)) + ' · ' + state.messages.length + ' messages · ~' + Math.round(charCount/4).toLocaleString() + ' tokens</span></div>' +
-      '<h1>' + esc(t.name || 'New thread') + '</h1></div>'
+    ? '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center"><span class="tag">' + (isRoutine ? 'routine' : 'thread') + '</span>' +
+      '<span class="meta">' + esc(fmtTime(t.created_at)) + ' · ' + state.messages.length + ' messages · ~' + Math.round(charCount/4).toLocaleString() + ' tokens</span>' +
+      runBtn + '</div>' +
+      '<h1>' + esc(t.name || 'New thread') + '</h1>' +
+      (routineJob
+        ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' + esc(routineJob.cron) + ' · ' + (routineJob.runs || 0) + ' runs · next ' + esc(routineJob.next || '—') + '</p>'
+        : '') +
+      '</div>'
     : '<div class="thread-header"><div class="meta-row"><span class="tag accent">new</span></div><h1>Start a new thread</h1></div>';
   const empty = !state.messages.length
     ? '<div class="empty"><img class="duck-big duck-idle" src="/static/logo.png" alt=""><h3>Ask anything</h3>' +
@@ -5463,6 +5502,23 @@ function wireEvents() {
   document.querySelectorAll('[data-act="image"]').forEach(b => { b.onclick = () => pickAttachments({ imageOnly: true }); });
   document.querySelectorAll('[data-act="camera-toggle"]').forEach(b => { b.onclick = () => { state.cameraOn ? cameraStop() : cameraStart(); }; });
   document.querySelectorAll('[data-act="voice-toggle"]').forEach(b => { b.onclick = () => { state.voiceLive ? voiceStop() : voiceStart(); }; });
+  document.querySelectorAll('[data-act="routine-run-now"]').forEach(b => {
+    b.onclick = async () => {
+      const rid = b.dataset.routineId;
+      if (!rid) return;
+      b.disabled = true;
+      const orig = b.innerHTML;
+      b.innerHTML = ico('play', 11) + 'Running…';
+      try {
+        await api('/api/cron/' + rid + '/run', { method: 'POST' });
+        toast('routine firing…');
+        // Kick an immediate history refresh so the user sees the new
+        // user message + assistant stream as soon as agent.run writes.
+        setTimeout(() => loadActiveMessages({ silent: true }), 400);
+      } catch { toast('run failed', 'err'); }
+      finally { setTimeout(() => { b.disabled = false; b.innerHTML = orig; }, 1500); }
+    };
+  });
   document.querySelectorAll('[data-act="drop-frame"]').forEach(b => { b.onclick = () => { state.capturedFrame = null; render(); }; });
   document.querySelectorAll('[data-drop-att]').forEach(b => { b.onclick = () => dropAttachment(b.dataset.dropAtt); });
 
