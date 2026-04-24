@@ -123,26 +123,6 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
                 "created_at": time.time(),
             })
             routine_thread_id = t["id"]
-            # Seed the thread with the task prompt as a system message so
-            # the user sees context immediately upon navigating in. This
-            # is NOT a fired run — just documentation of what will be
-            # sent on each tick. Using role=system (not user) keeps the
-            # agent-reply loop from triggering until the first real fire.
-            try:
-                intro = (
-                    f"[Routine created — fires on schedule: {schedule}]\n\n"
-                    f"Task that will run each time:\n\n{task}\n\n"
-                    f"Click 'Run now' on the routine card to fire manually, "
-                    f"or wait for the next scheduled tick. "
-                    f"Corrections you add to this thread become context for future runs."
-                )
-                db.execute(
-                    "INSERT INTO messages (role, content, ts, thread_id) "
-                    "VALUES (?, ?, ?, ?)",
-                    ("system", intro, time.time(), routine_thread_id),
-                )
-            except Exception as seed_err:
-                _log.debug(f"routine thread seed skipped: {seed_err}")
         except Exception as e:
             _log.warning(f"failed to create routine thread for '{name}': {e}")
 

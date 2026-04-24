@@ -1476,12 +1476,18 @@ async def list_cron():
 
 @app.post("/api/cron")
 async def add_cron(data: dict):
-    """Add a scheduled task.
+    """Create a routine (scheduled task) and optionally fire it immediately.
 
-    ``skip_dry_run`` (default False) bypasses the pre-save validation that
-    executes the task once through the LLM. Useful when the side effect
-    (sending a message, writing a file) is unwanted as a "test", or when
-    the user is confident the task description is correct.
+    ``skip_dry_run`` (default False for legacy API callers) bypasses the
+    pre-save LLM validation. The Web UI always sends True — routines
+    save instantly.
+
+    ``auto_run`` (default True): after a successful save, immediately
+    fire the routine in a background thread so the user's first run
+    streams into the new thread while they navigate into it. Agent
+    reply persists via agent.run's normal ``db.save_message``; the
+    caller sees streaming via WebSocket if they open the thread in
+    time, or the final reply on reload.
     """
     result = scheduler.add(
         data.get("name", ""),
@@ -1489,6 +1495,27 @@ async def add_cron(data: dict):
         data.get("schedule", ""),
         skip_dry_run=bool(data.get("skip_dry_run", False)),
     )
+    if result.get("ok") and data.get("auto_run", True) and result.get("thread_id"):
+        import threading as _th
+        name = data.get("name", "")
+        task = data.get("task", "")
+        thread_id = result["thread_id"]
+        # Look up the newly-inserted row's id for run bookkeeping
+        row = scheduler.db.fetchone(
+            "SELECT id FROM scheduled_tasks WHERE name=? AND thread_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (name, thread_id),
+        )
+        cron_id = row[0] if row else 0
+
+        def _fire_first_run():
+            try:
+                scheduler._execute_routine(task, name, cron_id, thread_id)
+            except Exception as e:
+                scheduler._log.warning(
+                    f"routine auto-run failed #{cron_id}: {e}", exc_info=True
+                )
+        _th.Thread(target=_fire_first_run, daemon=True).start()
     return result
 
 
