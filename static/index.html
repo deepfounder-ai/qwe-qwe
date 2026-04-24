@@ -473,6 +473,24 @@ main.canvas { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 /* Messages */
 .msg { padding: 20px 0 28px; border-bottom: 1px solid var(--line); animation: slideUp 0.25s ease-out; }
 .msg.user { padding-bottom: 18px; }  /* no action bar → tighter */
+
+/* Routine auto-fire divider — a user-role message whose content is a
+   repeat of the routine's task text. Shown as a compact centered
+   horizontal rule with a timestamp instead of a full user bubble, so
+   the thread reads as "task, reply, fire, reply, fire, reply" without
+   the task text cluttering each iteration. */
+.routine-autofire {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 0; color: var(--fg-5);
+  font-family: var(--font-mono); font-size: 10.5px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  animation: slideUp 0.25s ease-out;
+}
+.routine-autofire::before,
+.routine-autofire::after {
+  content: ""; flex: 1; height: 1px; background: var(--line);
+}
+.routine-autofire .rf-label { opacity: 0.7; white-space: nowrap; }
 .msg .head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .msg .avatar {
   width: 22px; height: 22px; border-radius: 50%;
@@ -3388,6 +3406,14 @@ function renderTools(tools) {
 }
 
 function renderMessage(m) {
+  // Routine auto-fire user messages render as a centered timestamp
+  // divider instead of a full user bubble — see .routine-autofire CSS
+  // and the flagging logic in renderChatView.
+  if (m._autoFire) {
+    return '<div class="routine-autofire" data-msg-id="' + esc(m.id) + '">' +
+      '<span class="rf-label">fired · ' + esc(fmtTime(m.time)) + '</span>' +
+    '</div>';
+  }
   const isUser = m.role === 'user';
   const head = isUser
     ? '<div class="head"><span class="avatar">' + esc(((state.status && state.status.user && state.status.user.name) || 'Y')[0].toUpperCase()) + '</span>' +
@@ -3460,6 +3486,24 @@ function renderChatView() {
   const routineJob = isRoutine
     ? (state.cronJobs || []).find(j => j.threadId === t.id)
     : null;
+
+  // Mark auto-fire user messages. Each time a routine fires, agent.run
+  // saves the task_desc as a user message — correct for LLM alternation
+  // but redundant for the reader. Flag every occurrence AFTER the first
+  // whose content matches the routine's task; renderMessage collapses
+  // them into a compact horizontal rule.
+  if (isRoutine && routineJob && routineJob.task) {
+    const task = routineJob.task.trim();
+    let firstSeen = false;
+    for (const m of state.messages) {
+      if (m.role === 'user' && m.content && m.content.trim() === task) {
+        if (firstSeen) m._autoFire = true;
+        else { firstSeen = true; delete m._autoFire; }
+      } else {
+        delete m._autoFire;
+      }
+    }
+  }
   const runBtn = routineJob
     ? (routineJob.firing
         ? '<button class="btn-secondary" disabled style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;opacity:0.6">' +
