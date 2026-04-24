@@ -1498,6 +1498,35 @@ async def remove_cron(task_id: int):
     return {"result": scheduler.remove(task_id)}
 
 
+@app.post("/api/cron/{task_id}/run")
+async def run_cron_now(task_id: int):
+    """Fire a routine immediately (manual trigger, out-of-schedule).
+
+    Returns thread_id so the UI can auto-navigate into the routine's chat
+    and watch the run stream in. Runs in a background thread so the HTTP
+    request returns fast — agent.run itself persists the reply to the DB.
+    """
+    import threading as _th
+    row = scheduler.db.fetchone(
+        "SELECT name, task, schedule, thread_id FROM scheduled_tasks WHERE id=?",
+        (task_id,),
+    )
+    if not row:
+        return JSONResponse({"error": f"routine {task_id} not found"}, status_code=404)
+    name, task, schedule, thread_id = row
+    if not thread_id:
+        thread_id = scheduler._ensure_routine_thread(task_id, name, schedule)
+    # Fire in a background thread so the request returns immediately.
+    # agent.run persists its own output — we only need to kick it off.
+    def _fire():
+        try:
+            scheduler._execute_routine(task, name, task_id, thread_id)
+        except Exception as e:
+            scheduler._log.warning(f"manual run failed #{task_id}: {e}", exc_info=True)
+    _th.Thread(target=_fire, daemon=True).start()
+    return {"ok": True, "thread_id": thread_id, "name": name}
+
+
 @app.get("/api/tasks")
 async def list_tasks():
     """Get background task results."""

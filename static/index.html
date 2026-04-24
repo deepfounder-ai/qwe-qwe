@@ -2848,9 +2848,7 @@ function openNewCronModal() {
       '<input type="text" id="cr-custom" class="mono" placeholder="e.g. every 90m, weekdays 08:30, every 2 days 14:00" style="display:none;width:100%">' +
       '<div class="hint" id="cr-schedule-preview" style="margin-top:10px;font-family:var(--font-mono);color:var(--fg-4)">= daily 09:00</div>' +
     '</div>' +
-    '<div class="hint" style="font-size:11px;color:var(--fg-5);margin-top:-4px">Scheduled routines use a small randomised delay (a few minutes) so server load stays even.</div>' +
-    '<div class="field" style="margin-top:14px"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer"><input type="checkbox" id="cr-skip-dryrun" style="margin-top:3px"><div><div style="font-size:13px;color:var(--fg-2)">Skip validation</div>' +
-      '<div class="hint" style="margin-top:2px">By default the scheduler runs your task once right now through the LLM to check it works — this takes 20-60s and has <b>real side effects</b>. Skip for trivial tasks or to avoid the dry-run side effect.</div></div></label></div>';
+    '<div class="hint" style="font-size:11px;color:var(--fg-5);margin-top:-4px">Creates a chat thread with the task as the first message. The agent only runs when the schedule fires (or when you click <span class="mono">Run now</span> on the routine card).</div>';
   // Frequency picker state → raw scheduler DSL.
   // ``opts`` collects every sub-control's value (time, selected days,
   // N for every-N-days/hours/mins, custom text). The mode dropdown
@@ -2881,7 +2879,7 @@ function openNewCronModal() {
     wide: true,
     actions: [
       { label: 'Cancel' },
-      { label: 'Create', primary: true, busyLabel: 'Creating… (running dry-run)', onClick: async () => {
+      { label: 'Create', primary: true, busyLabel: 'Creating…', onClick: async () => {
           const name = document.getElementById('cr-name').value.trim();
           const desc = document.getElementById('cr-desc').value.trim();
           const task = document.getElementById('cr-task').value.trim();
@@ -2900,8 +2898,6 @@ function openNewCronModal() {
             custom: document.getElementById('cr-custom').value,
           };
           const schedule = freqToDSL(freq, opts);
-          const skipEl = document.getElementById('cr-skip-dryrun');
-          const skip = skipEl.checked;
 
           if (!name) { toast('name is required', 'err'); return false; }
           if (!desc) { toast('description is required', 'err'); return false; }
@@ -2914,29 +2910,27 @@ function openNewCronModal() {
           // semantics of "description = one-liner, task prompt = details".
           const finalTask = task || desc;
 
+          // Routines are chats-with-schedule. Never dry-run on create —
+          // instant save, then auto-navigate into the thread where the
+          // user can iterate / "Run now" / chat through breakage.
           let r;
-          try { r = await api('/api/cron', { method: 'POST', body: { name, schedule, task: finalTask, skip_dry_run: skip } }); }
+          try { r = await api('/api/cron', { method: 'POST', body: { name, schedule, task: finalTask, skip_dry_run: true } }); }
           catch { toast('create failed — server error', 'err'); return false; }
           if (r && r.error) {
-            if (r.offer_skip && !skip) {
-              skipEl.checked = true;
-              const lbl = skipEl.closest('label');
-              if (lbl) {
-                lbl.style.outline = '2px solid var(--warn)';
-                lbl.style.outlineOffset = '4px';
-                lbl.style.borderRadius = '4px';
-                setTimeout(() => { lbl.style.outline = ''; lbl.style.outlineOffset = ''; }, 2500);
-              }
-              toast(r.error + ' · Skip validation auto-enabled — click Create again to save anyway', 'err');
-            } else {
-              const hint = r.hint ? ' (' + r.hint + ')' : '';
-              toast(r.error + hint, 'err');
-            }
+            // Without dry-run the only failures left here are parse errors.
+            toast(r.error, 'err');
             return false;
           }
-          toast('routine created · next: ' + (r.next_run || '?'));
+          toast('routine created · next fire: ' + (r.next_run || '?'));
           loadCron();
-          loadThreads({ silent: true });  // the new routine's thread appears in the list
+          // The new routine's thread needs to appear in the sidebar, and
+          // we want to deposit the user straight into it so they can see
+          // the task prompt and iterate.
+          await loadThreads({ silent: true });
+          if (r.thread_id) {
+            try { await switchThread(r.thread_id); go('chat'); }
+            catch { /* fall through to scheduler view */ }
+          }
       }},
     ],
   });
@@ -3908,7 +3902,8 @@ function renderSchedulerView() {
               '<span class="job-title">' + esc(j.name) + '</span>' +
             '</div>' +
             '<span class="job-cron">' + esc(schedLine) + nextLine + '</span></div>' +
-            '<div style="display:flex;gap:2px;opacity:0.5">' +
+            '<div style="display:flex;gap:2px;opacity:0.7">' +
+              '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="run-now" title="Run now (fire the routine immediately)">' + ico('play', 11) + '</button>' +
               '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="delete" title="Delete routine (archives the thread)">' + ico('trash', 11) + '</button>' +
             '</div></div>' +
           (j.last
@@ -6339,14 +6334,23 @@ function wireEvents() {
 
   document.querySelectorAll('[data-cron]').forEach(b => {
     b.onclick = async (e) => {
-      // Delete button lives INSIDE a click-to-open-thread card — don't let
-      // the click bubble up and navigate after confirming the delete.
+      // Click-to-open-thread lives on the card body; button clicks must
+      // not bubble up and navigate after confirming the action.
       e.stopPropagation();
       const id = b.dataset.cron, act = b.dataset.cronAct;
       if (act === 'delete') {
         if (!confirm('Delete this routine?\n\nThe routine\'s chat thread will be archived (still readable from All threads), but the routine itself will stop firing.')) return;
         try { await api('/api/cron/' + id, { method: 'DELETE' }); toast('deleted'); loadCron(); loadThreads({ silent: true }); }
         catch { toast('delete failed', 'err'); }
+      } else if (act === 'run-now') {
+        // Fire the routine immediately — agent runs in its thread and
+        // the reply streams into the same conversation. After triggering,
+        // auto-navigate so the user watches progress live.
+        try {
+          const r = await api('/api/cron/' + id + '/run', { method: 'POST' });
+          toast('running…');
+          if (r && r.thread_id) { await switchThread(r.thread_id); go('chat'); }
+        } catch { toast('run failed', 'err'); }
       }
     };
   });
