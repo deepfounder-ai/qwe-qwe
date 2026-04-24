@@ -1523,6 +1523,18 @@ async def remove_cron(task_id: int):
     return {"result": scheduler.remove(task_id)}
 
 
+@app.get("/api/cron/{task_id}/runs")
+async def get_cron_runs(task_id: int, limit: int = 20):
+    """Recent run history for a routine, newest first.
+
+    Each row is one fire attempt — ok / err / missed / skipped. The
+    "missed" rows are logged by scheduler.detect_missed_runs() when the
+    server comes back up and finds scheduled slots that lapsed while
+    offline. UI uses this to render a sparkline + detail list.
+    """
+    return {"runs": scheduler.list_runs(task_id, limit=limit)}
+
+
 @app.post("/api/cron/{task_id}/toggle")
 async def toggle_cron(task_id: int, data: dict | None = None):
     """Pause or resume a routine.

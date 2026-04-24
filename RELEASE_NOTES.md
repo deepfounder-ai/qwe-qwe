@@ -1,75 +1,79 @@
-# v0.17.31 — Routines, round 2: every fire visible, pauseable, organised
+# v0.17.32 — Routine run history + offline-gap detection
 
-v0.17.30 shipped the routine ↔ thread binding but left enough rough edges that the UX was still "create a routine, watch nothing happen, hope for the best". This release is the finishing work: every firing is visibly accounted for, you can pause a routine without deleting it, threads organise into folders, and a new hard-deny list blocks the agent from wiping out its own data.
+Users reported: when the server is off, scheduled firings silently vanish — no way to tell a routine "fired 5 times this week" from one that "should have fired 5 times but the laptop was closed". This release adds honest per-fire history with status=ok/err/missed/skipped, detects offline gaps at startup, and surfaces the timeline as a sparkline on each routine card.
 
-## 🔥 Routines — finishing the UX
+## New: per-fire history table
 
-**Auto-fire on create + live status poll**. POST /api/cron now kicks agent.run in a background thread immediately after save. HTTP returns in ~300ms with `thread_id`; UI auto-navigates into the routine's chat thread, and every 2 seconds silently polls history + cron state (surgical thread-header swap, no full render, so the composer textarea and chat scroll are preserved). Four-state badge: `running` (pulsing yellow while agent.run is in flight) / `active` (scheduled & healthy) / `last run failed` (red) / `paused` (gray). No more "thread just sits there empty" confusion.
+`migrations/005_routine_runs.sql` adds `routine_runs` with one row per fire attempt:
 
-**Per-thread fire serialisation**. Two concurrent fires on the same routine thread were producing the "3 user messages, no reply" state — each agent.run saved its own copy + raced over the assistant write. Added a non-blocking per-thread lock in `_execute_routine`: second caller cleanly no-ops rather than queuing up a runaway backlog. POST /api/cron/{id}/run surfaces this as `{already_running: true, hint: "..."}` so the UI toasts "already running — wait for current turn" instead of silently swallowing the click.
+```
+cron_id          → which routine
+scheduled_at     → when the fire was supposed to happen
+started_at       → when agent.run actually began (NULL for missed)
+finished_at      → when agent.run returned (NULL for missed/running)
+duration_ms      → wall-clock duration
+status           → ok / err / missed / skipped
+error            → error message if status=err or skipped/missed reason
+result_preview   → first 500 chars of the reply
+thread_id        → link to the routine thread (same value on every row)
+```
 
-**Fire metrics now count for every trigger**. Previously only the scheduler loop bumped `run_count` / `last_run` / `last_status`. Auto-fires and manual Runs were invisible to the metrics — users saw `runs: 0, last_run: ""` after actually successful firings. Moved the metrics UPDATE into `_execute_routine`'s finally block; system tasks (heartbeat, synthesis, reminders) keep their own metrics path in `_check_and_run`.
+Indexed by `cron_id` and `scheduled_at`.
 
-**Pause / Resume toggle**. New `POST /api/cron/{id}/toggle` (empty body toggles, `{enabled: bool}` sets explicit). Routine cards grow a ⏸ Pause button that dims the card, hides Run-now, tags the title `paused`. Same control in the thread header. Scheduler loop honours `enabled=0` and skips paused rows until resumed.
+## Every fire logs a row
 
-**Tight routine ↔ thread lifecycle**. Deleting a routine now deletes its thread (cascade via `threads.delete`); deleting a routine's thread cascades the other way via `scheduler.remove_by_thread`. System tasks are skipped so the sidebar can't accidentally kill heartbeat. UI shows the cascade explicitly in the confirm dialog.
+`_execute_routine` in `scheduler.py` now brackets the agent.run call with a `_log_run` write:
 
-**Richer frequency picker in the New-routine modal**. Seven modes — Daily (with time), Weekly (day chips + Weekdays/Weekends/All/Clear quick-buttons + time), Every N days / hours / minutes, Once, Custom DSL — each with live schedule preview under the form (`= mon,wed,fri 14:00`).
+- Successful run → `status=ok`, duration/result captured
+- Raised exception or error-marker in reply → `status=err`, error text stored
+- Per-thread lock held (concurrent fire attempt) → `status=skipped` instead of silent no-op
 
-**Parser additions**: `weekdays HH:MM`, `weekends HH:MM`, `mon HH:MM`, `mon,wed,fri HH:MM`, `every N days HH:MM`. Russian aliases too: `будни`, `выходные`, `пн,ср,пт`. `_check_and_run` re-parses on each fire so Mon,Wed,Fri hops to Wed (not next Mon) after a Mon firing.
+Same aggregation fields on `scheduled_tasks` (last_run, last_status, last_duration_ms, last_result, run_count) continue to update so the card stats are cheap to read — `routine_runs` is for the timeline view.
 
-**telegram_notify_owner core tool**. Cron tasks like "send me an error summary to Telegram" were failing because the agent had no single tool for it — it'd try to stitch `secret_get + chat_id discovery + http_request to api.telegram.org` together and burn 5+ rounds. New tool: one call using the already-configured bot token + verified owner_id. Returns `"Sent. delivered to owner_id=... (N chars)"` which passes the dry-run send-confirmation check automatically.
+## Startup detects offline-gap misses
 
-**Dry-run prompt rewrite**. `_execute_task`'s system prompt is now specific: names the log file paths, instructs `read_file` directly (don't shell-find), points at `telegram_notify_owner` for sends, lists `tool_search` for extended tools, and enforces a confirmation-phrase rule for send tasks (RU + EN). `max_tokens` 1024 → 2048.
+New `scheduler.detect_missed_runs()` runs once when the scheduler loop starts. Strategy:
 
-**Fire-divider**. Repeated task messages (auto-fires) collapse into a compact `── fired · 22:29 ──` horizontal rule instead of stacking duplicate user bubbles. User-typed corrections between fires render normally.
+1. Read the `scheduler:last_check` KV stamp (updated every loop tick)
+2. For every enabled user-created routine with a repeating schedule:
+   - Walk backward from `next_run` by `interval` steps
+   - For each scheduled slot that falls inside `(last_check, now)`, insert a `status=missed` row
+3. Cap at 10 missed rows per routine — a 24h outage on a 10-min routine won't create 144 entries
 
-**Tool-name fix**. WS `reply.tools` is a flat list of name strings; the client was dereferencing `.name` on each string and falling back to literal `'tool'` — every reloaded tool row showed "tool / tool / tool" under an "OTHER" category. Now accepts both string and dict shapes.
+System tasks (`__heartbeat__`, `__synthesis__`) are skipped — they self-correct on the next tick and their theoretical misses would just be noise.
 
-**Section reorder in assistant messages**. Tool-call list now renders BEFORE the thinking block so the concrete "what happened" summary is visible first.
+If there's no `last_check` stamp yet (fresh install), `detect_missed_runs` just stamps "now" without inventing fake history.
 
-**Backdrop click no longer discards the modal**. Filling a 30-second cron form and then losing it to an accidental click on the dim backdrop was the top modal complaint. Close paths: Cancel button, × button, ESC.
+## API + UI
 
-**Dry-run kept but no longer default in UI**. The `skip_dry_run=true` path is now the only path the Web UI ever takes. Dry-run validation remains available to API callers but isn't surfaced as a checkbox — instant save, first run is visible in the thread as-it-happens. UI is honest about what's going on.
+**New endpoint**: `GET /api/cron/{id}/runs?limit=20` — returns the N most recent run rows for a routine, newest first. UI calls this for the detail view.
 
-## 📁 Thread folders
+**`/api/cron` list** now includes `recent: {counts, series}` per row:
+- `counts`: `{ok: N, err: N, missed: N, skipped: N}` over the last 20 fires
+- `series`: `["ok", "missed", "ok", "err", ...]` oldest→newest for the sparkline
 
-Thread sidebar grows user-defined folders. Click 📦 on a thread row → modal with a datalist of existing folders + free-text input (create new on the fly). Empty input ungroups. Folders render as collapsible groups between PINNED and RECENT, with chevron + count. Collapse state persists in localStorage per folder name.
+**Sparkline on routine cards** — under the `last ok · Nms · M runs` line, a row of colored dots:
+- 🟢 green = ok
+- 🔴 red = err
+- 🟡 yellow = missed (server was offline)
+- ⚪ grey = skipped (concurrent fire rejected)
 
-Data model: a folder is just a string under `threads.meta.folder`. No schema change, no migration — distinct folder list derived on read. Sort is case-insensitive. Server exposes `POST /api/threads/{id}/folder` + `GET /api/folders`.
+Tooltip on the sparkline shows the counts breakdown. When there's at least one missed fire, a `N missed` label appears next to the dots in warn-colored mono font.
 
-## 🛡 Integrity hard-denies
+## Tests
 
-Added a proactive hard-deny list for operations that would wipe qwe-qwe's own operational state with no recovery. No confirmation dialog — these are simply refused at the tool-dispatch gate.
+`tests/test_routine_runs.py` (+8):
 
-**Shell** (`_check_shell_safety`):
-- `rm` (any flag combo) of `qwe_qwe.db` or vault files
-- `rm -r` of `~/.qwe-qwe/` (+ `memory/`, `vault/` subdirs)
-- `rm -r` of `.git` anywhere
-- Redirect-truncate (`>`) onto the DB or vault
-- `dd of=<agent file>`
-- `sqlite3 qwe_qwe.db 'DROP ...'` or `DELETE FROM messages`
-- Word-boundary negative lookahead on `.qwe-qwe` so lookalike dirs (`~/.qwe-qwe-backup`) don't false-positive
+- Successful fire → `status=ok` row with duration
+- Crashed fire → `status=err` row with error text
+- Concurrent fire → one `status=ok` + one `status=skipped`
+- First-boot `detect_missed_runs` is a no-op (no `last_check` stamp)
+- 5.5h gap on a 1h routine → 5 `status=missed` rows at the right scheduled times
+- 24h gap on a 10-min routine → exactly 10 rows (capped)
+- Heartbeat/synthesis left alone by missed-detection
+- `list_tasks` exposes the `recent` counts/series correctly
 
-**write_file** (`_resolve_path(for_write=True)`):
-- `qwe_qwe.db` + WAL/SHM sidecars
-- Vault files (encrypted secrets)
-- Anything under `~/.qwe-qwe/memory/` (Qdrant binary storage)
-- Anywhere under a `.git/` directory
-- qwe-qwe's own Python source tree (.py / pyproject.toml in the package dir) — overridable with `QWE_ALLOW_SELF_MODIFY=1` for interactive dev sessions where the user wants the agent to refactor qwe-qwe
-
-Qdrant and SQLite continue writing their own files normally — the hard-deny only catches paths that come through the agent-tool layer. Documented intent: "the integrity block is a shield on the agent's hands, not on qwe-qwe's own runtime".
-
-## 🧪 Test coverage
-
-Suite grew 235 → **307 tests** since v0.17.29. Additions:
-
-- `tests/test_scheduler_cron.py` (17 → 19) — pause/resume toggle end-to-end: toggle flips state, `_check_and_run` skips disabled rows, toggle on → fires again.
-- `tests/test_schedule_parser.py` (23) — every new DSL branch: weekly day-of-week incl. Russian aliases (`будни`, `выходные`, `пн,ср,пт`), every-N-days, reschedule-hops-to-next-matching-day regression, garbage-rejects matrix.
-- `tests/test_telegram_notify_tool.py` (4) — core-tool membership, empty-text rejection, no-verified-owner actionable error, happy-path sends via `telegram_bot.send_message`.
-- `tests/test_thread_folders.py` (8) — set/clear (both `""` and `None`), trim + 60-char cap, missing-id error, `list_folders` distinct+sorted case-insensitive, `list_all` exposes meta.folder.
-- `tests/test_integrity_blocks.py` (24) — 13 shell block cases (with fault-injection verifying each fires), 3 read-still-allowed, word-boundary vs `.qwe-qwe-backup`, 7 write-path cases including the `QWE_ALLOW_SELF_MODIFY` override path.
-- `tests/test_routine_endpoints.py` (10, **new**) — HTTP integration: POST /api/cron auto-fires + correct shape, reject bad schedule, /run returns thread_id + fires background agent.run, /run returns `already_running: true` under held lock, 404 on missing id, /toggle implicit + explicit, /threads/{id}/folder roundtrip + 404, `list_tasks` shape includes every key the UI reads.
+Suite: 307 → **315 passing** (~45s).
 
 ## Upgrade
 
@@ -77,10 +81,10 @@ Suite grew 235 → **307 tests** since v0.17.29. Additions:
 pip install --upgrade qwe-qwe   # or re-run ./setup.sh
 ```
 
-Migration 004 (routine thread_id column) runs automatically on first DB touch. Existing routines that predate it lazy-create their thread on next firing. No manual action needed.
+Migration 005 runs automatically on first DB touch. Existing routines start with empty history; their next firings populate the table normally.
 
 ## Known follow-ups
 
-- Drag-and-drop threads between folders (currently: modal with text input)
-- Streaming routine progress to the WS client while it's running (currently: 2s silent poll)
-- Per-routine model override ("use Sonnet for this one") — UI hook exists, server plumbing TBD
+- Runs detail drawer in UI (click a dot → see the full `routine_runs` row with error text, duration, linked thread turn)
+- Configurable missed-run cap per routine (currently hardcoded 10)
+- Missed-run catch-up mode for send-type routines where you want a single "summary of the missed period" fire instead of silent misses

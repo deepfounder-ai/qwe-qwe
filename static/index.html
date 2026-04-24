@@ -860,6 +860,14 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
 .job-card .job-title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .job-card .job-title { font-size: 13.5px; font-weight: 500; color: var(--fg); }
 .job-card .job-cron { font-family: var(--font-mono); font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+/* Per-fire sparkline on routine cards — one dot per fire attempt,
+   colored by status (ok/err/missed/skipped). */
+.run-sparkline { display: flex; align-items: center; gap: 3px; margin-top: 8px; }
+.run-sparkline .run-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  flex-shrink: 0; opacity: 0.85;
+}
+.run-sparkline .run-dot:last-child { box-shadow: 0 0 0 2px rgba(255,255,255,0.08); }
 .job-card .heatmap { display: flex; gap: 2px; margin-bottom: 12px; height: 18px; }
 .job-card .heatmap .cell { flex: 1; border-radius: 2px; background: var(--surface-3); }
 .job-card .heatmap .cell.hit { background: rgba(74,222,128,0.5); }
@@ -2840,6 +2848,9 @@ async function loadCron(opts) {
       hits: j.recent || null,
       threadId: j.thread_id || '',        // permanent thread for this routine
       firing: !!j.firing,                  // agent.run currently executing
+      // recent: last 20 fires by status (ok/err/missed/skipped) + series
+      // of per-fire statuses oldest→newest for the sparkline render
+      recent: j.recent || { counts: {}, series: [] },
     }));
     // Silent mode (routine-thread poll): surgically re-render just the
     // thread header so Composer textarea + scroll position don't reset
@@ -4200,6 +4211,23 @@ function renderSchedulerView() {
           (j.last
             ? '<div style="font-size:11px;color:' + (errLast ? 'var(--err)' : 'var(--fg-4)') + ';margin-top:6px;font-family:var(--font-mono)">last ' + esc(j.last) + ' · ' + (j.runs||0).toLocaleString() + ' runs</div>'
             : '<div style="font-size:11px;color:var(--fg-5);margin-top:6px;font-family:var(--font-mono)">not run yet</div>') +
+          // Sparkline of last 20 fires — one dot per attempt, colored
+          // by status. Shows missed (server-offline) runs alongside
+          // ok/err so users see the real timeline.
+          (j.recent && j.recent.series && j.recent.series.length
+            ? '<div class="run-sparkline" title="Last ' + j.recent.series.length + ' fires · ok=' + (j.recent.counts.ok || 0) + ' err=' + (j.recent.counts.err || 0) + ' missed=' + (j.recent.counts.missed || 0) + ' skipped=' + (j.recent.counts.skipped || 0) + '">' +
+                j.recent.series.map(s => {
+                  const color = s === 'ok' ? 'var(--ok)'
+                                : s === 'err' ? 'var(--err)'
+                                : s === 'missed' ? 'var(--warn)'
+                                : 'var(--fg-5)';  // skipped
+                  return '<span class="run-dot" style="background:' + color + '" title="' + s + '"></span>';
+                }).join('') +
+              ((j.recent.counts.missed || 0) > 0
+                ? '<span style="margin-left:8px;font-size:10px;color:var(--warn);font-family:var(--font-mono)">' + j.recent.counts.missed + ' missed</span>'
+                : '') +
+              '</div>'
+            : '') +
           '</div>';
       }).join('') +
       (!userJobs.length ? '<div style="grid-column:1/-1;padding:60px 0;text-align:center;color:var(--fg-4)">No routines yet. Click <span class="mono">New routine</span> to create one.</div>' : '') +

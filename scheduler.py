@@ -369,6 +369,10 @@ def list_tasks() -> list[dict]:
             last = f"err · {err_short}"
         else:
             last = ""
+        # Per-fire history breakdown — last 20 runs grouped by status.
+        # Drives the UI's "recent" sparkline + "N missed" badge.
+        recent = count_recent_runs_by_status(id_, limit=20) if id_ else {"counts": {}, "series": []}
+
         tasks.append({
             "id": id_, "name": name, "task": task, "schedule": schedule,
             "next_run": next_dt, "last_run": last_dt,
@@ -387,6 +391,9 @@ def list_tasks() -> list[dict]:
             # the Run button while this is true so users don't pile up
             # concurrent-click attempts that'll just get lock-rejected.
             "firing": is_routine_firing(thread_id) if thread_id else False,
+            # recent: {counts: {ok, err, missed, skipped}, series: [..]}
+            # last N fires oldest→newest for sparkline rendering.
+            "recent": recent,
         })
     return tasks
 
@@ -565,9 +572,22 @@ def _loop():
     # Without this, tasks with past next_run fire immediately on restart
     # but telegram isn't ready yet → notifications silently dropped.
     time.sleep(15)
+    # One-time startup pass: if the server was offline across scheduled
+    # slots, record them as status=missed in routine_runs so history
+    # reflects reality. Does NOT re-fire missed slots (just logs) —
+    # _check_and_run below will fire the single next-due slot as normal.
+    try:
+        n = detect_missed_runs()
+        if n:
+            _log.info(f"scheduler startup: logged {n} missed fires across routines")
+    except Exception:
+        _log.error("detect_missed_runs failed", exc_info=True)
     while True:
         try:
             _check_and_run()
+            # Heartbeat the liveness stamp so detect_missed_runs can
+            # distinguish "was running" from "was down".
+            db.kv_set("scheduler:last_check", str(time.time()))
         except Exception:
             _log.error("scheduler loop error", exc_info=True)
         time.sleep(30)
@@ -579,12 +599,12 @@ def _check_and_run():
     now = time.time()
 
     rows = db.fetchall(
-        "SELECT id, name, task, schedule, repeat, thread_id FROM scheduled_tasks "
+        "SELECT id, name, task, schedule, next_run, repeat, thread_id FROM scheduled_tasks "
         "WHERE enabled=1 AND next_run<=?",
         (now,)
     )
 
-    for id_, name, task, schedule, repeat, thread_id in rows:
+    for id_, name, task, schedule, scheduled_at, repeat, thread_id in rows:
         # Pre-reschedule to prevent duplicate execution if task takes >30s
         if repeat:
             # Use _parse_schedule to compute the NEXT actual fire time —
@@ -621,7 +641,8 @@ def _check_and_run():
                 # thread_id — lazy-create one now and stamp back.
                 if not thread_id:
                     thread_id = _ensure_routine_thread(id_, name, schedule)
-                result = _execute_routine(task, name, id_, thread_id)
+                result = _execute_routine(task, name, id_, thread_id,
+                                            scheduled_at=scheduled_at)
             else:
                 result = _execute_task(task)
         except Exception as e:
@@ -721,8 +742,155 @@ def _get_fire_lock(thread_id: str) -> threading.Lock:
         return lk
 
 
+# ── Per-fire run log ──────────────────────────────────────────────────
+
+
+def _log_run(cron_id: int, *, scheduled_at: float, started_at: float | None,
+              finished_at: float | None, duration_ms: int | None,
+              status: str, error: str | None, result_preview: str,
+              thread_id: str) -> int | None:
+    """Append one row to routine_runs. Returns the new id (or None on error).
+
+    status values:
+      ok / err — agent.run completed; err means exception or error marker
+      missed   — server was offline at the scheduled time; never executed
+      skipped  — per-thread fire lock held (concurrent fire in flight)
+    """
+    try:
+        import db as _db
+        conn = _db._get_conn()
+        cur = conn.execute(
+            "INSERT INTO routine_runs "
+            "(cron_id, scheduled_at, started_at, finished_at, duration_ms, "
+            " status, error, result_preview, thread_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (cron_id, scheduled_at, started_at, finished_at, duration_ms,
+             status, error, (result_preview or "")[:500], thread_id or ""),
+        )
+        conn.commit()
+        return cur.lastrowid
+    except Exception as e:
+        _log.debug(f"routine_runs insert failed for #{cron_id}: {e}")
+        return None
+
+
+def list_runs(cron_id: int, limit: int = 20) -> list[dict]:
+    """Recent runs for a routine, newest first."""
+    rows = db.fetchall(
+        "SELECT id, scheduled_at, started_at, finished_at, duration_ms, "
+        "       status, error, result_preview, thread_id "
+        "FROM routine_runs WHERE cron_id=? ORDER BY id DESC LIMIT ?",
+        (cron_id, limit),
+    )
+    from datetime import datetime as _dt
+
+    def _fmt(ts: float | None) -> str:
+        return _dt.fromtimestamp(ts, _tz()).strftime("%Y-%m-%d %H:%M") if ts else ""
+
+    out = []
+    for (rid, sched, started, finished, dur, status, error, result, tid) in rows:
+        fmt = _fmt  # keep the short name for the dict comprehension below
+        out.append({
+            "id": rid,
+            "scheduled_at": fmt(sched),
+            "started_at": fmt(started),
+            "finished_at": fmt(finished),
+            "duration_ms": int(dur or 0),
+            "status": status,
+            "error": error or "",
+            "result_preview": result or "",
+            "thread_id": tid or "",
+        })
+    return out
+
+
+def count_recent_runs_by_status(cron_id: int, limit: int = 20) -> dict:
+    """Breakdown of the last ``limit`` runs by status — drives the UI dots."""
+    rows = db.fetchall(
+        "SELECT status FROM routine_runs WHERE cron_id=? ORDER BY id DESC LIMIT ?",
+        (cron_id, limit),
+    )
+    counts = {"ok": 0, "err": 0, "missed": 0, "skipped": 0}
+    series = []
+    for (status,) in rows:
+        counts[status] = counts.get(status, 0) + 1
+        series.append(status)
+    return {"counts": counts, "series": list(reversed(series))}
+
+
+def detect_missed_runs() -> int:
+    """Scan for routines whose scheduled slot(s) lapsed while the server
+    was offline; insert routine_runs rows with status=missed so the
+    history reflects reality honestly.
+
+    Called once from the scheduler loop at startup. Uses a kv stamp
+    ``scheduler:last_check`` to bound the lookback — anything before
+    that we already processed in a previous boot.
+
+    Caps missed-insertions at 10 per routine so a long outage doesn't
+    create hundreds of rows the user has to scroll through.
+    """
+    try:
+        last_check = float(db.kv_get("scheduler:last_check") or 0)
+    except Exception:
+        last_check = 0
+    now = time.time()
+    if last_check == 0:
+        # First boot after this feature shipped — stamp now without
+        # inventing historical misses.
+        db.kv_set("scheduler:last_check", str(now))
+        return 0
+
+    # Gap threshold: only treat as "missed" if we were offline for at
+    # least 2 × the scheduler poll interval (30s). Shorter gaps are
+    # normal tick jitter, not downtime.
+    if now - last_check < 60:
+        db.kv_set("scheduler:last_check", str(now))
+        return 0
+
+    _ensure_table()
+    rows = db.fetchall(
+        "SELECT id, name, task, schedule, next_run, repeat, enabled, thread_id "
+        "FROM scheduled_tasks WHERE enabled=1"
+    )
+    total_missed = 0
+    for (cron_id, name, task, schedule, next_run, repeat, enabled,
+         thread_id) in rows:
+        if not repeat:
+            continue  # one-off tasks are simply late; not multiple misses
+        if not _is_routine(task):
+            continue  # system tasks (heartbeat/synthesis) self-correct
+        # Parse schedule to get the interval for step-counting
+        _, interval = _parse_schedule(schedule)
+        if not interval or interval <= 0:
+            continue
+        # How many scheduled slots fall between last_check and now where
+        # the routine *should* have fired?
+        slot = next_run - interval  # the missed slot before next_run
+        missed = 0
+        while slot > last_check and slot < now and missed < 10:
+            _log_run(
+                cron_id,
+                scheduled_at=slot,
+                started_at=None,
+                finished_at=None,
+                duration_ms=None,
+                status="missed",
+                error="server was offline at the scheduled time",
+                result_preview="",
+                thread_id=thread_id or "",
+            )
+            missed += 1
+            slot -= interval
+        if missed:
+            _log.info(f"routine #{cron_id} '{name}': {missed} missed fires logged")
+            total_missed += missed
+    db.kv_set("scheduler:last_check", str(now))
+    return total_missed
+
+
 def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
-                      thread_id: str) -> str:
+                      thread_id: str, scheduled_at: float | None = None) -> str:
     """Run a routine firing through agent.run inside its permanent thread.
 
     Each firing appends a fresh user → assistant turn to ``thread_id``,
@@ -731,11 +899,13 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     Held behind a per-thread lock — two concurrent fires would race over
     the user/assistant writes. Second caller no-ops cleanly instead.
 
-    Metrics update (run_count++, last_run, last_status, last_error,
-    last_duration_ms, last_result) happens HERE for every successful
-    fire regardless of trigger source — scheduler tick, manual Run,
-    auto-fire at create. ``_check_and_run`` used to do this itself but
-    that meant manual + auto fires never incremented the counter.
+    Writes BOTH:
+      - routine_runs row (per-fire history, status=ok/err/skipped)
+      - scheduled_tasks metrics (last_run, run_count, last_status, ...)
+
+    ``scheduled_at`` lets the caller record when the run was *supposed*
+    to happen — for scheduler ticks it's the row's next_run before
+    rescheduling; for manual/auto fires it defaults to now.
 
     Returns the reply text (empty string if another fire was in progress
     and we chose to skip rather than queue).
@@ -743,12 +913,20 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     import agent
     from turn_context import TurnContext
 
+    sched_at = scheduled_at if scheduled_at is not None else time.time()
     lock = _get_fire_lock(thread_id)
     # Non-blocking acquire: if another fire is already in flight for
-    # this routine's thread, skip this one rather than queuing up a
-    # runaway backlog.
+    # this routine's thread, log as skipped and bail.
     if not lock.acquire(blocking=False):
         _log.info(f"routine #{cron_id} '{routine_name}': skipped (fire already in progress)")
+        if cron_id:
+            _log_run(
+                cron_id, scheduled_at=sched_at, started_at=time.time(),
+                finished_at=time.time(), duration_ms=0,
+                status="skipped",
+                error="another fire was already in progress on this thread",
+                result_preview="", thread_id=thread_id,
+            )
         return ""
 
     t0 = time.time()
@@ -768,19 +946,29 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
         duration_ms = int((time.time() - t0) * 1000)
         lock.release()
 
-    # Metrics update — same shape as _check_and_run produces, but runs
-    # for every fire source. cron_id=0 is used when the caller doesn't
-    # have a real id (some legacy paths) — skip the DB write in that case.
+    finished_at = time.time()
+    status = "err" if (error_msg or _looks_like_error(reply)) else "ok"
+    last_result_preview = (error_msg or reply or "")[:500]
+
+    # Per-fire run history — one row per attempt
     if cron_id:
-        status = "err" if (error_msg or _looks_like_error(reply)) else "ok"
-        last_result_preview = (error_msg or reply or "")[:500]
+        _log_run(
+            cron_id, scheduled_at=sched_at, started_at=t0,
+            finished_at=finished_at, duration_ms=duration_ms,
+            status=status, error=error_msg,
+            result_preview=last_result_preview, thread_id=thread_id,
+        )
+
+    # Metrics update — aggregate "last run" fields on scheduled_tasks,
+    # used by card stats without needing to scan routine_runs.
+    if cron_id:
         try:
             db.execute(
                 "UPDATE scheduled_tasks "
                 "SET last_run=?, run_count=COALESCE(run_count,0)+1, "
                 "    last_status=?, last_error=?, last_duration_ms=?, last_result=? "
                 "WHERE id=?",
-                (time.time(), status, error_msg, duration_ms,
+                (finished_at, status, error_msg, duration_ms,
                  last_result_preview, cron_id),
             )
         except Exception as e:
