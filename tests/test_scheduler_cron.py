@@ -325,6 +325,57 @@ def test_delete_thread_leaves_system_tasks_alone(fresh_scheduler):
     assert any(t["name"] == sched.HEARTBEAT_TASK_NAME for t in sched.list_tasks())
 
 
+def test_set_enabled_toggles_and_scheduler_respects_it(fresh_scheduler, monkeypatch):
+    """set_enabled(task_id) toggles; scheduler skips disabled rows.
+
+    Three things happen in one test to cover the whole pause path:
+      1. add a routine → enabled=True
+      2. toggle → enabled=False; list_tasks reflects it
+      3. force due + _check_and_run → NO fire (because disabled)
+    """
+    sched = fresh_scheduler
+    import agent
+
+    fires = []
+
+    class _FakeResult:
+        def __init__(self, r): self.reply = r
+    def _fake_run(user_input, **kw):
+        fires.append(user_input)
+        return _FakeResult("ok")
+    monkeypatch.setattr(agent, "run", _fake_run)
+
+    r = sched.add("paused-thing", "do it", "every 1h", skip_dry_run=True)
+    cron_id = [t["id"] for t in sched.list_tasks() if t["name"] == "paused-thing"][0]
+
+    # Toggle off
+    out = sched.set_enabled(cron_id)
+    assert out == {"ok": True, "enabled": False}
+    entry = next(t for t in sched.list_tasks() if t["id"] == cron_id)
+    assert entry["enabled"] is False
+
+    # Force due; scheduler SHOULD NOT fire a disabled row
+    import db
+    import time as _t
+    db.execute("UPDATE scheduled_tasks SET next_run=? WHERE id=?",
+               (_t.time() - 10, cron_id))
+    sched._check_and_run()
+    assert fires == [], "disabled routine must not fire"
+
+    # Toggle back on, now it fires
+    sched.set_enabled(cron_id, enabled=True)
+    db.execute("UPDATE scheduled_tasks SET next_run=? WHERE id=?",
+               (_t.time() - 10, cron_id))
+    sched._check_and_run()
+    assert fires == ["do it"]
+
+
+def test_set_enabled_missing_id_returns_error(fresh_scheduler):
+    sched = fresh_scheduler
+    out = sched.set_enabled(99999)
+    assert "error" in out
+
+
 def test_legacy_schema_heals_via_ensure_table(qwe_temp_data_dir):
     """A DB that only has the pre-metrics columns auto-upgrades on first use.
 

@@ -2854,18 +2854,28 @@ function patchThreadHeader() {
   if (!isRoutine) return;
   const charCount = state.messages.reduce((n, m) => n + (m.content || '').length, 0);
   const routineJob = (state.cronJobs || []).find(j => j.threadId === t.id);
+  const paused = routineJob && (routineJob.status === 'paused' || routineJob.enabled === false);
+  const pauseBtn = routineJob
+    ? '<button class="btn-secondary" data-act="routine-toggle" data-routine-id="' + esc(routineJob.id) + '" title="' + (paused ? 'Resume this routine' : 'Pause — scheduler will skip firings') + '" style="display:inline-flex;align-items:center;gap:6px">' +
+        ico(paused ? 'play' : 'pause', 11) + (paused ? 'Resume' : 'Pause') + '</button>'
+    : '';
   const runBtn = routineJob
     ? (routineJob.firing
-        ? '<button class="btn-secondary" disabled style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;opacity:0.6">' +
+        ? '<button class="btn-secondary" disabled style="display:inline-flex;align-items:center;gap:6px;opacity:0.6">' +
             '<span class="spinner" style="width:10px;height:10px;border:2px solid var(--line-2);border-top-color:var(--accent);border-radius:50%;animation:kb-spin 0.8s linear infinite;display:inline-block"></span>' +
             'Running…</button>'
-        : '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">' +
-            ico('play', 11) + 'Run now</button>')
+        : (paused
+            ? ''
+            : '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="display:inline-flex;align-items:center;gap:6px">' +
+                ico('play', 11) + 'Run now</button>'))
+    : '';
+  const routineCtrls = routineJob
+    ? '<span style="margin-left:auto;display:flex;gap:6px">' + pauseBtn + runBtn + '</span>'
     : '';
   const routineBadge = routineJob
     ? (routineJob.firing
         ? '<span class="status-badge warn" style="margin-left:8px"><span class="sbdot"></span>running</span>'
-        : (routineJob.status === 'paused' || routineJob.enabled === false
+        : (paused
             ? '<span class="status-badge" style="margin-left:8px"><span class="sbdot"></span>paused</span>'
             : (routineJob.lastStatus === 'err'
                 ? '<span class="status-badge err" style="margin-left:8px"><span class="sbdot"></span>last run failed</span>'
@@ -2875,7 +2885,7 @@ function patchThreadHeader() {
     '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center;flex-wrap:wrap;gap:6px"><span class="tag">routine</span>' +
     routineBadge +
     '<span class="meta">' + esc(fmtTime(t.created_at)) + ' · ' + state.messages.length + ' messages · ~' + Math.round(charCount/4).toLocaleString() + ' tokens</span>' +
-    runBtn + '</div>' +
+    routineCtrls + '</div>' +
     '<h1>' + esc(t.name || 'New thread') + '</h1>' +
     (routineJob
       ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' +
@@ -2891,8 +2901,8 @@ function patchThreadHeader() {
   const next = tmp.firstElementChild;
   if (next) {
     old.replaceWith(next);
-    // Rewire the Run-now button on the new node (wireEvents won't run
-    // because we skipped the full render).
+    // Rewire interactive buttons on the new node (wireEvents skipped
+    // because we went through the silent-poll path).
     next.querySelectorAll('[data-act="routine-run-now"]').forEach(b => {
       b.onclick = async () => {
         const rid = b.dataset.routineId;
@@ -2903,6 +2913,17 @@ function patchThreadHeader() {
           else toast('routine firing…');
           setTimeout(() => loadActiveMessages({ silent: true }), 400);
         } catch { toast('run failed', 'err'); }
+      };
+    });
+    next.querySelectorAll('[data-act="routine-toggle"]').forEach(b => {
+      b.onclick = async () => {
+        const rid = b.dataset.routineId;
+        if (!rid) return;
+        try {
+          const r = await api('/api/cron/' + rid + '/toggle', { method: 'POST' });
+          toast(r && r.enabled ? 'resumed' : 'paused');
+          await loadCron();  // full refresh rebuilds header with the new state
+        } catch { toast('toggle failed', 'err'); }
       };
     });
   }
@@ -3521,13 +3542,24 @@ function renderChatView() {
       }
     }
   }
+  const paused = routineJob && (routineJob.status === 'paused' || routineJob.enabled === false);
+  const pauseBtn = routineJob
+    ? '<button class="btn-secondary" data-act="routine-toggle" data-routine-id="' + esc(routineJob.id) + '" title="' + (paused ? 'Resume this routine' : 'Pause — scheduler will skip firings') + '" style="display:inline-flex;align-items:center;gap:6px">' +
+        ico(paused ? 'play' : 'pause', 11) + (paused ? 'Resume' : 'Pause') + '</button>'
+    : '';
   const runBtn = routineJob
     ? (routineJob.firing
-        ? '<button class="btn-secondary" disabled style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;opacity:0.6">' +
+        ? '<button class="btn-secondary" disabled style="display:inline-flex;align-items:center;gap:6px;opacity:0.6">' +
             '<span class="spinner" style="width:10px;height:10px;border:2px solid var(--line-2);border-top-color:var(--accent);border-radius:50%;animation:kb-spin 0.8s linear infinite;display:inline-block"></span>' +
             'Running…</button>'
-        : '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">' +
-            ico('play', 11) + 'Run now</button>')
+        : (paused
+            ? ''  // while paused, hide Run-now so the only way to fire is to resume first
+            : '<button class="btn-secondary" data-act="routine-run-now" data-routine-id="' + esc(routineJob.id) + '" style="display:inline-flex;align-items:center;gap:6px">' +
+                ico('play', 11) + 'Run now</button>'))
+    : '';
+  // Combined control strip — pause + run sit together at the end.
+  const routineCtrls = routineJob
+    ? '<span style="margin-left:auto;display:flex;gap:6px">' + pauseBtn + runBtn + '</span>'
     : '';
   // Always-on status badge for routine threads. Three states so the
   // user can tell at a glance: actively firing now, scheduled & healthy,
@@ -3545,7 +3577,7 @@ function renderChatView() {
     ? '<div class="thread-header"><div class="meta-row" style="display:flex;align-items:center;flex-wrap:wrap;gap:6px"><span class="tag">' + (isRoutine ? 'routine' : 'thread') + '</span>' +
       routineBadge +
       '<span class="meta">' + esc(fmtTime(t.created_at)) + ' · ' + state.messages.length + ' messages · ~' + Math.round(charCount/4).toLocaleString() + ' tokens</span>' +
-      runBtn + '</div>' +
+      routineCtrls + '</div>' +
       '<h1>' + esc(t.name || 'New thread') + '</h1>' +
       (routineJob
         ? '<p class="sub" style="margin-top:4px;font-size:12px;color:var(--fg-4);font-family:var(--font-mono)">' +
@@ -4102,16 +4134,24 @@ function renderSchedulerView() {
         const schedLine = scheduleHuman(j.cron);
         const nextLine = j.next ? ' · Next run ' + esc(j.next) : '';
         // Click-to-open: whole card is an anchor to the routine's thread.
-        // Delete button stops propagation so it doesn't navigate-on-delete.
-        return '<div class="job-card"' + (hasThread ? ' data-open-thread="' + esc(j.threadId) + '" style="cursor:pointer"' : '') + '>' +
+        // Icon buttons stopPropagation in the handler so they don't
+        // navigate-on-click.
+        const isPaused = j.status === 'paused';
+        const cardStyle = 'cursor:' + (hasThread ? 'pointer' : 'default') + ';' +
+                          (isPaused ? 'opacity:0.55;' : '');
+        return '<div class="job-card"' + (hasThread ? ' data-open-thread="' + esc(j.threadId) + '"' : '') + ' style="' + cardStyle + '">' +
           '<div class="job-hdr"><div style="flex:1">' +
             '<div class="job-title-row">' +
               '<span class="status-dot ' + (j.status === 'active' ? 'ok' : '') + (errLast ? ' err' : '') + '"></span>' +
               '<span class="job-title">' + esc(j.name) + '</span>' +
+              (isPaused ? '<span class="tag" style="margin-left:6px;font-size:9px">paused</span>' : '') +
+              (j.firing ? '<span class="status-badge warn" style="margin-left:6px;font-size:9px"><span class="sbdot"></span>running</span>' : '') +
             '</div>' +
             '<span class="job-cron">' + esc(schedLine) + nextLine + '</span></div>' +
             '<div style="display:flex;gap:2px;opacity:0.7">' +
-              '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="run-now" title="Run now (fire the routine immediately)">' + ico('play', 11) + '</button>' +
+              '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="toggle" title="' + (isPaused ? 'Resume' : 'Pause') + '">' + ico(isPaused ? 'play' : 'pause', 11) + '</button>' +
+              (isPaused ? '' :
+                '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="run-now" title="Run now (fire the routine immediately)">' + ico('play', 11) + '</button>') +
               '<button class="icon-btn" data-cron="' + esc(j.id) + '" data-cron-act="delete" title="Delete routine (archives the thread)">' + ico('trash', 11) + '</button>' +
             '</div></div>' +
           (j.last
@@ -5692,6 +5732,17 @@ function wireEvents() {
       finally { setTimeout(() => { b.disabled = false; b.innerHTML = orig; }, 1500); }
     };
   });
+  document.querySelectorAll('[data-act="routine-toggle"]').forEach(b => {
+    b.onclick = async () => {
+      const rid = b.dataset.routineId;
+      if (!rid) return;
+      try {
+        const r = await api('/api/cron/' + rid + '/toggle', { method: 'POST' });
+        toast(r && r.enabled ? 'resumed' : 'paused');
+        await loadCron();  // full refresh so header + card rebuild with new state
+      } catch { toast('toggle failed', 'err'); }
+    };
+  });
   document.querySelectorAll('[data-act="drop-frame"]').forEach(b => { b.onclick = () => { state.capturedFrame = null; render(); }; });
   document.querySelectorAll('[data-drop-att]').forEach(b => { b.onclick = () => dropAttachment(b.dataset.dropAtt); });
 
@@ -6581,6 +6632,13 @@ function wireEvents() {
         if (!confirm('Delete this routine?\n\nThe routine and its chat thread (including all run history) will be permanently removed.')) return;
         try { await api('/api/cron/' + id, { method: 'DELETE' }); toast('deleted'); loadCron(); loadThreads({ silent: true }); }
         catch { toast('delete failed', 'err'); }
+      } else if (act === 'toggle') {
+        // Pause / resume — scheduler loop skips disabled rows.
+        try {
+          const r = await api('/api/cron/' + id + '/toggle', { method: 'POST' });
+          toast(r && r.enabled ? 'resumed' : 'paused');
+          loadCron();
+        } catch { toast('toggle failed', 'err'); }
       } else if (act === 'run-now') {
         // Fire the routine immediately — agent runs in its thread and
         // the reply streams into the same conversation. After triggering,

@@ -1523,6 +1523,21 @@ async def remove_cron(task_id: int):
     return {"result": scheduler.remove(task_id)}
 
 
+@app.post("/api/cron/{task_id}/toggle")
+async def toggle_cron(task_id: int, data: dict | None = None):
+    """Pause or resume a routine.
+
+    Body ``{enabled: true|false}`` explicit; empty body toggles.
+    """
+    enabled = None
+    if data and "enabled" in data:
+        enabled = bool(data["enabled"])
+    result = scheduler.set_enabled(task_id, enabled)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    return result
+
+
 @app.post("/api/cron/{task_id}/run")
 async def run_cron_now(task_id: int):
     """Fire a routine immediately (manual trigger, out-of-schedule).

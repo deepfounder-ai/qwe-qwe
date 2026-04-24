@@ -412,6 +412,33 @@ def remove(task_id: int) -> str:
     return f"✓ Task #{task_id} removed"
 
 
+def set_enabled(task_id: int, enabled: bool | None = None) -> dict:
+    """Pause or resume a routine.
+
+    ``enabled=None`` toggles; otherwise sets explicitly. System tasks
+    (heartbeat, synthesis) can be paused too — users pause heartbeat
+    via the Heartbeat settings tab, and ``set_enabled`` is the same
+    path.
+
+    Returns ``{"ok": True, "enabled": <new state>}`` or
+    ``{"error": "..."}`` on missing id.
+    """
+    _ensure_table()
+    row = db.fetchone(
+        "SELECT enabled FROM scheduled_tasks WHERE id=?", (task_id,),
+    )
+    if not row:
+        return {"error": f"task {task_id} not found"}
+    current = bool(row[0])
+    new_state = (not current) if enabled is None else bool(enabled)
+    db.execute(
+        "UPDATE scheduled_tasks SET enabled=? WHERE id=?",
+        (1 if new_state else 0, task_id),
+    )
+    _log.info(f"routine #{task_id}: enabled {current} → {new_state}")
+    return {"ok": True, "enabled": new_state}
+
+
 def remove_by_thread(thread_id: str) -> int:
     """Reverse-link cleanup: when a thread is deleted directly, the
     routine pointing at it must also go — otherwise the next tick fires
