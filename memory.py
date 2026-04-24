@@ -876,6 +876,7 @@ def _save_single(text: str, tag: str, dedup: bool = True,
                 import db
                 db.fts_upsert("fts_memory", "point_id", str(existing.id),
                               {"tag": tag, "text": text})
+                _write_markdown_companion(str(existing.id), text, tag, thread_id, meta)
                 return str(existing.id)
         except Exception as e:
             _log.debug(f"dedup check failed, saving as new: {e}")
@@ -887,7 +888,29 @@ def _save_single(text: str, tag: str, dedup: bool = True,
     )
     import db
     db.fts_upsert("fts_memory", "point_id", point_id, {"tag": tag, "text": text})
+    _write_markdown_companion(point_id, text, tag, thread_id, meta)
     return point_id
+
+
+def _write_markdown_companion(point_id: str, text: str, tag: str,
+                                thread_id: str | None, meta: dict | None) -> None:
+    """Mirror a saved memory to its markdown file.
+
+    Phase 1 of Living Memory: every Qdrant save also writes a .md file
+    under ``~/.qwe-qwe/memories/atoms/<shard>/mem_<id>.md``. Markdown is
+    canonical, Qdrant is the derived search index (see ADR-0001).
+
+    Swallows all exceptions — the companion file is best-effort for now.
+    If markdown write fails, the Qdrant save still succeeded; the
+    ``memory_store.backfill_from_qdrant`` pass on next boot will try
+    again. Once Phase 2 lands this must become a hard dependency.
+    """
+    try:
+        import memory_store
+        memory_store.write(point_id, text, tag=tag,
+                            thread_id=thread_id, meta=meta)
+    except Exception as e:
+        _log.debug(f"markdown companion write failed for {point_id}: {e}")
 
 
 # ── Synthesis Queue ──
@@ -971,7 +994,7 @@ def get_all_entities(limit: int = 200) -> list[dict]:
 # ── Delete / Cleanup ──
 
 def delete(point_id: str) -> bool:
-    """Delete a single memory by its point ID (Qdrant + FTS5)."""
+    """Delete a single memory by its point ID (Qdrant + FTS5 + markdown)."""
     try:
         qc = _get_qdrant()
         qc.delete(config.QDRANT_COLLECTION, points_selector=[point_id])
@@ -979,6 +1002,12 @@ def delete(point_id: str) -> bool:
         return False
     import db
     db.fts_delete("fts_memory", "point_id", point_id)
+    # Phase 1 Living Memory: keep the .md layer in sync
+    try:
+        import memory_store
+        memory_store.delete(point_id)
+    except Exception as e:
+        _log.debug(f"markdown companion delete failed for {point_id}: {e}")
     return True
 
 

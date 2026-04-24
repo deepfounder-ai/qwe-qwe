@@ -166,6 +166,13 @@ def _integrity_block_reason(p: Path) -> str | None:
         data_dir = str(config.DATA_DIR.resolve())
         if s.startswith(os.path.join(data_dir, "memory") + os.sep):
             return "Direct writes to the Qdrant memory store are blocked — use memory_save"
+        # Markdown canonical storage — Living Memory phase 1 (ADR-0001).
+        # Users can hand-edit these with a normal editor, but the agent
+        # should never write here directly; memory_save is the path.
+        if s.startswith(os.path.join(data_dir, "memories") + os.sep):
+            return ("Direct writes to the markdown memory store are blocked — "
+                    "use memory_save (hand-edit from your editor is fine, just "
+                    "not via the agent's write_file tool)")
     except Exception:
         pass
 
