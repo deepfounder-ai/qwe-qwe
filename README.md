@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.17.30-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.17.31-blue" alt="version">
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
@@ -393,18 +393,31 @@ Layer 1: RAW           Layer 2: ENTITIES        Layer 3: WIKI
 - **Experience learning**: past task outcomes inform future strategies
 - **Modes**: in-memory (testing), disk (default), or remote Qdrant server
 
-## Scheduler
+## Routines (scheduled tasks)
 
-Cron-like task scheduling with natural syntax:
+A routine is a chat thread with a schedule attached. Each firing appends a new user + assistant turn to the same thread — tool calls, thinking steps, and replies all visible as a normal conversation. Corrections you add between firings become context the agent sees on the next run, so you can debug a misbehaving routine through dialogue.
+
+**Schedule syntax** (natural, no 5-field cron):
 
 ```
-"in 5m"        -> run once in 5 minutes
-"every 2h"     -> repeat every 2 hours
-"daily 09:00"  -> every day at 09:00
-"14:30"        -> once today/tomorrow at 14:30
+"in 5m"             -> run once in 5 minutes
+"every 2h"          -> repeat every 2 hours
+"every 30m"         -> repeat every 30 minutes
+"every 2 days 09:00" -> repeat every 2 days at 09:00
+"daily 09:00"       -> every day at 09:00
+"weekdays 09:00"    -> Mon-Fri at 09:00  (alias: "будни")
+"weekends 10:00"    -> Sat-Sun at 10:00  (alias: "выходные")
+"mon,wed,fri 14:30" -> those days at 14:30  (alias: "пн,ср,пт")
+"14:30"             -> once today/tomorrow at 14:30
 ```
 
-Results delivered to Telegram and Web UI. Simple reminders bypass LLM for instant delivery.
+**UI controls**:
+- Routines tab → New routine modal (frequency picker with day chips + time)
+- ▶ Run now button fires out-of-schedule; ⏸ Pause / Resume skips firings without deleting
+- Four-state status badge: running / active / last run failed / paused
+- Routine's thread opens with one click from the card; deleting either side cascades
+
+**Tools available inside routines**: everything in the core tool set, plus `telegram_notify_owner(text)` for one-call sends to the verified owner (no token/chat-id wrangling).
 
 ## Telegram Bot Setup
 
