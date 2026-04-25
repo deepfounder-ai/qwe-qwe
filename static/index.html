@@ -682,6 +682,10 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
   transition: all 0.12s;
 }
 .icon-btn:hover { color: var(--fg-2); background: var(--surface-2); }
+/* Save-to-memory confirmation flash — applied for ~1.5s after a
+   successful POST /api/memory/save so the user gets visual proof
+   beyond just the toast. */
+.icon-btn.saved { color: var(--ok); background: rgba(74,222,128,0.12); }
 .composer .agent-pill {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 4px 8px; border-radius: 5px;
@@ -5923,9 +5927,23 @@ function wireEvents() {
     b.onclick = async () => {
       const text = decodeURIComponent(b.dataset.text || '');
       if (!text.trim()) return;
-      // Send a sneaky message telling the agent to memorize this (uses its memory_save tool)
-      sendMessage('Save this to memory: ' + text.slice(0, 500));
-      toast('asking agent to save…');
+      // Direct save — bypass the agent. Going through the LLM was slow
+      // and the agent's own memory-discipline rule biased it AWAY from
+      // saving on user request. POST /api/memory/save persists the
+      // text in one round-trip, no LLM cost, no fake user message.
+      try {
+        const r = await api('/api/memory/save', { method: 'POST', body: {
+          text, tag: 'user', thread_id: state.activeThreadId || undefined,
+        }});
+        if (r && r.ok) {
+          toast('saved to memory');
+          // Visual confirmation on the button — flash to filled state
+          b.classList.add('saved');
+          setTimeout(() => b.classList.remove('saved'), 1500);
+        } else {
+          toast(r && r.error ? r.error : 'save failed', 'err');
+        }
+      } catch { toast('save failed', 'err'); }
     };
   });
   document.querySelectorAll('[data-act="toggle-inspector"]').forEach(b => { b.onclick = () => { state.inspectorOn = !state.inspectorOn; render(); }; });

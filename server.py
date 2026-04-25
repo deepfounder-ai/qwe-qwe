@@ -1171,6 +1171,34 @@ async def delete_secret(key: str):
     return {"result": vault.delete(key)}
 
 
+@app.post("/api/memory/save")
+async def memory_save_direct(data: dict):
+    """Save text to long-term memory directly, bypassing the agent.
+
+    UI's 'Save to memory' button on chat messages used to round-trip
+    through the LLM ("Save this to memory: <text>"), which was slow,
+    burned tokens, and often skipped the save (rule 8 in the system
+    prompt biases the agent toward NOT saving on its own initiative).
+    This is a direct path: write to memory and surface success/failure
+    without an agent round-trip.
+
+    Body: ``{text: "...", tag?: "user", thread_id?: "..."}``
+    """
+    text = (data.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    if len(text) > 8000:
+        text = text[:8000]
+    tag = (data.get("tag") or "user").strip() or "user"
+    thread_id = data.get("thread_id")
+    try:
+        point_id = mem.save(text, tag=tag, thread_id=thread_id, dedup=True)
+    except Exception as e:
+        _log.warning(f"manual memory save failed: {e}", exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return {"ok": True, "id": point_id, "tag": tag}
+
+
 @app.post("/api/abort")
 async def abort_generation():
     """Abort current agent generation.
