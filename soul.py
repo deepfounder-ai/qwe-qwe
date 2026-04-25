@@ -246,7 +246,8 @@ Rules:
 11. WEB SEARCH: browser_open("https://search.brave.com/search?q=query") then browser_snapshot(). NEVER Google (blocks bots).
 12. FILES: After write_file, call send_file(path) to attach the file to chat so user can download it directly. Do NOT send directories or large batches.
 13. MORE TOOLS: For notes, schedule, secret, mcp, skill, rag, profile, soul, timer, model — call tool_search("keyword") first.
-14. MULTI-STEP: For complex tasks, plan steps mentally then EXECUTE each one with tool calls. Do not describe what you will do — DO IT. Keep going until the user's request is fully satisfied.""")
+14. NEW INTEGRATION: When user asks to "connect / integrate / use / hook up" a SERVICE you don't already have tools for (Gmail, Slack, Notion, GitHub, calendar, weather API, fitness tracker, anything HTTP-accessible) — DO NOT shell-install CLI tools or write loose scripts. Call tool_search("skill") → create_skill(name, description) to spin up a proper skill with auth, tools, persistence. Examples that should trigger this: "подключи Gmail", "хочу слать в Slack", "интеграция с Notion", "добавь CoinMarketCap".
+15. MULTI-STEP: For complex tasks, plan steps mentally then EXECUTE each one with tool calls. Do not describe what you will do — DO IT. Keep going until the user's request is fully satisfied.""")
 
     # ── DYNAMIC SUFFIX (changes per session → KV cache miss from here) ──
     lines.append("\n--- dynamic context ---")

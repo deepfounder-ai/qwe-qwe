@@ -21,17 +21,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_skill",
-            "description": "Create a new skill in background. Returns immediately, notifies when done.",
+            "description": "Generate a new skill module that adds tools to qwe-qwe. Use this WHENEVER the user asks to connect/integrate/use a service or build a capability that doesn't already exist as a tool — Gmail, Slack, Notion, GitHub, weather APIs, fitness trackers, custom workflows. Do NOT shell-install CLI tools or write loose scripts for these requests; use this tool instead. Runs in background, returns immediately, notifies when ready.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Skill name (lowercase, no spaces, e.g. 'workout_tracker')",
+                        "description": "Skill name (lowercase, no spaces, e.g. 'workout_tracker', 'gmail', 'slack_notify')",
                     },
                     "description": {
                         "type": "string",
-                        "description": "Detailed description of what the skill should do",
+                        "description": "Detailed description of what the skill should do — include the service/API name, what tools it should expose, what auth it needs, and example use cases",
                     },
                 },
                 "required": ["name", "description"],
