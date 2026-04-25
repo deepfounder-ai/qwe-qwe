@@ -17,8 +17,16 @@ Usage:
 import logging
 import logging.handlers
 import json
+import sys
 import time
 from pathlib import Path
+
+# Detect pytest at import time — file handlers point at config.LOGS_DIR
+# which is the user's real ~/.qwe-qwe/ by default. Tests that simulate
+# failures (scheduler "network is on fire", preset unsafe-archive, etc.)
+# would otherwise pollute the production errors.log even when a fixture
+# repoints QWE_DATA_DIR to a tempdir (handlers bind once at import).
+_IN_PYTEST = "pytest" in sys.modules
 
 # ── Log directory ──
 # Import config to get DATA_DIR; fallback to local ./logs if config unavailable
@@ -70,27 +78,31 @@ def _setup() -> logging.Logger:
 
     fmt = StructuredFormatter()
 
-    # 1) Main log — everything INFO+
-    main_handler = logging.handlers.RotatingFileHandler(
-        LOG_DIR / "qwe-qwe.log",
-        maxBytes=5 * 1024 * 1024,  # 5MB
-        backupCount=3,
-        encoding="utf-8",
-    )
-    main_handler.setLevel(logging.INFO)
-    main_handler.setFormatter(fmt)
-    root.addHandler(main_handler)
+    # Under pytest: skip file handlers entirely so test-simulated errors
+    # don't end up in the user's production errors.log. pytest captures
+    # stderr/stdout anyway, so nothing is lost for debugging.
+    if not _IN_PYTEST:
+        # 1) Main log — everything INFO+
+        main_handler = logging.handlers.RotatingFileHandler(
+            LOG_DIR / "qwe-qwe.log",
+            maxBytes=5 * 1024 * 1024,  # 5MB
+            backupCount=3,
+            encoding="utf-8",
+        )
+        main_handler.setLevel(logging.INFO)
+        main_handler.setFormatter(fmt)
+        root.addHandler(main_handler)
 
-    # 2) Error log — WARNING+
-    err_handler = logging.handlers.RotatingFileHandler(
-        LOG_DIR / "errors.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    err_handler.setLevel(logging.WARNING)
-    err_handler.setFormatter(fmt)
-    root.addHandler(err_handler)
+        # 2) Error log — WARNING+
+        err_handler = logging.handlers.RotatingFileHandler(
+            LOG_DIR / "errors.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        err_handler.setLevel(logging.WARNING)
+        err_handler.setFormatter(fmt)
+        root.addHandler(err_handler)
 
     # 3) Console — CRITICAL only (don't spam the TUI)
     console_handler = logging.StreamHandler()
