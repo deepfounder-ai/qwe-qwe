@@ -456,12 +456,31 @@ main.canvas { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   font-family: var(--font-mono); font-size: 9px; padding: 1px 5px; border-radius: 3px;
   background: var(--surface-2); letter-spacing: 0.03em; flex-shrink: 0;
 }
+.kb-row .cat-badge {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+  padding: 1px 5px; border-radius: 3px; letter-spacing: 0.06em;
+  background: rgba(255,255,255,0.02); flex-shrink: 0;
+}
 .kb-row .kb-sub { font-size: 11px; color: var(--fg-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kb-row .kb-stat { text-align: right; }
 .kb-row .kb-stat .num { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .kb-row .kb-stat .lbl { font-family: var(--font-mono); font-size: 9px; color: var(--fg-5); text-transform: uppercase; letter-spacing: 0.05em; }
 .kb-row .kb-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.1s; }
 .kb-row:hover .kb-actions { opacity: 1; }
+
+/* Fact rows share .kb-row layout but expand to show full text on click */
+.kb-row.fact-row { align-items: start; }
+.kb-row.fact-row .fact-full {
+  margin-top: 8px; padding-top: 10px;
+  border-top: 1px dashed var(--line-2);
+  font-size: 12.5px; color: var(--fg-2); line-height: 1.55;
+  white-space: pre-wrap; word-wrap: break-word;
+  display: none;
+}
+.kb-row.fact-row.expanded .fact-full { display: block; }
+.kb-row.fact-row .mem-chev { transition: transform 0.15s; color: var(--fg-5); }
+.kb-row.fact-row.expanded .mem-chev { transform: rotate(90deg); }
+.kb-row.fact-row.expanded .kb-sub { white-space: normal; }
 
 @media (max-width: 1000px) { .kb-grid { grid-template-columns: 1fr; } .graph-panel { height: 380px; } }
 
@@ -687,25 +706,10 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
    beyond just the toast. */
 .icon-btn.saved { color: var(--ok); background: rgba(74,222,128,0.12); }
 
-/* Saved memories panel — sits below the knowledge-sources grid on the
-   Memory page. One row per plain-memory entry (Save-to-memory output,
-   agent's memory_save calls). Distinct visual from indexed sources
-   above because these are free-form facts, not files. */
-.memories-block { margin-top: 8px; }
-.memories-block .hdr h3 { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.01em; color: var(--fg); }
-.memories-list { display: flex; flex-direction: column; gap: 6px; }
-.mem-entry {
-  padding: 10px 14px; border-radius: 8px;
-  background: var(--surface); border: 1px solid var(--line-2);
-  transition: border-color 0.12s;
-}
-.mem-entry:hover { border-color: var(--line-strong); }
-.mem-entry .mem-text {
-  font-size: 12.5px; color: var(--fg-2); line-height: 1.55;
-  white-space: pre-wrap; word-wrap: break-word;
-  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
-  overflow: hidden;
-}
+/* Fact-row chevron — shared between kb-row.fact-row usages below.
+   Styled once here so .mem-chev works whether embedded directly or
+   inside a nested interactive component. */
+.mem-chev { color: var(--fg-5); font-size: 11px; transition: transform 0.15s; display: inline-block; }
 .composer .agent-pill {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 4px 8px; border-radius: 5px;
@@ -2611,6 +2615,7 @@ async function loadMemory() {
       chunks: f.chunks || f.chunk_count || 0,
       size: humanSize(f.size || f.bytes || 0),
       added: f.indexed_at ? fmtTime(f.indexed_at) : (f.added ? fmtTime(f.added) : ''),
+      indexedAt: Number(f.indexed_at || 0),
       tags: f.tags || [],
     }));
     render();
@@ -3994,14 +3999,30 @@ function renderKbRecent() {
 }
 
 function renderMemoryView() {
+  // Unified memory view: file-sources (PDF / URL / MD / code …) + atomic
+  // facts (Save-to-memory + agent's memory_save) merged into one list.
+  // Top-level chips collapse to 3 categories: file / url / fact.
   const files = state.kbFiles || [];
-  const kinds = ['all'].concat(Array.from(new Set(files.map(f => f.kind))));
+  const facts = state.memoryEntries || [];
   const filter = state.kbKindFilter;
   const q = (state.kbSearch || '').toLowerCase();
-  const filtered = files.filter(f =>
-    (filter === 'all' || f.kind === filter) &&
-    (!q || f.name.toLowerCase().includes(q) || (f.sub || '').toLowerCase().includes(q))
-  );
+  const categoryOf = (f) => f.kind === 'url' ? 'url' : 'file';
+  const showFiles = filter === 'all' || filter === 'file' || filter === 'url';
+  const showFacts = filter === 'all' || filter === 'fact';
+  const filteredFiles = showFiles
+    ? files.filter(f =>
+        (filter === 'all' || categoryOf(f) === filter) &&
+        (!q || f.name.toLowerCase().includes(q) || (f.sub || '').toLowerCase().includes(q))
+      )
+    : [];
+  const filteredFacts = showFacts
+    ? facts.filter(e => !q || (e.text || e.preview || '').toLowerCase().includes(q) || (e.tag || '').toLowerCase().includes(q))
+    : [];
+  // Unified chips — always offer all; add only the categories we actually have
+  const kinds = ['all'];
+  if (files.some(f => f.kind !== 'url')) kinds.push('file');
+  if (files.some(f => f.kind === 'url')) kinds.push('url');
+  if (facts.length) kinds.push('fact');
   const totalChunks = files.reduce((n, f) => n + (f.chunks || 0), 0);
   const g = state.kbGraph || { nodes: [], links: [] };
   const status = state.kbStatus;
@@ -4025,11 +4046,15 @@ function renderMemoryView() {
 
   const kbRow = (k) => {
     const kind = KB_KINDS[k.kind] || KB_KINDS.txt;
+    const isUrl = k.kind === 'url';
+    const catBadge = isUrl ? 'URL' : 'FILE';
+    const catColor = isUrl ? 'var(--info)' : 'var(--fg-3)';
     return '<div class="kb-row" data-kb-file="' + esc(k.path || k.id) + '">' +
       '<div class="kind-icon" style="color:' + kind.c + '">' + ico(kind.icon, 13) + '</div>' +
       '<div style="min-width:0">' +
         '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">' +
           '<span class="kb-name">' + esc(k.name) + '</span>' +
+          '<span class="cat-badge" style="color:' + catColor + ';border:1px solid ' + catColor + '44">' + catBadge + '</span>' +
           '<span class="kb-kind" style="color:' + kind.c + ';border:1px solid ' + kind.c + '33">' + kind.label + '</span>' +
         '</div>' +
         '<div class="kb-sub">' + esc(k.sub || '') + '</div>' +
@@ -4042,6 +4067,41 @@ function renderMemoryView() {
       '</div>' +
     '</div>';
   };
+
+  const factRow = (e) => {
+    const ts = e.updated || e.created || '';
+    const tagColor = e.tag === 'user' ? 'var(--accent)'
+                    : e.tag === 'fact' ? 'var(--info)'
+                    : e.tag === 'experience' ? 'var(--magic)'
+                    : 'var(--fg-4)';
+    const firstLine = ((e.text || e.preview || '').split('\n')[0] || '').slice(0, 90) || '(empty)';
+    return '<div class="kb-row fact-row" data-mem-toggle data-mem-id="' + esc(e.id) + '">' +
+      '<div class="kind-icon" style="color:var(--accent)">' +
+        '<span class="mem-chev mono" style="display:inline-block">▸</span>' +
+      '</div>' +
+      '<div style="min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">' +
+          '<span class="kb-name">' + esc(firstLine) + '</span>' +
+          '<span class="cat-badge" style="color:var(--accent);border:1px solid var(--accent)44">FACT</span>' +
+          '<span class="kb-kind" style="color:' + tagColor + ';border:1px solid ' + tagColor + '33">' + esc(e.tag || 'memory') + '</span>' +
+        '</div>' +
+        '<div class="kb-sub">' + esc(ts) + (e.thread_id ? ' · thread ' + esc(e.thread_id.slice(0, 12)) : '') + '</div>' +
+        '<div class="fact-full">' + esc(e.text || e.preview || '') +
+          (e.truncated ? '<div style="margin-top:10px;font-size:10.5px;color:var(--fg-5);font-style:italic">showing first 20K of ' + (e.len || 0) + ' chars — open the markdown twin for the full text</div>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="kb-stat"><div class="num">' + (e.len || 0).toLocaleString() + '</div><div class="lbl">chars</div></div>' +
+      '<div class="kb-actions">' +
+        '<button class="icon-btn" data-mem-del="' + esc(e.id) + '" title="Delete this memory">' + ico('trash', 13) + '</button>' +
+      '</div>' +
+    '</div>';
+  };
+
+  // Merge files + facts into one list, sorted by timestamp desc
+  const unified = [
+    ...filteredFiles.map(f => ({ _type: 'file', _ts: f.indexedAt || 0, html: kbRow(f) })),
+    ...filteredFacts.map(e => ({ _type: 'fact', _ts: (Date.parse(e.updated || e.created || '') || 0) / 1000, html: factRow(e) })),
+  ].sort((a, b) => b._ts - a._ts);
 
   // Total size + last indexed for the eyebrow
   const totalBytes = files.reduce((n, f) => {
@@ -4057,9 +4117,9 @@ function renderMemoryView() {
 
   return '<div class="scroll-col"><div class="inner-xwide">' +
     '<div class="page-hdr"><div class="copy">' +
-      '<div class="eyebrow">KNOWLEDGE · ' + totalChunks.toLocaleString() + ' chunks · ' + humanSize(totalBytes) + (files.length ? ' · ' + files.length + ' source' + (files.length === 1 ? '' : 's') : '') + '</div>' +
+      '<div class="eyebrow">MEMORY · ' + totalChunks.toLocaleString() + ' chunks · ' + humanSize(totalBytes) + (files.length ? ' · ' + files.length + ' source' + (files.length === 1 ? '' : 's') : '') + (facts.length ? ' · ' + facts.length + ' fact' + (facts.length === 1 ? '' : 's') : '') + '</div>' +
       '<h1>What qwe-qwe knows</h1>' +
-      '<p class="sub">Documents, notes, URLs and live-watched directories. Queries retrieve chunks by semantic + keyword + graph proximity.</p>' +
+      '<p class="sub">Files, URLs, and free-form facts — all searched together via semantic + keyword + graph proximity. File-sources are chunked for retrieval; facts are atomic saves.</p>' +
     '</div>' +
     '<div style="display:flex;gap:8px;align-items:center">' + indexing +
       '<button class="chip" data-act="memory-refresh" style="padding:8px 12px">' + ico('refresh', 12) + ' reindex</button>' +
@@ -4068,7 +4128,7 @@ function renderMemoryView() {
 
     '<div class="stats-row">' +
       '<div class="stat"><div class="lbl">SOURCES</div><div class="v">' + files.length + '</div>' +
-        '<div class="sub">' + (kinds.length > 1 ? (kinds.length - 1) + ' type' + (kinds.length === 2 ? '' : 's') : 'indexed files') + '</div></div>' +
+        '<div class="sub">' + (facts.length ? facts.length + ' fact' + (facts.length === 1 ? '' : 's') + ' · ' : '') + (files.length ? 'indexed files' : 'none yet') + '</div></div>' +
       '<div class="stat"><div class="lbl">CHUNKS</div>' +
         '<div class="v">' + (totalChunks > 0 ? totalChunks.toLocaleString() : '—') + '</div>' +
         '<div class="sub">' + (totalChunks > 0
@@ -4132,18 +4192,17 @@ function renderMemoryView() {
       '</div>' +
       '<div class="kb-panel">' +
         '<div class="hdr">' + ico('package', 12, 'style="color:var(--accent)"') +
-          '<h3>Sources</h3>' +
-          '<span class="meta">' + filtered.length + ' of ' + files.length + '</span>' +
+          '<h3>Memory</h3>' +
+          '<span class="meta">' + unified.length + ' of ' + (files.length + facts.length) + '</span>' +
         '</div>' +
-        '<div style="padding:6px 8px">' +
-          (filtered.length === 0
+        '<div style="padding:6px 8px" id="kb-panel-list">' +
+          (unified.length === 0
             ? '<div style="padding:32px 16px;text-align:center;color:var(--fg-4);font-size:12px">' +
-              (files.length ? 'no sources match' : 'no sources yet — drop a file above') + '</div>'
-            : filtered.map(kbRow).join('')) +
+              ((files.length + facts.length) ? 'nothing matches this filter' : 'empty memory — drop a file above, or use 📖 on a chat message') + '</div>'
+            : unified.map(u => u.html).join('')) +
         '</div>' +
       '</div>' +
     '</div>' +
-    renderMemoriesPanel() +
   '</div></div>';
 }
 
@@ -4152,8 +4211,16 @@ function wireMemoryDeletes(root) {
   // removal + surgical re-patch of just the memories block, so the
   // user's scroll position is preserved (a full render() would jump
   // back to the top of the page on every delete).
+  root.querySelectorAll('[data-mem-toggle]').forEach(e => {
+    e.onclick = (ev) => {
+      // Don't toggle when clicking interactive children (delete button)
+      if (ev.target.closest('button, a')) return;
+      e.classList.toggle('expanded');
+    };
+  });
   root.querySelectorAll('[data-mem-del]').forEach(b => {
-    b.onclick = async () => {
+    b.onclick = async (ev) => {
+      ev.stopPropagation();
       const id = b.dataset.memDel;
       if (!id) return;
       if (!confirm('Delete this memory?\nThis is permanent — both the markdown twin and the Qdrant vector are removed.')) return;
@@ -4178,62 +4245,20 @@ function wireMemoryDeletes(root) {
 }
 
 function patchMemoriesPanel() {
-  // Surgical swap of just the .memories-block — preserves chat scroll
-  // and other UI state that a full render() would blow away.
-  const old = document.querySelector('.memories-block');
-  if (!old) return;
+  // Surgical swap of the unified kb-panel list — preserves scroll after
+  // delete. If the view isn't mounted (user on a different page), fall
+  // back to a silent no-op; next render() will rebuild the list.
+  const host = document.getElementById('kb-panel-list');
+  if (!host) return;
+  // Re-run the view-level render to rebuild the combined files+facts
+  // list, then extract just the list node and swap in place.
   const tmp = document.createElement('div');
-  tmp.innerHTML = renderMemoriesPanel();
-  const next = tmp.firstElementChild;
-  if (next) {
-    old.replaceWith(next);
-    wireMemoryDeletes(next);
+  tmp.innerHTML = renderMemoryView();
+  const nextList = tmp.querySelector('#kb-panel-list');
+  if (nextList) {
+    host.replaceWith(nextList);
+    wireMemoryDeletes(nextList);
   }
-}
-
-function renderMemoriesPanel() {
-  // Plain memories — what the chat's Save-to-memory button writes,
-  // and what the agent's own memory_save tool persists. Distinct from
-  // indexed knowledge sources (PDFs/URLs above) because these are
-  // free-form facts/observations with no file_path.
-  const entries = state.memoryEntries || [];
-  const tagBreakdown = {};
-  for (const e of entries) tagBreakdown[e.tag] = (tagBreakdown[e.tag] || 0) + 1;
-  const tagSummary = Object.entries(tagBreakdown).sort((a, b) => b[1] - a[1])
-    .map(([t, n]) => '<span class="mono" style="color:var(--fg-3)">' + esc(t) + '·' + n + '</span>')
-    .join('  ');
-  const row = (e) => {
-    const ts = e.updated || e.created || '';
-    const tagColor = e.tag === 'user' ? 'var(--accent)'
-                    : e.tag === 'fact' ? 'var(--info)'
-                    : e.tag === 'experience' ? 'var(--magic)'
-                    : 'var(--fg-4)';
-    return '<div class="mem-entry">' +
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
-        '<span class="kb-kind" style="color:' + tagColor + ';border:1px solid ' + tagColor + '33">' + esc(e.tag || 'memory') + '</span>' +
-        '<span class="mono" style="font-size:10.5px;color:var(--fg-5);font-variant-numeric:tabular-nums">' + esc(ts) + '</span>' +
-        (e.thread_id ? '<span class="mono" style="font-size:10px;color:var(--fg-5)">thread ' + esc(e.thread_id.slice(0, 12)) + '</span>' : '') +
-        '<span style="margin-left:auto;font-size:10.5px;color:var(--fg-5)">' + (e.len || 0) + ' chars</span>' +
-        '<button class="icon-btn" data-mem-del="' + esc(e.id) + '" title="Delete this memory">' + ico('trash', 11) + '</button>' +
-      '</div>' +
-      '<div class="mem-text">' + esc(e.preview || '') + '</div>' +
-    '</div>';
-  };
-  return '<div class="memories-block">' +
-    '<div class="hdr" style="display:flex;align-items:center;gap:10px;margin:24px 0 10px">' +
-      ico('book', 13, 'style="color:var(--accent)"') +
-      '<h3 style="margin:0;font-size:15px">Saved memories</h3>' +
-      '<span class="meta" style="color:var(--fg-4);font-size:11px">' + entries.length + ' entries' +
-        (tagSummary ? '  ·  ' + tagSummary : '') + '</span>' +
-    '</div>' +
-    '<div class="memories-list">' +
-      (entries.length === 0
-        ? '<div style="padding:24px;text-align:center;color:var(--fg-4);font-size:12px;border:1px dashed var(--line);border-radius:8px">' +
-          'No memories yet. Use the 📖 button on any chat message to save it here, or the agent will save facts when you say <span class="mono">"запомни …"</span>.' +
-          '</div>'
-        : entries.map(row).join('')) +
-    '</div>' +
-  '</div>';
 }
 
 function renderSchedulerView() {

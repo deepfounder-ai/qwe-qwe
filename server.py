@@ -1197,14 +1197,17 @@ async def memory_list(limit: int = 50, tag: str | None = None):
                 continue
             if tag and r.get("tag") != tag:
                 continue
+            full = r.get("text") or ""
+            capped = full[:20000]
             entries.append({
                 "id": r.get("id"),
                 "tag": r.get("tag"),
                 "thread_id": r.get("thread_id"),
                 "created": r.get("created"),
                 "updated": r.get("updated"),
-                "preview": (r.get("text") or "")[:240],
-                "len": len(r.get("text") or ""),
+                "text": capped,
+                "truncated": len(full) > len(capped),
+                "len": len(full),
             })
         except Exception:
             continue
@@ -1252,9 +1255,12 @@ async def memory_save_direct(data: dict):
     # API callers can override with body {chunk: true} if they want
     # the old behaviour for long-form indexing.
     chunk = bool(data.get("chunk", False))
+    # synth=True: direct UI saves should feed the night entity/wiki
+    # extraction pipeline. Without this flag, single-atom saves get
+    # synthesis_status="skip" and never contribute to the graph.
     try:
         point_id = mem.save(text, tag=tag, thread_id=thread_id,
-                             dedup=True, chunk=chunk)
+                             dedup=True, chunk=chunk, synth=True)
     except Exception as e:
         _log.warning(f"manual memory save failed: {e}", exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)

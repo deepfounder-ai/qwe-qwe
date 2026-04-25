@@ -770,7 +770,7 @@ def _chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLA
 
 def save(text: str, tag: str = "general", dedup: bool = True,
          thread_id: str | None = None, meta: dict | None = None,
-         chunk: bool = True) -> str:
+         chunk: bool = True, synth: bool = False) -> str:
     """Save a memory with both dense and sparse vectors.
 
     Long texts (>1000 chars) are auto-chunked into ~800 char pieces by
@@ -781,8 +781,10 @@ def save(text: str, tag: str = "general", dedup: bool = True,
     one message and getting three retrieval-chunked entries back is
     surprising UX).
 
-    Each chunk gets synthesis_status="pending" for future knowledge
-    graph synthesis. Short facts get synthesis_status="skip".
+    Chunked saves always get synthesis_status="pending". Single-atom
+    saves default to "skip" (never processed by night synthesis), but
+    pass ``synth=True`` to override — useful for UI saves that should
+    still feed the entity/wiki extraction graph.
 
     Args:
         text: memory content
@@ -792,6 +794,9 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         meta: extra metadata dict (source, source_type, etc.)
         chunk: if True (default) auto-chunk texts > 1000 chars; if
             False, save as one atom regardless of length
+        synth: if True, mark the save as synthesis_status="pending"
+            so night synthesis picks it up. Only applies to single-
+            atom saves (chunked saves are always pending).
 
     Returns:
         point ID (or first chunk ID for chunked saves)
@@ -809,9 +814,10 @@ def save(text: str, tag: str = "general", dedup: bool = True,
     if chunk and len(text) > _CHUNK_THRESHOLD and tag not in ("experience", "compaction"):
         return _save_chunked(text, tag, thread_id, meta)
 
-    # Single-atom save (short text, or chunk=False on a long one)
+    # Single-atom save (short text, or chunk=False on a long one).
+    # synth=True lets UI direct-saves participate in night synthesis.
     return _save_single(text, tag, dedup, thread_id, meta,
-                        synthesis_status="skip")
+                        synthesis_status="pending" if synth else "skip")
 
 
 def _save_chunked(text: str, tag: str,
