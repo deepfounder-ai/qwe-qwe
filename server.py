@@ -1171,6 +1171,61 @@ async def delete_secret(key: str):
     return {"result": vault.delete(key)}
 
 
+@app.get("/api/memory/list")
+async def memory_list(limit: int = 50, tag: str | None = None):
+    """List recent plain-memory entries (the things behind Save-to-memory).
+
+    Reads from the markdown layer (Phase 1 Living Memory) which is the
+    canonical source — fast filesystem walk, no Qdrant scroll. Falls
+    through to an empty list if memory_store hasn't been used yet.
+
+    Filters by tag if given. Default returns the 50 most recently
+    updated atoms across all tags.
+    """
+    try:
+        import memory_store
+        ids = memory_store.iter_all()
+    except Exception as e:
+        _log.warning(f"memory_store.iter_all failed: {e}")
+        return {"entries": []}
+
+    entries = []
+    for pid in ids:
+        try:
+            r = memory_store.read(pid)
+            if not r:
+                continue
+            if tag and r.get("tag") != tag:
+                continue
+            entries.append({
+                "id": r.get("id"),
+                "tag": r.get("tag"),
+                "thread_id": r.get("thread_id"),
+                "created": r.get("created"),
+                "updated": r.get("updated"),
+                "preview": (r.get("text") or "")[:240],
+                "len": len(r.get("text") or ""),
+            })
+        except Exception:
+            continue
+    # Sort newest first by `updated` (or created) — both ISO8601 sort lexically
+    entries.sort(key=lambda e: e.get("updated") or e.get("created") or "", reverse=True)
+    return {"entries": entries[:limit]}
+
+
+@app.delete("/api/memory/{point_id}")
+async def memory_delete_direct(point_id: str):
+    """Delete a single plain-memory entry by id.
+
+    Goes through ``memory.delete`` so both Qdrant and the markdown
+    twin are cleaned up consistently.
+    """
+    ok = mem.delete(point_id)
+    if not ok:
+        return JSONResponse({"error": "delete failed"}, status_code=500)
+    return {"ok": True}
+
+
 @app.post("/api/memory/save")
 async def memory_save_direct(data: dict):
     """Save text to long-term memory directly, bypassing the agent.

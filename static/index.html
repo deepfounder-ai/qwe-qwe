@@ -686,6 +686,26 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
    successful POST /api/memory/save so the user gets visual proof
    beyond just the toast. */
 .icon-btn.saved { color: var(--ok); background: rgba(74,222,128,0.12); }
+
+/* Saved memories panel — sits below the knowledge-sources grid on the
+   Memory page. One row per plain-memory entry (Save-to-memory output,
+   agent's memory_save calls). Distinct visual from indexed sources
+   above because these are free-form facts, not files. */
+.memories-block { margin-top: 8px; }
+.memories-block .hdr h3 { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.01em; color: var(--fg); }
+.memories-list { display: flex; flex-direction: column; gap: 6px; }
+.mem-entry {
+  padding: 10px 14px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--line-2);
+  transition: border-color 0.12s;
+}
+.mem-entry:hover { border-color: var(--line-strong); }
+.mem-entry .mem-text {
+  font-size: 12.5px; color: var(--fg-2); line-height: 1.55;
+  white-space: pre-wrap; word-wrap: break-word;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .composer .agent-pill {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 4px 8px; border-radius: 5px;
@@ -1705,6 +1725,7 @@ const state = {
   cronJobs: [],
   presetList: [],
   kbFiles: [],
+  memoryEntries: [],   // plain memories (Save-to-memory button + agent's memory_save calls)
   kbGraph: { nodes: [], links: [] },
   kbView: { tx: 0, ty: 0, zoom: 1 },  // knowledge graph pan + zoom
   kbSearch: '',
@@ -2594,6 +2615,14 @@ async function loadMemory() {
     }));
     render();
   } catch { state.kbFiles = []; render(); }
+  // Plain memories — what the Save-to-memory button writes. Lives
+  // alongside the indexed knowledge sources. Phase 1 Living Memory
+  // reads from the markdown layer (~/.qwe-qwe/memories/atoms/).
+  try {
+    const r = await api('/api/memory/list?limit=50');
+    state.memoryEntries = (r && r.entries) || [];
+    render();
+  } catch { state.memoryEntries = []; render(); }
   try {
     const g = await api('/api/knowledge/graph');
     const nodes = (g && g.nodes) || [];
@@ -4114,7 +4143,53 @@ function renderMemoryView() {
         '</div>' +
       '</div>' +
     '</div>' +
+    renderMemoriesPanel() +
   '</div></div>';
+}
+
+function renderMemoriesPanel() {
+  // Plain memories — what the chat's Save-to-memory button writes,
+  // and what the agent's own memory_save tool persists. Distinct from
+  // indexed knowledge sources (PDFs/URLs above) because these are
+  // free-form facts/observations with no file_path.
+  const entries = state.memoryEntries || [];
+  const tagBreakdown = {};
+  for (const e of entries) tagBreakdown[e.tag] = (tagBreakdown[e.tag] || 0) + 1;
+  const tagSummary = Object.entries(tagBreakdown).sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => '<span class="mono" style="color:var(--fg-3)">' + esc(t) + '·' + n + '</span>')
+    .join('  ');
+  const row = (e) => {
+    const ts = e.updated || e.created || '';
+    const tagColor = e.tag === 'user' ? 'var(--accent)'
+                    : e.tag === 'fact' ? 'var(--info)'
+                    : e.tag === 'experience' ? 'var(--magic)'
+                    : 'var(--fg-4)';
+    return '<div class="mem-entry">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+        '<span class="kb-kind" style="color:' + tagColor + ';border:1px solid ' + tagColor + '33">' + esc(e.tag || 'memory') + '</span>' +
+        '<span class="mono" style="font-size:10.5px;color:var(--fg-5);font-variant-numeric:tabular-nums">' + esc(ts) + '</span>' +
+        (e.thread_id ? '<span class="mono" style="font-size:10px;color:var(--fg-5)">thread ' + esc(e.thread_id.slice(0, 12)) + '</span>' : '') +
+        '<span style="margin-left:auto;font-size:10.5px;color:var(--fg-5)">' + (e.len || 0) + ' chars</span>' +
+        '<button class="icon-btn" data-mem-del="' + esc(e.id) + '" title="Delete this memory">' + ico('trash', 11) + '</button>' +
+      '</div>' +
+      '<div class="mem-text">' + esc(e.preview || '') + '</div>' +
+    '</div>';
+  };
+  return '<div class="memories-block">' +
+    '<div class="hdr" style="display:flex;align-items:center;gap:10px;margin:24px 0 10px">' +
+      ico('book', 13, 'style="color:var(--accent)"') +
+      '<h3 style="margin:0;font-size:15px">Saved memories</h3>' +
+      '<span class="meta" style="color:var(--fg-4);font-size:11px">' + entries.length + ' entries' +
+        (tagSummary ? '  ·  ' + tagSummary : '') + '</span>' +
+    '</div>' +
+    '<div class="memories-list">' +
+      (entries.length === 0
+        ? '<div style="padding:24px;text-align:center;color:var(--fg-4);font-size:12px;border:1px dashed var(--line);border-radius:8px">' +
+          'No memories yet. Use the 📖 button on any chat message to save it here, or the agent will save facts when you say <span class="mono">"запомни …"</span>.' +
+          '</div>'
+        : entries.map(row).join('')) +
+    '</div>' +
+  '</div>';
 }
 
 function renderSchedulerView() {
@@ -5950,6 +6025,22 @@ function wireEvents() {
   document.querySelectorAll('[data-act="toggle-anim"]').forEach(b => { b.onclick = () => { state.anim = !state.anim; render(); }; });
   document.querySelectorAll('[data-act="toggle-grain"]').forEach(b => { b.onclick = () => { state.grain = !state.grain; document.body.style.setProperty('--grain-op', state.grain ? '0.025' : '0'); render(); }; });
   document.querySelectorAll('[data-act="memory-refresh"]').forEach(b => { b.onclick = loadMemory; });
+  // Per-entry delete on the Saved memories panel — direct DELETE
+  // /api/memory/{id}, refresh the list. confirm() because dedup is on
+  // and re-saving the same text would just hit the same id, but a
+  // permanent removal of a stored fact is genuinely irreversible.
+  document.querySelectorAll('[data-mem-del]').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.memDel;
+      if (!id) return;
+      if (!confirm('Delete this memory?\nThis is permanent — both the markdown twin and the Qdrant vector are removed.')) return;
+      try {
+        const r = await api('/api/memory/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (r && r.ok) { toast('memory deleted'); loadMemory(); }
+        else toast(r && r.error ? r.error : 'delete failed', 'err');
+      } catch { toast('delete failed', 'err'); }
+    };
+  });
   document.querySelectorAll('[data-act="graph-clear"]').forEach(b => {
     b.onclick = async () => {
       if (!confirm('Clear the knowledge graph? Entities + wiki pages will be removed.\nIndexed chunks are kept; only the synthesized graph layer is cleared.')) return;
