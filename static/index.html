@@ -4147,6 +4147,50 @@ function renderMemoryView() {
   '</div></div>';
 }
 
+function wireMemoryDeletes(root) {
+  // Per-entry delete on the Saved memories panel. Optimistic local
+  // removal + surgical re-patch of just the memories block, so the
+  // user's scroll position is preserved (a full render() would jump
+  // back to the top of the page on every delete).
+  root.querySelectorAll('[data-mem-del]').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.memDel;
+      if (!id) return;
+      if (!confirm('Delete this memory?\nThis is permanent — both the markdown twin and the Qdrant vector are removed.')) return;
+      try {
+        const r = await api('/api/memory/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (r && r.ok) {
+          toast('memory deleted');
+          // Optimistic local removal, no full render() — keeps scroll
+          state.memoryEntries = (state.memoryEntries || []).filter(e => e.id !== id);
+          patchMemoriesPanel();
+          // Quietly refetch in case the backend has additional state changes
+          api('/api/memory/list?limit=50').then(res => {
+            state.memoryEntries = (res && res.entries) || [];
+            patchMemoriesPanel();
+          }).catch(() => {});
+        } else {
+          toast(r && r.error ? r.error : 'delete failed', 'err');
+        }
+      } catch { toast('delete failed', 'err'); }
+    };
+  });
+}
+
+function patchMemoriesPanel() {
+  // Surgical swap of just the .memories-block — preserves chat scroll
+  // and other UI state that a full render() would blow away.
+  const old = document.querySelector('.memories-block');
+  if (!old) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderMemoriesPanel();
+  const next = tmp.firstElementChild;
+  if (next) {
+    old.replaceWith(next);
+    wireMemoryDeletes(next);
+  }
+}
+
 function renderMemoriesPanel() {
   // Plain memories — what the chat's Save-to-memory button writes,
   // and what the agent's own memory_save tool persists. Distinct from
@@ -6025,22 +6069,9 @@ function wireEvents() {
   document.querySelectorAll('[data-act="toggle-anim"]').forEach(b => { b.onclick = () => { state.anim = !state.anim; render(); }; });
   document.querySelectorAll('[data-act="toggle-grain"]').forEach(b => { b.onclick = () => { state.grain = !state.grain; document.body.style.setProperty('--grain-op', state.grain ? '0.025' : '0'); render(); }; });
   document.querySelectorAll('[data-act="memory-refresh"]').forEach(b => { b.onclick = loadMemory; });
-  // Per-entry delete on the Saved memories panel — direct DELETE
-  // /api/memory/{id}, refresh the list. confirm() because dedup is on
-  // and re-saving the same text would just hit the same id, but a
-  // permanent removal of a stored fact is genuinely irreversible.
-  document.querySelectorAll('[data-mem-del]').forEach(b => {
-    b.onclick = async () => {
-      const id = b.dataset.memDel;
-      if (!id) return;
-      if (!confirm('Delete this memory?\nThis is permanent — both the markdown twin and the Qdrant vector are removed.')) return;
-      try {
-        const r = await api('/api/memory/' + encodeURIComponent(id), { method: 'DELETE' });
-        if (r && r.ok) { toast('memory deleted'); loadMemory(); }
-        else toast(r && r.error ? r.error : 'delete failed', 'err');
-      } catch { toast('delete failed', 'err'); }
-    };
-  });
+  // Wire delete buttons on the Saved memories panel. Used at full
+  // render and after the surgical patch in patchMemoriesPanel().
+  wireMemoryDeletes(document);
   document.querySelectorAll('[data-act="graph-clear"]').forEach(b => {
     b.onclick = async () => {
       if (!confirm('Clear the knowledge graph? Entities + wiki pages will be removed.\nIndexed chunks are kept; only the synthesized graph layer is cleared.')) return;
