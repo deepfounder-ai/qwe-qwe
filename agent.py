@@ -1284,7 +1284,8 @@ def _get_thread_model(tid: str | None) -> str | None:
 def run(user_input: str, thread_id: str | None = None,
         source: str = "cli", image_b64: str | None = None,
         abort_event: "threading.Event | None" = None,
-        ctx: TurnContext | None = None) -> TurnResult:
+        ctx: TurnContext | None = None,
+        save_user_msg: bool = True) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response.
 
     Args:
@@ -1297,6 +1298,11 @@ def run(user_input: str, thread_id: str | None = None,
         ctx: optional :class:`TurnContext`. When None, a default one is built
             (back-compat with CLI / single-turn callers). Concurrent callers
             (web server, telegram bot) should always supply their own.
+        save_user_msg: if False, skip persisting ``user_input`` as a user
+            message in the thread. The LLM still sees it as the final user
+            turn in the messages array, but the database keeps only the
+            assistant reply. Used by routine fires so each scheduled run
+            doesn't insert a fake user-typed-this row that bloats the chat.
     """
     # Build or reuse the ctx.
     if ctx is None:
@@ -1313,14 +1319,15 @@ def run(user_input: str, thread_id: str | None = None,
     # Thread-specific model override (local variable, not global state mutation)
     model_override = _get_thread_model(thread_id)
     return _run_inner(user_input, thread_id, ctx.source or source, image_b64,
-                      model_override, ctx=ctx)
+                      model_override, ctx=ctx, save_user_msg=save_user_msg)
 
 
 def _run_inner(user_input: str, thread_id: str | None,
                source: str, image_b64: str | None,
                model_override: str | None = None,
                abort_event: "threading.Event | None" = None,
-               ctx: TurnContext | None = None) -> TurnResult:
+               ctx: TurnContext | None = None,
+               save_user_msg: bool = True) -> TurnResult:
     """Inner agent loop."""
     # Normalise ctx + abort_event. Callers going through ``run()`` always
     # provide *ctx*; the legacy ``abort_event=`` path is kept so existing
@@ -1335,7 +1342,8 @@ def _run_inner(user_input: str, thread_id: str | None,
     _ctx_token = _set_ctx(ctx)
     try:
         return _run_inner_body(user_input, thread_id, source, image_b64,
-                               model_override, abort_event, ctx)
+                               model_override, abort_event, ctx,
+                               save_user_msg=save_user_msg)
     finally:
         _reset_ctx(_ctx_token)
 
@@ -1344,7 +1352,8 @@ def _run_inner_body(user_input: str, thread_id: str | None,
                     source: str, image_b64: str | None,
                     model_override: str | None,
                     abort_event: threading.Event,
-                    ctx: TurnContext) -> TurnResult:
+                    ctx: TurnContext,
+                    save_user_msg: bool = True) -> TurnResult:
     """Body of the inner agent loop. Split out so _run_inner can install the
     :class:`TurnContext` on the ContextVar before and tear it down after."""
     client = providers.get_client()
@@ -1395,13 +1404,18 @@ def _run_inner_body(user_input: str, thread_id: str | None,
     # Auto-compact if history is too long
     _maybe_compact(thread_id=tid)
 
-    # Save user message (with image path / file attachment if present)
+    # Save user message (with image path / file attachment if present),
+    # unless the caller asked to skip persistence. Routine fires use this
+    # so each scheduled run doesn't add a fake user-typed-this row to
+    # the routine thread — the user_input still goes into the LLM
+    # messages array via _build_messages, just not into the database.
     user_meta = None
     if image_b64 and ctx.image_path:
         user_meta = {"image_path": ctx.image_path}
     if ctx.file_meta:
         user_meta = {**(user_meta or {}), "file": ctx.file_meta}
-    db.save_message("user", user_input, thread_id=tid, meta=user_meta)
+    if save_user_msg:
+        db.save_message("user", user_input, thread_id=tid, meta=user_meta)
 
     messages = _build_messages(user_input, thread_id=tid, source=source, image_b64=image_b64)
 

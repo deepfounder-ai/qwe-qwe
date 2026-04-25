@@ -185,6 +185,99 @@ def test_detect_missed_skips_non_routines(sched, monkeypatch):
 # ── list_tasks surfaces recent breakdown ─────────────────────────────
 
 
+def test_routine_fire_does_not_persist_fake_user_message(sched, monkeypatch):
+    """Each fire must NOT inflate the thread with a fake 'user typed the
+    task' row. Only the assistant reply persists.
+
+    Background: users were complaining that scheduled fires made the
+    routine thread look like they had typed the same task 50 times.
+    Phase: agent.run(save_user_msg=False) skips the user-row save; the
+    LLM still sees the task in its messages array via _build_messages.
+    """
+    import agent
+    import db
+
+    # Fake agent.run that mimics ONLY the assistant-save side effect —
+    # i.e. honours save_user_msg=False by intentionally NOT saving a user.
+    class _FakeResult:
+        def __init__(self, r): self.reply = r
+
+    captured = {"save_user_msg": None}
+
+    def _fake_run(user_input, thread_id=None, source="cli",
+                   save_user_msg=True, **kw):
+        captured["save_user_msg"] = save_user_msg
+        # Mimic real agent.run: persist only what the flag tells us to
+        if save_user_msg:
+            db.save_message("user", user_input, thread_id=thread_id)
+        db.save_message("assistant", "ok done", thread_id=thread_id)
+        return _FakeResult("ok done")
+
+    monkeypatch.setattr(agent, "run", _fake_run)
+
+    r = sched.add("clean", "summarise yesterday", "every 1h", skip_dry_run=True)
+    cron_id = [t["id"] for t in sched.list_tasks() if t["name"] == "clean"][0]
+    tid = r["thread_id"]
+
+    sched._execute_routine("summarise yesterday", "clean", cron_id, tid)
+
+    # The routine path passed save_user_msg=False
+    assert captured["save_user_msg"] is False, (
+        "_execute_routine must call agent.run(save_user_msg=False)"
+    )
+
+    # DB has only the assistant turn — no fake user message
+    rows = db.fetchall(
+        "SELECT role FROM messages WHERE thread_id=? ORDER BY id",
+        (tid,),
+    )
+    roles = [r[0] for r in rows]
+    assert "user" not in roles, (
+        f"routine fire persisted a user message: {roles}"
+    )
+    assert "assistant" in roles
+
+
+def test_routine_fire_lets_user_clarifications_persist(sched, monkeypatch):
+    """Real user clarifications typed into a routine thread must still
+    persist normally. Only routine-injected user turns are skipped."""
+    import agent
+    import db
+
+    class _FakeResult:
+        def __init__(self, r): self.reply = r
+
+    def _fake_run(user_input, thread_id=None, source="cli",
+                   save_user_msg=True, **kw):
+        # Mimic the same conditional save behaviour as the real run()
+        if save_user_msg:
+            db.save_message("user", user_input, thread_id=thread_id)
+        db.save_message("assistant", "noted", thread_id=thread_id)
+        return _FakeResult("noted")
+
+    monkeypatch.setattr(agent, "run", _fake_run)
+
+    r = sched.add("with-clarif", "do thing", "every 1h", skip_dry_run=True)
+    tid = r["thread_id"]
+
+    # 1. Routine fire — no user message
+    sched._execute_routine("do thing", "with-clarif",
+                            [t["id"] for t in sched.list_tasks() if t["name"] == "with-clarif"][0],
+                            tid)
+    # 2. User types a clarification (via the regular agent.run path,
+    #    save_user_msg defaults to True)
+    agent.run("actually skip weekends", thread_id=tid, source="web")
+
+    rows = db.fetchall(
+        "SELECT role, content FROM messages WHERE thread_id=? ORDER BY id",
+        (tid,),
+    )
+    # Real user clarification persists; fire's task does not
+    user_contents = [c for role, c in rows if role == "user"]
+    assert "actually skip weekends" in user_contents
+    assert "do thing" not in user_contents
+
+
 def test_list_tasks_includes_recent_counts(sched, monkeypatch):
     import agent
 

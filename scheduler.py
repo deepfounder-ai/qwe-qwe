@@ -933,10 +933,15 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     reply = ""
     error_msg: str | None = None
     try:
-        # Headless ctx — no WS client to stream to; messages persist via
-        # agent.run's own db.save_message calls.
+        # Headless ctx — no WS client to stream to; the assistant reply
+        # persists via agent.run's own db.save_message call.
+        # save_user_msg=False keeps the routine thread clean: each fire
+        # adds only the assistant turn, no fake "user-typed-the-task"
+        # row that would inflate the chat. The LLM still sees the task
+        # as the latest user turn in its in-memory messages array.
         ctx = TurnContext(source="routine")
-        result = agent.run(task_desc, thread_id=thread_id, source="routine", ctx=ctx)
+        result = agent.run(task_desc, thread_id=thread_id, source="routine",
+                            ctx=ctx, save_user_msg=False)
         reply = getattr(result, "reply", "") or ""
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
