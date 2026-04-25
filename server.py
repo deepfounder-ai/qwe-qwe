@@ -1246,8 +1246,15 @@ async def memory_save_direct(data: dict):
         text = text[:8000]
     tag = (data.get("tag") or "user").strip() or "user"
     thread_id = data.get("thread_id")
+    # chunk=False: a UI Save-to-memory click means "this one message
+    # is one fact" — splitting a 2000-char chat reply into 3 retrieval
+    # chunks surprised users (one click → three entries in the panel).
+    # API callers can override with body {chunk: true} if they want
+    # the old behaviour for long-form indexing.
+    chunk = bool(data.get("chunk", False))
     try:
-        point_id = mem.save(text, tag=tag, thread_id=thread_id, dedup=True)
+        point_id = mem.save(text, tag=tag, thread_id=thread_id,
+                             dedup=True, chunk=chunk)
     except Exception as e:
         _log.warning(f"manual memory save failed: {e}", exc_info=True)
         return JSONResponse({"error": str(e)}, status_code=500)

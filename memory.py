@@ -769,12 +769,20 @@ def _chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLA
 # ── Save ──
 
 def save(text: str, tag: str = "general", dedup: bool = True,
-         thread_id: str | None = None, meta: dict | None = None) -> str:
+         thread_id: str | None = None, meta: dict | None = None,
+         chunk: bool = True) -> str:
     """Save a memory with both dense and sparse vectors.
 
-    Long texts (>1000 chars) are auto-chunked into ~800 char pieces.
-    Each chunk gets synthesis_status="pending" for future knowledge graph synthesis.
-    Short facts get synthesis_status="skip".
+    Long texts (>1000 chars) are auto-chunked into ~800 char pieces by
+    default — better retrieval granularity for indexed knowledge.
+    Pass ``chunk=False`` to keep the text as a single atom regardless
+    of length (intended for direct user saves where the whole message
+    is one logical fact, e.g. the chat's Save-to-memory button — saving
+    one message and getting three retrieval-chunked entries back is
+    surprising UX).
+
+    Each chunk gets synthesis_status="pending" for future knowledge
+    graph synthesis. Short facts get synthesis_status="skip".
 
     Args:
         text: memory content
@@ -782,6 +790,8 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         dedup: if True, update existing memory if >0.9 similarity
         thread_id: associate with a specific thread/topic
         meta: extra metadata dict (source, source_type, etc.)
+        chunk: if True (default) auto-chunk texts > 1000 chars; if
+            False, save as one atom regardless of length
 
     Returns:
         point ID (or first chunk ID for chunked saves)
@@ -793,11 +803,13 @@ def save(text: str, tag: str = "general", dedup: bool = True,
         hits = text.count("[REDACTED")
         _log.warning(f"scrubbed {hits} secret-like pattern(s) from memory save (tag={tag})")
 
-    # Auto-chunk long texts
-    if len(text) > _CHUNK_THRESHOLD and tag not in ("experience", "compaction"):
+    # Auto-chunk long texts (default behaviour for indexed knowledge).
+    # Caller may opt out via chunk=False for "this is one logical fact"
+    # saves like the UI's Save-to-memory button.
+    if chunk and len(text) > _CHUNK_THRESHOLD and tag not in ("experience", "compaction"):
         return _save_chunked(text, tag, thread_id, meta)
 
-    # Short text — save as single point
+    # Single-atom save (short text, or chunk=False on a long one)
     return _save_single(text, tag, dedup, thread_id, meta,
                         synthesis_status="skip")
 
