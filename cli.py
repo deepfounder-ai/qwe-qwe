@@ -79,7 +79,7 @@ def _status_line() -> str:
 def show_banner():
     console.print(LOGO)
     s = soul.load()
-    user_name = db.kv_get("user_name") or "Boss"
+    user_name = db.kv_get("user_name") or "User"
     city = db.kv_get("timezone_city") or "somewhere"
     mem_count = 0
     try:
@@ -839,9 +839,9 @@ def _first_run_setup():
         config.TZ_OFFSET = 0
 
     # 2. User's name
-    console.print("\n  [yellow]👤 What should I call you?[/] [dim](default: Boss)[/]")
+    console.print("\n  [yellow]👤 What should I call you?[/] [dim](default: User)[/]")
     user_name = input("  Your name: ").strip()
-    db.kv_set("user_name", user_name or "Boss")
+    db.kv_set("user_name", user_name or "User")
 
     # 3. Agent name
     console.print("\n  [yellow]🤖 What should your agent be called?[/] [dim](default: Agent)[/]")
@@ -893,7 +893,7 @@ def main():
     console.print(f"  [dim]⏰ Scheduler running (UTC{config.TZ_OFFSET:+d})[/]")
 
     show_banner()
-    _log.info("session started | model=%s | user=%s", config.LLM_MODEL, db.kv_get("user_name") or "Boss")
+    _log.info("session started | model=%s | user=%s", config.LLM_MODEL, db.kv_get("user_name") or "User")
 
     while True:
         try:

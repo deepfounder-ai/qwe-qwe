@@ -254,8 +254,8 @@ Rules:
     lines.append("\n--- dynamic context ---")
 
     # ── 5. IDENTITY ──
-    user_name = db.kv_get("user_name") or "Boss"
-    lines.append(f"""You are {soul['name']}, a personal AI assistant powered by qwe-qwe — a lightweight offline AI agent for local models.
+    user_name = db.kv_get("user_name") or "User"
+    lines.append(f"""You are {soul['name']}, powered by qwe-qwe — a self-hosted AI agent for business automation. You run on the user's infrastructure with their choice of LLM (a local model or any OpenAI-compatible API).
 The user's name is {user_name}.
 
 SELF-AWARENESS (your own systems you can use and configure):

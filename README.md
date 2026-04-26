@@ -2,10 +2,10 @@
   <img src="static/logo.png" alt="qwe-qwe" width="280">
 </p>
 
-<h3 align="center">AI agent optimized for small local models</h3>
+<h3 align="center">Self-hosted AI agent for business automation</h3>
 
 <p align="center">
-  Built for Qwen 9B & Gemma 4B on a gaming laptop. No cloud required.
+  Deploy on your infrastructure. Your data, your LLM, your rules. Works with local models (Qwen, Gemma) or any OpenAI-compatible provider (Azure, Bedrock, OpenAI, Groq).
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.17.33-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.18.0-blue" alt="version">
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
@@ -33,11 +33,11 @@
 
 ## What is qwe-qwe?
 
-A personal AI agent designed to squeeze maximum capability out of **small local models** (4-9B parameters). Chat via terminal, browser, or Telegram — with tools, semantic memory, browser control, MCP integration, scheduled tasks, and a customizable personality.
+A **self-hosted AI agent** built to drop into business workflows: customer ops, internal automation, knowledge retrieval, scheduled reporting. Deploys on a laptop, a workstation, or your own server — never sends data to a third party unless you tell it to. Chat via web UI, terminal, or Telegram, with tools, semantic memory, browser control, MCP integrations, and a cron-like scheduler.
 
-Optimized for **Qwen 3.5 9B** and **Gemma 4 E4B** running on a single consumer GPU (4-8GB VRAM). Cloud providers supported as fallback, but the architecture, prompts, and tool system are built for the constraints of small models.
+**Bring your own LLM**: works with local models (Qwen, Gemma, Llama via LM Studio / Ollama) or any OpenAI-compatible provider (Azure OpenAI, AWS Bedrock, Groq, OpenRouter, OpenAI direct). Your provider, your context window, your budget.
 
-> **Philosophy**: every token is expensive. Don't make the model smarter — make the system around it smarter. Tool search, compact prompts, retry loops, JSON repair, and self-checks compensate for what the model lacks.
+> **Philosophy**: small models can do real work when the system around them is smart. Tool search keeps the prompt lean, recall keeps state out of the conversation, scheduler runs work without you. Same patterns scale up to bigger models when you need them — but the agent is designed to feel responsive on a single consumer GPU first.
 
 ## Why Small Models
 
