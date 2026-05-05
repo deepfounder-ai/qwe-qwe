@@ -90,6 +90,25 @@ def _extract_tool_from_text(text: str, tool_names: set[str]) -> tuple[str, dict]
             if url and "browser" in name:
                 return (name, {"url": url.group()})
 
+    # Pattern 5: !<function_call:{"call": "name", "arguments": {...}}>
+    # Some LM Studio / Ollama-served models (notably certain Qwen variants)
+    # emit tool calls in this wrapper format with "call" instead of "name".
+    # Without this branch, the call is rendered as raw text and the model
+    # never observes a tool result, often retrying forever — observed as
+    # "infinite reply" symptom. Closes #10.
+    m = re.search(r'!<function_call:(\{.*?\})>', text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            fn_name = data.get("call") or data.get("name")
+            args = data.get("arguments")
+            if not isinstance(args, dict):
+                args = {}
+            if fn_name in tool_names:
+                return (fn_name, args)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
     return None
 
 
