@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir setuptools wheel
 COPY *.py ./
 COPY skills/ skills/
 COPY static/ static/
+COPY migrations/ migrations/
 
 # Install package
 RUN pip install --no-cache-dir -e .
