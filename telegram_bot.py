@@ -1838,9 +1838,16 @@ def _process_message(chat_id: int, text: str, user_id: int, username: str,
                 # Get tool info from agent result (thinking text buffered but not shown)
                 tool_names = getattr(agent, '_last_tools', []) or []
 
-                # Build enriched response (no thinking — too noisy for Telegram)
+                # Build enriched response (no thinking — too noisy for Telegram).
+                # Use _stream_buf if it has content — it accumulates everything
+                # shown during streaming (LLM text + direct skill emit_content
+                # calls). result.reply only carries the LLM round's text, so
+                # using it as the final message overwrites skill emissions
+                # that the user already saw. Falls back to response when the
+                # buffer is empty (no streaming happened). Closes #11.
+                streamed = (_stream_buf or "").strip()
                 parts = []
-                parts.append(response)
+                parts.append(streamed if streamed else response)
                 if tool_names:
                     tools_str = ", ".join(f"`{t}`" for t in tool_names)
                     parts.append(f"\n🔧 {tools_str}")
