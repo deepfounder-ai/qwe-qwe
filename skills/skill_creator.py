@@ -5,16 +5,52 @@ from pathlib import Path
 
 DESCRIPTION = "Create new skills by describing what they should do"
 
-INSTRUCTION = """When creating skills, use ONLY these db functions:
-- db._get_conn() → returns sqlite3.Connection (thread-local, DO NOT close it)
-- db.kv_get(key) → str or None
+INSTRUCTION = """When creating skills, you have access to the full agent runtime. Generated skills can call any other tool, save to memory, use the camera, read secrets — anything the agent itself can do.
+
+DATABASE (lazy import inside execute()):
+- db._get_conn() → sqlite3.Connection (thread-local, DO NOT close)
+- db.kv_get(key) → str | None
 - db.kv_set(key, value) → None
 - db.kv_get_prefix(prefix) → dict[str, str]
 - db.kv_inc(key, delta=1) → int
-DO NOT use: db.cursor(), db.connect(), db.close(), db.execute(), db.datetime
-Always import inside execute(): json, datetime
-Always create tables with CREATE TABLE IF NOT EXISTS inside execute().
-Return strings from execute(). Handle errors with try/except."""
+DON'T use: db.cursor(), db.connect(), db.close(), db.execute(), db.datetime
+
+MEMORY (semantic recall + atomic facts):
+- import memory
+- memory.save(text, tag="user", thread_id=None, synth=True) → point_id
+- memory.search(query, limit=8) → list of dicts with text/tag/score/ts
+
+ANY OTHER AGENT TOOL by name (this is how skills compose):
+- import tools
+- tools.execute("camera_capture", {"prompt": "describe what you see"}) → str
+- tools.execute("http_request", {"url": "...", "method": "GET"}) → str
+- tools.execute("read_file", {"path": "..."}) → str
+- tools.execute("write_file", {"path": "...", "content": "..."}) → str
+- tools.execute("send_file", {"path": "..."}) → str (attaches file to chat)
+- tools.execute("open_url", {"url": "..."}) → str (opens in user's browser)
+- tools.execute("secret_save", {"key": "...", "value": "..."}) → str
+- tools.execute("secret_get", {"key": "..."}) → str
+
+LLM (direct call when needed):
+- import providers
+- client = providers.get_client()
+- resp = client.chat.completions.create(model=providers.get_model(), messages=[...])
+
+CONFIG / SCHEDULER / TASKS (available but rarely needed):
+- import config; config.LLM_MODEL, config.DATA_DIR
+- import scheduler; scheduler.add(name, schedule, prompt) for cron-style
+- import tasks; tasks.register(name, description) for background work
+
+ALWAYS:
+- Lazy-import inside execute(): json, datetime, memory, tools, etc. Cheap module load.
+- Create tables with CREATE TABLE IF NOT EXISTS
+- Return strings from execute()
+- Handle errors with try/except → return friendly error string
+
+NEVER:
+- Hardcode API keys / tokens — use secret_save/secret_get
+- Block forever waiting on user input from outside the chat
+- Modify global agent state — keep skill state in own SQLite tables or kv_* keys"""
 
 TOOLS = [
     {
@@ -97,6 +133,23 @@ def execute(name: str, args: dict) -> str:
 
 STEP1_PLAN = """You are a skill architect. Given a skill description, output a JSON plan.
 
+Skills you create run inside the qwe-qwe agent and can use ALL of its
+capabilities — they are not sandboxed mini-apps. You may compose tools
+that combine:
+
+  - memory.save / memory.search    → persistent semantic recall
+  - tools.execute("camera_capture", ...)   → vision / live frame analysis
+  - tools.execute("http_request", ...)     → call any HTTP API
+  - tools.execute("secret_save"/"secret_get") → persisted API keys / tokens
+  - tools.execute("read_file"/"write_file"/"send_file") → workspace I/O
+  - tools.execute("open_url", ...)         → push a URL to the user's browser
+  - providers.get_client()                  → direct LLM calls when needed
+
+Plan for these when relevant. Examples:
+  "fitness coach" → http_request (wearable API) + memory (goals + history) + LLM (advice)
+  "meal logger"   → camera_capture (food photo) + memory + own SQLite table
+  "slack notify"  → secret_get (webhook) + http_request
+
 Output ONLY valid JSON, no markdown, no explanation:
 {{
     "docstring": "One-line module description",
@@ -135,9 +188,14 @@ STEP3_CODE = """Generate Python code for a skill's execute() function body.
 
 Variables already available: name (str), args (dict), conn (sqlite3 connection), json, datetime, db.
 
+You may also lazy-import inside any branch:
+    import memory                  # memory.save(text, tag, synth=True), memory.search(query, limit)
+    import tools                   # tools.execute("camera_capture"|"http_request"|"secret_get"|...)
+    import providers               # providers.get_client() for direct LLM calls
+
 Output ONLY the if/elif code block. No markdown. No explanation. No thinking.
 
-Example for a "notes" skill with tools add_note and list_notes:
+Example A — local CRUD (notes):
 
     if name == "add_note":
         text = args.get("text", "")
@@ -152,7 +210,38 @@ Example for a "notes" skill with tools add_note and list_notes:
         lines = [f"#{r[0]}: {r[1]} ({r[2]})" for r in rows]
         return "\\n".join(lines)
 
-Now generate code following this exact pattern. Use 4-space indent. Each branch returns a string."""
+Example B — camera + memory:
+
+    if name == "describe_scene":
+        import memory, tools
+        result = tools.execute("camera_capture", {"prompt": args.get("prompt", "describe what you see")})
+        memory.save(result, tag="scene_log", synth=True)
+        return result
+
+Example C — secret + http_request:
+
+    elif name == "post_to_slack":
+        import tools
+        webhook = tools.execute("secret_get", {"key": "slack_webhook"})
+        if webhook.startswith("Error") or webhook.startswith("Secret"):
+            return "Slack webhook not configured. Save it via secret_save with key='slack_webhook'."
+        return tools.execute("http_request", {
+            "url": webhook,
+            "method": "POST",
+            "json_body": {"text": args.get("message", "")}
+        })
+
+Example D — search persistent memory:
+
+    elif name == "recall_about_user":
+        import memory
+        topic = args.get("topic", "")
+        hits = memory.search(topic, limit=5)
+        if not hits:
+            return f"No memories matching '{topic}'."
+        return "\\n".join(f"- {h['text'][:120]} ({h.get('tag', '?')})" for h in hits)
+
+Now generate code following these patterns. Use 4-space indent. Each branch returns a string."""
 
 # ── Template assembly (replaces LLM code generation for CRUD skills) ──
 
