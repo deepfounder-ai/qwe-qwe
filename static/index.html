@@ -2134,6 +2134,43 @@ const handleWsMessage = (msg) => {
 
 const sendMessage = (text, opts) => {
   opts = opts || {};
+
+  // Client-side slash-command interception. The composer chips
+  // (/recall, /remember, /cron, /tools) are templates the user fills
+  // in. Some are pure UI navigations (/cron, /tools) — sending those
+  // to the LLM and hoping it calls list_cron / tool_search is
+  // unreliable on small models. Intercept here for direct actions.
+  if (!opts._fromSlash && typeof text === 'string') {
+    const t = text.trim();
+    if (t === '/cron' || t.startsWith('/cron ')) {
+      go('scheduler');
+      return;
+    }
+    if (t === '/tools' || t.startsWith('/tools ')) {
+      openPalette();
+      return;
+    }
+    if (t.startsWith('/recall ')) {
+      const q = t.slice('/recall '.length).trim();
+      if (q) {
+        // Rewrite as natural language so the LLM picks up memory_search
+        text = 'search memory for: ' + q;
+      }
+    } else if (t === '/recall') {
+      toast('usage: /recall <query>');
+      return;
+    }
+    if (t.startsWith('/remember ')) {
+      const fact = t.slice('/remember '.length).trim();
+      if (fact) {
+        text = 'remember this fact: ' + fact;
+      }
+    } else if (t === '/remember') {
+      toast('usage: /remember <fact>');
+      return;
+    }
+  }
+
   const atts = state.pendingAttachments || [];
   const frame = state.capturedFrame;
   const hasPayload = (text && text.trim()) || atts.length || frame;
@@ -6008,6 +6045,27 @@ function wireEvents() {
         state.streaming = null;
         render();
       } catch { toast('abort failed', 'err'); }
+    };
+  });
+
+  // Slash-command chips above the composer — clicking inserts the
+  // command + a trailing space into the textarea, focuses, and places
+  // the caret at the end so the user can type their argument and
+  // press Enter. Previously these buttons rendered but had no handler
+  // wired anywhere, so clicks did nothing.
+  document.querySelectorAll('[data-slash]').forEach(b => {
+    b.onclick = (ev) => {
+      ev.preventDefault();
+      const cmd = b.dataset.slash || '';
+      const ta = document.getElementById('composer-ta');
+      if (!ta) return;
+      // Replace whatever's there (including any partial slash command)
+      // since these are template shortcuts, not appendable suffixes.
+      ta.value = cmd + ' ';
+      ta.focus();
+      // Caret to the end + dispatch input so the send button enables
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
     };
   });
 
