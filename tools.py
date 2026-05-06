@@ -451,9 +451,14 @@ def _camera_grab_frame() -> str | None:
 
     # Try 1: WebSocket (browser camera)
     # lazy: `server` imports `tools` at module top — hoisting would be circular.
+    # 6s budget covers the slow case: client has no PiP active, opens a
+    # fresh getUserMedia (permission prompt + first-frame ≈ 1-3s on cold
+    # browsers, 0.5s on warm), then draws and base64-encodes. 3s used to
+    # be the value but timed out before one-shot capture could finish on
+    # Windows / Chrome cold start.
     try:
         from server import request_camera_frame_sync
-        frame = request_camera_frame_sync(timeout=3.0)
+        frame = request_camera_frame_sync(timeout=6.0)
         if frame:
             _log.info(f"camera: frame via WebSocket ({len(frame)} chars)")
             return frame

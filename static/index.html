@@ -1879,13 +1879,26 @@ function wireMessageSection(root) {
 const handleWsMessage = (msg) => {
   const t = msg.type;
 
-  // Server-initiated frame request (for camera_capture tool)
-  if (t === 'frame_request') {
+  // Server-initiated frame request (for camera_capture tool).
+  // Accept both event names: server emits "get_frame" but earlier
+  // client revisions listened for "frame_request" — keep both for
+  // safety against name drift in either direction.
+  if (t === 'get_frame' || t === 'frame_request') {
     const req_id = msg.request_id;
-    let data = null;
-    if (state.cameraOn) data = cameraSnapshot();
-    const b64 = data ? (data.split(',')[1] || '') : '';
-    try { state.ws.send(JSON.stringify({ type: 'frame_response', request_id: req_id, image_b64: b64 })); } catch {}
+    const replyWith = (data) => {
+      const b64 = data ? (data.split(',')[1] || '') : '';
+      try { state.ws.send(JSON.stringify({ type: 'frame_response', request_id: req_id, image_b64: b64 })); } catch {}
+    };
+    if (state.cameraOn) {
+      // PiP overlay already streaming — snapshot the existing video element
+      replyWith(cameraSnapshot());
+    } else {
+      // No PiP active — open a one-shot getUserMedia stream, snap one
+      // frame, release. Avoids the server-side OpenCV fallback which
+      // is unreliable on Windows (and conflicts with whatever stream
+      // the Settings preview is already holding).
+      cameraSnapshotOneShot().then(replyWith).catch(() => replyWith(null));
+    }
     return;
   }
 
@@ -2315,6 +2328,42 @@ function cameraSnapshot() {
   c.width = v.videoWidth; c.height = v.videoHeight;
   c.getContext('2d').drawImage(v, 0, 0);
   return c.toDataURL('image/jpeg', 0.85);
+}
+
+// One-shot camera capture without engaging the PiP UI. Used by the
+// agent's camera_capture tool when the user hasn't manually opened
+// the floating preview. Opens a transient getUserMedia stream, waits
+// for the first frame (≤3s budget), draws to canvas, releases the
+// stream. Matches the device-id selected in Settings → Camera.
+async function cameraSnapshotOneShot() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return null;
+  let stream = null;
+  try {
+    const constraints = { video: state.cameraDeviceId
+      ? { deviceId: { exact: state.cameraDeviceId } }
+      : true };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.srcObject = stream;
+    try { await v.play(); } catch {}
+    // Wait up to 3s for the first frame to arrive — first invocation
+    // after a permissions prompt is the slowest case.
+    const deadline = Date.now() + 3000;
+    while (!v.videoWidth && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 80));
+    }
+    if (!v.videoWidth) return null;
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    return c.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
+    return null;
+  } finally {
+    if (stream) {
+      try { stream.getTracks().forEach(t => t.stop()); } catch {}
+    }
+  }
 }
 function cameraCaptureToComposer() {
   const data = cameraSnapshot();
