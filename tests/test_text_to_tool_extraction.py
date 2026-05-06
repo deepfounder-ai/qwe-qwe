@@ -102,6 +102,17 @@ def test_pattern5_invalid_json_returns_none():
     assert _extract_tool_from_text(text, TOOLS) is None
 
 
+def test_pattern5_nested_dict_in_arguments():
+    # The non-greedy `.*?` plus the literal `>` anchor after `\}` make
+    # the regex correctly span the entire JSON even when arguments
+    # contain a nested dict — guards against the obvious "lazy quantifier
+    # would stop at first `}`" reading of the regex.
+    text = ('!<function_call:{"call": "memory_search", '
+            '"arguments": {"query": "x", "filter": {"tag": "user"}}}>')
+    assert _extract_tool_from_text(text, TOOLS) == (
+        "memory_search", {"query": "x", "filter": {"tag": "user"}})
+
+
 def test_pattern5_in_middle_of_prose():
     # Real models often surround the tool call with explanatory text
     text = (
