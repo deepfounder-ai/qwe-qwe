@@ -294,3 +294,21 @@ def test_step3_code_examples_cover_camera_memory_secret(sc):
     assert "memory.search" in sc.STEP3_CODE
     assert "secret_get" in sc.STEP3_CODE
     assert "http_request" in sc.STEP3_CODE
+
+
+def test_instruction_enforces_table_namespacing(sc):
+    """qwe-qwe uses one shared SQLite. Without a prefix rule, two
+    user-created skills could accidentally share a `notes` table.
+    The rule must be in INSTRUCTION (LLM sees it directly) AND
+    backed by a concrete prefix example."""
+    assert "skill_<skill_name>_" in sc.INSTRUCTION
+    # An anti-example list of names the model must NOT use
+    for forbidden in ("notes", "logs", "tasks", "users"):
+        assert forbidden in sc.INSTRUCTION  # mentioned in the DON'T list
+
+
+def test_step1_plan_enforces_table_namespacing(sc):
+    """The planner outputs the tables array — the prefix rule must be
+    visible there too, otherwise the planner could emit unprefixed
+    names and the downstream DDL builder propagates them as-is."""
+    assert "skill_<skill_name>_" in sc.STEP1_PLAN

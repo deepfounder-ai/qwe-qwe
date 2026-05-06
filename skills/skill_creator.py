@@ -41,6 +41,16 @@ CONFIG / SCHEDULER / TASKS (available but rarely needed):
 - import scheduler; scheduler.add(name, schedule, prompt) for cron-style
 - import tasks; tasks.register(name, description) for background work
 
+TABLE NAMING (CRITICAL — qwe-qwe uses ONE shared SQLite for everything):
+- ALWAYS prefix your skill's tables with "skill_<skill_name>_". Example:
+  skill_meal_logger_meals, skill_workout_tracker_sets, skill_slack_notify_webhooks
+- This prevents silent data collisions with other skills (two skills both
+  creating a generic `notes` table would share rows accidentally) and with
+  core agent tables (messages, kv, threads, scheduled_tasks, routine_runs).
+- Do NOT use generic names: notes, logs, tasks, users, items, records.
+- Same rule for kv_set keys when persisting config — prefix with
+  "skill:<skill_name>:" e.g. "skill:meal_logger:daily_target".
+
 ALWAYS:
 - Lazy-import inside execute(): json, datetime, memory, tools, etc. Cheap module load.
 - Create tables with CREATE TABLE IF NOT EXISTS
@@ -50,7 +60,8 @@ ALWAYS:
 NEVER:
 - Hardcode API keys / tokens — use secret_save/secret_get
 - Block forever waiting on user input from outside the chat
-- Modify global agent state — keep skill state in own SQLite tables or kv_* keys"""
+- Modify global agent state — keep skill state in own SQLite tables or kv_* keys
+- Use ungrouped table names like 'notes' or 'logs' — collide with other skills"""
 
 TOOLS = [
     {
@@ -155,9 +166,14 @@ Output ONLY valid JSON, no markdown, no explanation:
     "docstring": "One-line module description",
     "short_description": "Short desc (max 80 chars)",
     "instruction": "When and how to use this skill's tools",
-    "tables": ["table_name: column1 TYPE, column2 TYPE, ..."],
+    "tables": ["skill_<skill_name>_<purpose>: column1 TYPE, column2 TYPE, ..."],
     "tools": ["tool_name: brief description of what it does"]
 }}
+
+CRITICAL: table names MUST be prefixed with skill_<skill_name>_ to
+avoid collisions with other skills and the core agent tables. Example
+for skill 'meal_logger': "skill_meal_logger_meals" and
+"skill_meal_logger_targets" — never just "meals" or "targets".
 
 Keep it simple. IMPORTANT: Max 3 tools only! Max 2 tables. Fewer = better."""
 
