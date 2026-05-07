@@ -312,3 +312,108 @@ def test_step1_plan_enforces_table_namespacing(sc):
     visible there too, otherwise the planner could emit unprefixed
     names and the downstream DDL builder propagates them as-is."""
     assert "skill_<skill_name>_" in sc.STEP1_PLAN
+
+
+# ── _extract_execute_body ────────────────────────────────────────────
+
+
+def test_extract_execute_body_finds_simple_body(sc):
+    source = '''\
+def execute(name, args):
+    val = args.get("foo")
+    return str(val)
+'''
+    body = sc._extract_execute_body(source)
+    assert 'args.get("foo")' in body
+    assert "def execute" not in body  # no function signature
+
+
+def test_extract_execute_body_empty_when_no_execute(sc):
+    source = '''\
+TOOLS = [{"name": "foo"}]
+def helper():
+    pass
+'''
+    body = sc._extract_execute_body(source)
+    assert body == ""
+
+
+def test_extract_execute_body_empty_when_syntax_error(sc):
+    body = sc._extract_execute_body("this is not valid python {{{")
+    assert body == ""
+
+
+def test_extract_execute_body_empty_when_empty_source(sc):
+    assert sc._extract_execute_body("") == ""
+
+
+def test_extract_execute_body_multiline_body(sc):
+    source = '''\
+TOOLS = [{"name": "test"}]
+
+def execute(name, args):
+    conn = db._get_conn()
+    val = args.get("num_samples", 30)
+    result = conn.execute("SELECT 1").fetchall()
+    return str(result)
+'''
+    body = sc._extract_execute_body(source)
+    assert 'args.get("num_samples", 30)' in body
+    assert "conn = db._get_conn()" in body
+    assert "TOOLS" not in body  # module-level stuff excluded
+
+
+# ── _smoke_test param-usage scope ────────────────────────────────────
+
+
+def test_smoke_test_catches_param_not_in_execute(sc, tmp_path):
+    """When a required param is in TOOLS dict but NOT used inside
+    execute(), _smoke_test should flag it (the bug this fixes)."""
+    skill_file = tmp_path / "bad_skill.py"
+    skill_file.write_text(
+        '"""A skill with mismatched param."""\n'
+        'TOOLS = [{"type": "function",\n'
+        '          "function": {"name": "do_thing",\n'
+        '                        "description": "Do a thing",\n'
+        '                        "parameters": {"type": "object",\n'
+        '                                       "properties": {"num_samples": {"type": "integer"}},\n'
+        '                                       "required": ["num_samples"]}}}]\n'
+        '\n'
+        'def execute(name, args):\n'
+        '    # Uses wrong key "samples" instead of "num_samples"\n'
+        '    val = args.get("samples", 30)\n'
+        '    return str(val)\n'
+    )
+    tools = [{"function": {"name": "do_thing",
+                           "parameters": {"type": "object",
+                                          "properties": {"num_samples": {"type": "integer"}},
+                                          "required": ["num_samples"]}}}]
+    errors = sc._smoke_test(skill_file, tools)
+    assert errors, "should have caught the param mismatch"
+    assert any("num_samples" in e for e in errors)
+
+
+def test_smoke_test_passes_when_param_used_in_execute(sc, tmp_path):
+    """When a required param IS used inside execute(), _smoke_test
+    should pass even though the param also appears in TOOLS dict."""
+    skill_file = tmp_path / "good_skill.py"
+    skill_file.write_text(
+        '"""A skill with correct param usage."""\n'
+        'TOOLS = [{"type": "function",\n'
+        '          "function": {"name": "do_thing",\n'
+        '                        "description": "Do a thing",\n'
+        '                        "parameters": {"type": "object",\n'
+        '                                       "properties": {"num_samples": {"type": "integer"}},\n'
+        '                                       "required": ["num_samples"]}}}]\n'
+        '\n'
+        'def execute(name, args):\n'
+        '    # Uses the correct key "num_samples"\n'
+        '    val = args.get("num_samples", 30)\n'
+        '    return str(val)\n'
+    )
+    tools = [{"function": {"name": "do_thing",
+                           "parameters": {"type": "object",
+                                          "properties": {"num_samples": {"type": "integer"}},
+                                          "required": ["num_samples"]}}}]
+    errors = sc._smoke_test(skill_file, tools)
+    assert not errors, f"should pass but got errors: {errors}"

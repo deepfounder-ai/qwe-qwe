@@ -1169,6 +1169,12 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
     except Exception:
         source = ""
 
+    # Extract the execute() function body via AST so we only check
+    # param usage inside execute(), not in the TOOLS dict or other
+    # module-level declarations (which would always contain the param
+    # names and defeat the check).
+    execute_body_source = _extract_execute_body(source)
+
     for t in tools_list:
         func = t.get("function", {})
         tool_name = func.get("name", "")
@@ -1190,19 +1196,44 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
                 errors.append(f"{tool_name}: {e}")
 
         # 2. Param-usage check: every required param must appear in execute() source
-        if source:
+        if execute_body_source:
             required = func.get("parameters", {}).get("required", [])
-            props = func.get("parameters", {}).get("properties", {})
-            # Check required params + all properties (since most should be used)
             for param in required:
                 # Look for args.get("param") or args["param"] or param as variable
-                if f'"{param}"' not in source and f"'{param}'" not in source:
+                if f'"{param}"' not in execute_body_source and f"'{param}'" not in execute_body_source:
                     errors.append(
                         f'{tool_name}: required param "{param}" not found in execute() code — '
                         f'definition/implementation mismatch'
                     )
 
     return errors
+
+
+def _extract_execute_body(source: str) -> str:
+    """Return the source text of the execute() function body only.
+
+    Uses AST to find the FunctionDef for 'execute' and extracts the
+    raw source spanning its body. Returns empty string on any failure
+    (unparseable source, no execute function, etc.) so callers degrade
+    gracefully to no check rather than crashing.
+    """
+    if not source:
+        return ""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "execute":
+            # Get line/col positions of the first statement in the body
+            first = node.body[0]
+            last = node.body[-1]
+            lines = source.splitlines(keepends=True)
+            # lineno is 1-based; slice from first body line to last body line
+            start_line = first.lineno - 1
+            end_line = last.end_lineno  # end_lineno is also 1-based
+            return "".join(lines[start_line:end_line])
+    return ""
 
 
 def _generate_skill_pipeline(skill_name: str, description: str, target: Path, task_id: int = 0):
