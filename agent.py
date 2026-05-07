@@ -909,18 +909,38 @@ def _save_experience(user_input: str, result: "TurnResult", rounds: int,
     # Unique tools used this turn
     tools_used = list(dict.fromkeys(result.tool_calls_made))
 
-    # Skip when the whole turn was meta (memory / self-config / tool_search only)
+    # Skip when the whole turn was meta — saving "I searched memory" or
+    # "I looked at the camera" as experience is circular noise that
+    # poisons the recall pool. Two categories:
+    #   (a) Pure introspection — listing config, reading state, looking
+    #       up memory. Nothing was learned that wasn't already in the
+    #       system.
+    #   (b) Read-only observation — camera capture, browser open,
+    #       read_file, http GETs. The model "saw" something but didn't
+    #       solve or change anything; saving the turn just clogs recall
+    #       with "Task: что на камере? | Result: success | Learned: I
+    #       see a desk." which is useless next time.
     _META_TOOLS = {
+        # Memory / introspection
         "memory_search", "memory_save", "memory_delete",
         "self_config", "tool_search",
-        "list_notes", "list_skills", "list_cron", "list_secrets",
-        "get_stats", "list_experience",
-        "soul_editor", "skill_creator",
+        "get_stats", "list_experience", "list_notes", "list_skills",
+        "list_cron", "list_secrets", "list_skill_files",
+        "user_profile_get", "rag_index", "recall_about_user",
+        # Soul / skill management — real tool names, not module names.
+        # "soul_editor" / "skill_creator" used to be in this set but
+        # those are module identifiers, never appear as tools_used.
         "add_trait", "remove_trait", "list_traits",
-        "rag_index", "user_profile_get",
+        "create_skill", "delete_skill",
+        # Read-only observation
+        "camera_capture", "read_file",
+        "browser_open", "browser_snapshot", "browser_back",
+        "browser_forward", "browser_reload", "browser_eval",
+        "http_request", "open_url", "send_file",
+        "secret_get",
     }
     if all(t in _META_TOOLS for t in tools_used):
-        _log.debug(f"experience skipped: meta-only tools ({tools_used})")
+        _log.debug(f"experience skipped: meta/read-only-only tools ({tools_used})")
         return
 
     # Skip when user input is about memory itself (poisons the recall pool)
@@ -936,10 +956,12 @@ def _save_experience(user_input: str, result: "TurnResult", rounds: int,
         _log.debug(f"experience skipped: memory-meta input ({_low[:40]})")
         return
 
-    # Skip single-round tasks unless they produced a substantive reply
+    # Skip trivial turns — was 80 chars + rounds<=1, but small turns
+    # with single tool calls were still slipping through. Bumped:
+    # under 200 reply chars AND under 3 rounds → skip.
     reply_stripped = result.reply.strip()
-    if rounds <= 1 and len(reply_stripped) < 80:
-        _log.debug(f"experience skipped: trivial single-round turn (reply={len(reply_stripped)}ch)")
+    if rounds <= 2 and len(reply_stripped) < 200:
+        _log.debug(f"experience skipped: trivial turn (rounds={rounds}, reply={len(reply_stripped)}ch)")
         return
 
     outcome = "failed" if fail_count >= 2 else "partial" if fail_count > 0 else "success"

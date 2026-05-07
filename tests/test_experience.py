@@ -115,7 +115,9 @@ def test_1_1_basic_case_format(agent_mod, experience_enabled, monkeypatch):
     """Case contains [EXP], tool name, and 'success'."""
     calls = _capture_save(monkeypatch)
     result = _make_result(agent_mod, tools=["weather_get"], reply="Погода: 15°C, дождь")
-    agent_mod._save_experience("проверь погоду", result, rounds=2, fail_count=0, _sync=True)
+    # rounds=3 to clear the trivial-turn filter (≤2 rounds + <200 char
+    # reply is now skipped to stop saving every short Q&A as experience)
+    agent_mod._save_experience("проверь погоду", result, rounds=3, fail_count=0, _sync=True)
 
     assert calls, "memory.save was not called"
     text = calls[0]["text"]
@@ -128,7 +130,7 @@ def test_1_2_outcome_partial(agent_mod, experience_enabled, monkeypatch):
     """fail_count=1 → Result: partial."""
     calls = _capture_save(monkeypatch)
     result = _make_result(agent_mod, tools=["shell"])
-    agent_mod._save_experience("запусти скрипт", result, rounds=2, fail_count=1, _sync=True)
+    agent_mod._save_experience("запусти скрипт", result, rounds=3, fail_count=1, _sync=True)
     assert calls
     assert "partial" in calls[0]["text"]
 
@@ -147,7 +149,7 @@ def test_1_4_long_input_truncated(agent_mod, experience_enabled, monkeypatch):
     calls = _capture_save(monkeypatch)
     long_input = "а" * 120
     result = _make_result(agent_mod, tools=["shell"])
-    agent_mod._save_experience(long_input, result, rounds=2, fail_count=0, _sync=True)
+    agent_mod._save_experience(long_input, result, rounds=3, fail_count=0, _sync=True)
 
     assert calls
     text = calls[0]["text"]
@@ -175,6 +177,35 @@ def test_1_6_no_save_when_no_tools(agent_mod, experience_enabled, monkeypatch):
     assert not calls
 
 
+def test_1_6b_skip_observation_only_tools(agent_mod, experience_enabled, monkeypatch):
+    """A turn that only used read-only/observational built-in tools
+    (camera_capture, read_file, browser_open, http_request, etc.)
+    should be skipped — saving 'I looked at the camera' poisons the
+    experience pool with non-actionable turn summaries. Stops the
+    user-reported "[EXP] in memory on everything" pollution."""
+    calls = _capture_save(monkeypatch)
+    result = _make_result(agent_mod, tools=["camera_capture"], reply="A desk with a laptop.")
+    agent_mod._save_experience("что на камере?", result, rounds=3, fail_count=0, _sync=True)
+    assert not calls, "observation-only turn should not produce experience"
+
+    # Same for combinations of read-only built-ins
+    result2 = _make_result(agent_mod, tools=["read_file", "browser_open", "http_request"],
+                           reply="The repo has 12 files; site says 'Welcome'.")
+    agent_mod._save_experience("посмотри что в проекте и на сайте", result2,
+                                rounds=4, fail_count=0, _sync=True)
+    assert not calls, "all-observation turn should not produce experience"
+
+
+def test_1_6c_save_when_observation_plus_action(agent_mod, experience_enabled, monkeypatch):
+    """Mixing observation with a real action (write_file, shell, custom
+    skill tool) DOES save — the turn produced a learnable pattern."""
+    calls = _capture_save(monkeypatch)
+    result = _make_result(agent_mod, tools=["read_file", "write_file"],
+                          reply="Updated config.yml with the new value.")
+    agent_mod._save_experience("обнови конфиг", result, rounds=3, fail_count=0, _sync=True)
+    assert calls, "observation+write turn should save experience"
+
+
 def test_1_7_no_save_when_disabled(agent_mod, experience_disabled, monkeypatch):
     """experience_learning=0 → memory.save not called."""
     calls = _capture_save(monkeypatch)
@@ -188,7 +219,7 @@ def test_1_8_tag_experience_and_no_thread(agent_mod, experience_enabled, monkeyp
     calls = _capture_save(monkeypatch)
     result = _make_result(agent_mod, tools=["write_file"])
     agent_mod._save_experience("напиши конфиг в config.yml", result,
-                                rounds=2, fail_count=0, _sync=True)
+                                rounds=3, fail_count=0, _sync=True)
 
     assert calls
     assert calls[0]["tag"] == "experience"
@@ -329,7 +360,7 @@ def test_3_1_save_then_retrieve(agent_mod, experience_enabled, monkeypatch):
 
     result = _make_result(agent_mod, tools=["weather_get"], reply="Погода: 20°C")
     agent_mod._save_experience("проверь погоду в Москве", result,
-                                rounds=2, fail_count=0, _sync=True)
+                                rounds=3, fail_count=0, _sync=True)
     assert saved_cases, "Case was not saved"
 
     ctx = agent_mod._auto_context("какая погода в Лондоне?")
@@ -342,7 +373,7 @@ def test_3_1_save_then_retrieve(agent_mod, experience_enabled, monkeypatch):
 def test_4_1_outcome_score_saved_in_meta(agent_mod, experience_enabled, monkeypatch):
     calls = _capture_save(monkeypatch)
     result = _make_result(agent_mod, tools=["shell"], reply="Done")
-    agent_mod._save_experience("запусти скрипт", result, rounds=2, fail_count=0, _sync=True)
+    agent_mod._save_experience("запусти скрипт", result, rounds=3, fail_count=0, _sync=True)
 
     assert calls
     assert calls[0]["meta"] is not None
@@ -352,7 +383,7 @@ def test_4_1_outcome_score_saved_in_meta(agent_mod, experience_enabled, monkeypa
 def test_4_2_partial_outcome_score(agent_mod, experience_enabled, monkeypatch):
     calls = _capture_save(monkeypatch)
     result = _make_result(agent_mod, tools=["shell"])
-    agent_mod._save_experience("задача", result, rounds=2, fail_count=1, _sync=True)
+    agent_mod._save_experience("задача", result, rounds=3, fail_count=1, _sync=True)
 
     assert calls
     assert calls[0]["meta"]["outcome_score"] == 0.6
