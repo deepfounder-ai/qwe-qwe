@@ -312,3 +312,178 @@ def test_step1_plan_enforces_table_namespacing(sc):
     visible there too, otherwise the planner could emit unprefixed
     names and the downstream DDL builder propagates them as-is."""
     assert "skill_<skill_name>_" in sc.STEP1_PLAN
+
+
+# ── _get_execute_body helper ─────────────────────────────────────────
+
+
+def test_get_execute_body_finds_execute(sc):
+    """_get_execute_body returns the body of execute() when it exists."""
+    source = '''"""A test skill."""
+
+TOOLS = [{"function": {"name": "do_thing", "parameters": {"properties": {"foo": {"type": "string"}}, "required": ["foo"]}}}]
+
+def execute(name: str, args: dict) -> str:
+    if name == "do_thing":
+        foo = args.get("foo", "")
+        return f"hello {foo}"
+    return "unknown"
+'''
+    body = sc._get_execute_body(source)
+    assert body is not None
+    assert 'args.get("foo"' in body
+    # TOOLS dict should NOT appear in the body
+    assert "TOOLS" not in body
+
+
+def test_get_execute_body_returned_text_is_body_only(sc):
+    """The returned text must NOT include the def execute(...) signature line
+    — only the indented body. This keeps the param-usage check honest."""
+    source = '''def execute(name, args):
+    x = args.get("foo", "")
+    return x
+'''
+    body = sc._get_execute_body(source)
+    assert body is not None
+    assert "def execute" not in body
+    assert body.startswith("    ")
+
+
+def test_get_execute_body_none_when_no_execute(sc):
+    """Returns None when there is no execute() function."""
+    source = '''TOOLS = []
+def other():
+    pass
+'''
+    assert sc._get_execute_body(source) is None
+
+
+def test_get_execute_body_none_on_syntax_error(sc):
+    """Returns None when the source doesn't parse."""
+    assert sc._get_execute_body("this is not python {{{{") is None
+
+
+def test_get_execute_body_multiline_body(sc):
+    """Body with multiple statements — all lines captured."""
+    source = '''def execute(name, args):
+    x = args.get("foo", "")
+    y = args.get("bar", "")
+    if x and y:
+        return f"{x} {y}"
+    return "nothing"
+'''
+    body = sc._get_execute_body(source)
+    assert body is not None
+    lines = body.splitlines()
+    assert len(lines) >= 4  # 4+ body lines
+    assert "args.get(\"foo\"" in body
+    assert "args.get(\"bar\"" in body
+
+
+# ── _smoke_test param-usage fix (AST-scoped check) ────────────────────
+
+
+def test_smoke_param_check_fails_when_param_missing_in_execute(sc, tmp_path):
+    """Skill where TOOLS declares param 'foo' but execute() uses
+    args.get(\"bar\") instead — smoke test MUST fail because 'foo' is
+    defined in TOOLS but never referenced in execute's body."""
+    skill_code = '''"""Test skill."""
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "do_thing",
+            "description": "does a thing",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "foo": {"type": "string", "description": "the foo"},
+                },
+                "required": ["foo"],
+            },
+        },
+    },
+]
+
+def execute(name: str, args: dict) -> str:
+    if name == "do_thing":
+        bar = args.get("bar", "")
+        return "result: " + bar
+    return "unknown"
+'''
+    skill_path = tmp_path / "test_broken_skill.py"
+    skill_path.write_text(skill_code)
+
+    tools_list = [
+        {
+            "type": "function",
+            "function": {
+                "name": "do_thing",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"foo": {"type": "string"}},
+                    "required": ["foo"],
+                },
+            },
+        }
+    ]
+
+    errors = sc._smoke_test(skill_path, tools_list)
+    # Should flag 'foo' as missing
+    foo_errors = [e for e in errors if 'foo' in e and 'not found' in e]
+    assert foo_errors, (
+        f"Expected 'foo' to be flagged as missing from execute() body, "
+        f"got errors: {errors}"
+    )
+
+
+def test_smoke_param_check_passes_when_param_used_in_execute(sc, tmp_path):
+    """Skill where execute() correctly uses args.get(\"foo\") —
+    smoke test MUST pass."""
+    skill_code = '''"""Test skill."""
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "do_thing",
+            "description": "does a thing",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "foo": {"type": "string", "description": "the foo"},
+                },
+                "required": ["foo"],
+            },
+        },
+    },
+]
+
+def execute(name: str, args: dict) -> str:
+    if name == "do_thing":
+        foo = args.get("foo", "")
+        return f"result: {foo}"
+    return "unknown"
+'''
+    skill_path = tmp_path / "test_good_skill.py"
+    skill_path.write_text(skill_code)
+
+    tools_list = [
+        {
+            "type": "function",
+            "function": {
+                "name": "do_thing",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"foo": {"type": "string"}},
+                    "required": ["foo"],
+                },
+            },
+        }
+    ]
+
+    errors = sc._smoke_test(skill_path, tools_list)
+    # No 'not found in execute() code' errors expected
+    param_errors = [e for e in errors if 'not found in execute() code' in e]
+    assert not param_errors, f"Unexpected param-usage errors: {param_errors}"

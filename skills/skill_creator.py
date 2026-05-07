@@ -1169,6 +1169,10 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
     except Exception:
         source = ""
 
+    # Extract execute() body via AST so we don't falsely match param names
+    # that appear in the TOOLS dict literal (which always contains them).
+    execute_body_text = _get_execute_body(source) if source else None
+
     for t in tools_list:
         func = t.get("function", {})
         tool_name = func.get("name", "")
@@ -1190,19 +1194,44 @@ def _smoke_test(skill_path: Path, tools_list: list[dict]) -> list[str]:
                 errors.append(f"{tool_name}: {e}")
 
         # 2. Param-usage check: every required param must appear in execute() source
-        if source:
+        if execute_body_text is not None:
             required = func.get("parameters", {}).get("required", [])
             props = func.get("parameters", {}).get("properties", {})
             # Check required params + all properties (since most should be used)
             for param in required:
                 # Look for args.get("param") or args["param"] or param as variable
-                if f'"{param}"' not in source and f"'{param}'" not in source:
+                if f'"{param}"' not in execute_body_text and f"'{param}'" not in execute_body_text:
                     errors.append(
                         f'{tool_name}: required param "{param}" not found in execute() code — '
                         f'definition/implementation mismatch'
                     )
 
     return errors
+
+
+def _get_execute_body(source: str) -> str | None:
+    """Extract the body text of the execute() function from skill source code.
+
+    Uses the AST to locate the FunctionDef node named 'execute', then
+    slices the original source to return only the body lines.
+    Returns None if the function can't be found.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "execute":
+            # Get line numbers (1-indexed from AST)
+            first_body_lineno = node.body[0].lineno
+            last_body_lineno = node.body[-1].end_lineno
+            lines = source.splitlines()
+            # lines is 0-indexed, AST lineno is 1-indexed
+            body_lines = lines[first_body_lineno - 1 : last_body_lineno]
+            return "\n".join(body_lines)
+
+    return None
 
 
 def _generate_skill_pipeline(skill_name: str, description: str, target: Path, task_id: int = 0):
