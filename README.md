@@ -2,15 +2,14 @@
   <img src="static/logo.png" alt="qwe-qwe" width="280">
 </p>
 
-<h3 align="center">Self-hosted AI agent for business automation</h3>
+<h3 align="center">Business-oriented AI agent</h3>
 
 <p align="center">
-  Deploy on your infrastructure. Your data, your LLM, your rules. Works with local models (Qwen, Gemma) or any OpenAI-compatible provider (Azure, Bedrock, OpenAI, Groq).
+  Self-hosted AI agent ready to drop into business workflows. Bring any OpenAI-compatible LLM — Azure OpenAI, AWS Bedrock, OpenAI, Groq, OpenRouter, or a local model on your own hardware. Your data, your provider, your rules.
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
-  <a href="#why-small-models">Why Small Models</a> •
   <a href="#interfaces">Interfaces</a> •
   <a href="#tool-search">Tool Search</a> •
   <a href="#tools">Tools</a> •
@@ -25,7 +24,6 @@
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
-  <img src="https://img.shields.io/badge/runs-100%25_offline-purple" alt="offline">
   <a href="https://t.me/qwe_qwe_ai"><img src="https://img.shields.io/badge/community-Telegram-blue?logo=telegram" alt="Telegram"></a>
 </p>
 
@@ -33,35 +31,33 @@
 
 ## What is qwe-qwe?
 
-A **self-hosted AI agent** built to drop into business workflows: customer ops, internal automation, knowledge retrieval, scheduled reporting. Deploys on a laptop, a workstation, or your own server — never sends data to a third party unless you tell it to. Chat via web UI, terminal, or Telegram, with tools, semantic memory, browser control, MCP integrations, and a cron-like scheduler.
+A **business-oriented AI agent** built to drop into real workflows: customer ops, internal automation, knowledge retrieval, scheduled reporting, custom integrations. Deploys on your infrastructure — a workstation, your own server, or the cloud account you already have. Chat via web UI, terminal, or Telegram, with tools, semantic memory, browser control, MCP integrations, and a cron-like scheduler.
 
-**Bring your own LLM**: works with local models (Qwen, Gemma, Llama via LM Studio / Ollama) or any OpenAI-compatible provider (Azure OpenAI, AWS Bedrock, Groq, OpenRouter, OpenAI direct). Your provider, your context window, your budget.
+**Bring your own LLM**: works with any OpenAI-compatible provider — Azure OpenAI, AWS Bedrock, OpenAI, Groq, OpenRouter, DeepSeek, Together — or a local model via LM Studio / Ollama if you need everything on-prem. Your provider, your context window, your budget. Switch providers per-thread without restarting the agent.
 
-> **Philosophy**: small models can do real work when the system around them is smart. Tool search keeps the prompt lean, recall keeps state out of the conversation, scheduler runs work without you. Same patterns scale up to bigger models when you need them — but the agent is designed to feel responsive on a single consumer GPU first.
+> **Philosophy**: the system around the LLM should do the heavy lifting. Tool search keeps the prompt lean, recall keeps state out of the conversation, scheduler runs work without you, skills extend capability without redeploys. The result is an agent that's reliable on whatever model you pick — small enough to run on a laptop or large enough to handle complex multi-step tasks.
 
-## Why Small Models
+## Why qwe-qwe
 
-| | Cloud (GPT, Claude) | Local (Qwen 9B) |
+| | qwe-qwe | Hosted SaaS agents |
 |---|---|---|
-| **Latency** | 2-10s network + inference | 1-5s local inference |
-| **Privacy** | Data leaves your machine | Everything stays local |
-| **Cost** | $20-200/month | Free after GPU purchase |
-| **Offline** | No | Works without internet |
-| **Customization** | System prompt only | Full control over everything |
-| **Reliability** | API outages, rate limits | Always available |
-
-qwe-qwe makes the trade-off worth it by working *with* the model's limitations instead of fighting them.
+| **Data** | Stays on your infrastructure | Sent to the vendor |
+| **LLM choice** | Any OpenAI-compatible provider | Locked to vendor's model |
+| **Customization** | Full code + soul + skills | System prompt + few hooks |
+| **Cost model** | Your existing LLM bill, no per-seat | Per-seat / per-action SaaS pricing |
+| **Compliance** | Self-hosted = your audit trail | Vendor's compliance posture |
+| **Extensibility** | Skills, MCP, custom tools | Vendor's marketplace |
+| **Reliability** | No vendor outages or rate limits | Vendor SLA |
 
 ## Quick Start
 
 ### Prerequisites
 
-- Python 3.11+
-- [LM Studio](https://lmstudio.ai) or [Ollama](https://ollama.ai) with a loaded model
-- **Recommended models:**
-  - Qwen 3.5 9B Q4_K_M (~5.5GB) — best for tool calling and agents
-  - Gemma 4 E4B-IT (~4GB) — fast, good for simple tasks
-- **Embeddings:** FastEmbed (ONNX, local) — multilingual-MiniLM (384d, 50+ languages) + SPLADE++
+- **Python 3.11+**
+- **An LLM endpoint** — pick one:
+  - **Hosted** (any OpenAI-compatible API): Azure OpenAI, AWS Bedrock, OpenAI, Groq, OpenRouter, DeepSeek, Together. Set `QWE_LLM_URL` + `QWE_LLM_KEY` and you're done.
+  - **Local** (data stays on-prem): [LM Studio](https://lmstudio.ai) or [Ollama](https://ollama.ai) with any tool-capable model. Qwen 9B / Gemma 4B work well on a single consumer GPU; bigger models if you have the hardware.
+- **Embeddings**: FastEmbed (ONNX, local, CPU) — multilingual-MiniLM (384d, 50+ languages) + SPLADE++. Runs comfortably on a laptop without a GPU.
 
 ### Install
 
@@ -128,15 +124,19 @@ LM Studio / Ollama are auto-detected on localhost during setup. If your server i
 export QWE_LLM_URL=http://<your-ip>:1234/v1
 ```
 
-### Recommended hardware
+### Hardware
+
+For **hosted-LLM** deployments, qwe-qwe itself is light — any modern laptop or small VM works (the agent process is ~300MB resident, plus Qdrant on disk for memory).
+
+For **local-LLM** deployments where the model runs on the same machine:
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| GPU | 4GB VRAM (4B Q4) | 8GB VRAM (9B Q4_K_M) |
+| GPU | 4GB VRAM (4B Q4) | 8GB VRAM (9B Q4_K_M) or larger |
 | RAM | 8GB | 16GB |
 | Storage | 10GB | 20GB (models + memory) |
 
-Works on: gaming laptops, desktop GPUs (RTX 3060+), Mac M1+ (via Ollama).
+Works on: gaming laptops, desktop GPUs (RTX 3060+), Mac M1+ (via Ollama), Linux servers.
 
 ## Architecture
 
@@ -155,7 +155,9 @@ Telegram bot    <--/    Loop   +-- Tools (8 core + tool_search)
                    7 providers supported
 ```
 
-### Small-model optimizations
+### Engineering around the LLM
+
+These are the techniques the agent uses to stay reliable across model sizes — they make small models capable enough for production work *and* keep large models cheap by burning fewer tokens per turn:
 
 - **Tool Search** — only 8 core tools loaded by default (~750 tokens); model calls `tool_search("keyword")` to activate more. Saves **75% tokens** vs loading all 46 tools
 - **Compact system prompt** (~1200 tokens) — no redundant tool descriptions
