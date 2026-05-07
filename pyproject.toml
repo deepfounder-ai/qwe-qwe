@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qwe-qwe"
-version = "0.18.2"
+version = "0.18.3"
 description = "Self-hosted AI agent for business automation"
 readme = "README.md"
 license = {text = "MIT"}

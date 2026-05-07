@@ -1,101 +1,85 @@
-# v0.18.2 — Camera fixes, UI polish, skill_creator opens up
+# v0.18.3 — Skill creator actually works for engineering tasks + camera tuning
 
-Patch release with three focused tracks: making `camera_capture` actually work on Windows, two UI buttons that were rendered but had no handler wired, and broadening what generated skills can do.
+Patch release driven by a live field session that took the skill_creator from "generates broken stubs that fail validation" to "generates working multi-tool engineering skills with raw OpenCV capture, statistics math, and time-series SQLite tables — from a single chat prompt". Plus two fixes for chat UI annoyances and new resolution/quality controls in Settings → Camera.
 
-## 📷 Camera capture works again (5 commits)
+## 🤖 Skill creator now generates working engineering skills
 
-`camera_capture` had been silently broken in the common case for a while. Field session today (qwen3.5-9b on LM Studio, two cameras) showed exactly how it failed and the fixes landed in five steps as I traced symptoms.
+Three coupled fixes that landed in sequence as the field session exposed each layer of the breakage.
 
-### The chain of bugs
+### Soul rule 14 — agent must STOP after `create_skill`
 
-1. **WS event-name mismatch** — `server.py` broadcast `{"type": "get_frame", ...}` but `static/index.html` listened for `t === 'frame_request'`. The browser never received the request, server timed out at 3s, tool fell through to the OpenCV fallback. Client now accepts both event names so version skew can't bring it back.
+Symptom: agent invoked `create_skill` (correct) but in the same turn ran 20+ shell commands and `write_file` to manually build the skill in parallel. The pipeline message says "started in background, will notify in 2-5 min" but the agent didn't trust it. Result: a half-baked manually-written `.py` clobbered or raced the pipeline's output, and the file didn't satisfy the skill loader contract (no `TOOLS` list, no `execute()` function, hardcoded paths, ungrouped table names).
 
-2. **PiP-only restriction** — even with the names matching, the browser's frame handler only snapped a frame if the floating PiP overlay was active (`state.cameraOn`). Most users haven't toggled that on. Added `cameraSnapshotOneShot()`: opens a transient `getUserMedia` stream with the device picked in Settings, waits up to 3s for the first frame, draws to canvas, releases. Tool no longer depends on user UI state.
+Rule 14 now contains four critical sub-rules:
+- After `create_skill` → END the turn. Don't run more tools that turn. Notification arrives later.
+- NEVER `write_file` in `~/.qwe-qwe/skills/`. Manual writes don't satisfy the loader.
+- Skills are SINGLE `.py` files at `~/.qwe-qwe/skills/<name>.py` — not directories. Don't `mkdir` or `ls` a skill subdir.
+- "Run `<skill_name>`" = call one of the skill's tools directly. If unsure of tool names → `list_skills`.
 
-3. **3s timeout was too tight** for cold-start `getUserMedia` (permission prompt + first-frame ≈ 1–3s). Bumped server-side timeout to 6s.
+### Pipeline elif→if when all tools are custom
 
-4. **Windows DirectShow black-frame** — when another consumer recently held the camera (Settings preview's `getUserMedia`, Skype, browser tab), OpenCV opens the device but the first 5–15 frames come back nearly-uniform black before auto-exposure kicks in. The existing 5-frame warmup at open time wasn't enough on cold sensors. Added a per-read black-frame guard: if `mean(frame) < 25`, retry up to 30 times with 70ms spacing — sensor typically clears in 5–15 frames. Returns the dark frame anyway after warmup retries so the LLM reports "it's dark" instead of the tool failing.
+Symptom: every attempt failed with `syntax error on attempt N: invalid syntax (<unknown>, line 70)` — same line across attempts. Field session gave 6 attempts, all the same. Generated `.py` had `elif name == "..."` as the first branch, no preceding `if`.
 
-5. **Auto-detect picked the wrong camera** — old logic took the first index where `mean > 3` (barely above pitch black). On laptops with built-in webcam at index 0 and a USB webcam at 1, it would pick the dim built-in. New logic probes all 4 indexes, scores each by frame brightness, picks the brightest. Per-index probe results logged for transparency:
+Root cause: when `_assemble_from_mapping()` finds no recognisable CRUD ops in the tools list (snapshot, trend, recommend, benchmark, etc. are all "custom"), the deterministic execute_body comes out EMPTY. The LLM was then asked to "Generate ONLY elif blocks for these tools… Start each with 'elif name == ...'". With no preceding `if`, that's a `SyntaxError`.
 
-```
-camera: probe index 0: 640x480, mean=16.0
-camera: probe index 1: 1280x720, mean=98.4
-camera: auto-selected index 1 (1280x720, mean=98.4) — set
-  camera_index in settings to pin a different one
-```
+Two-part fix in `_run_pipeline`:
+- **Prompt-level**: detect whether `execute_body` is empty BEFORE calling the LLM. If empty, tell it to start the FIRST tool with `if name == "..."` and the rest with `elif`. Also stricter wording: "FULL implementation (no stub `pass`)" and "All code for a tool MUST be indented under its branch".
+- **Defensive post-process**: regex-rewrite the first occurrence of `elif name ==` to `if name ==` whenever `execute_body` was empty. Idempotent on already-correct output.
 
-Plus a small cosmetic — silenced OpenCV's `cap_ffmpeg_impl: Failed list devices for backend dshow` warning that fires on every Windows VideoCapture init even when the open succeeds.
+### End-to-end pipeline test
 
-## 🖱️ UI handlers that were missing
+`test_skill_creator_pipeline.py` (NEW) — three tests with mocked LLM that drive `_run_pipeline` end-to-end:
+- happy-path camera-using skill — asserts the produced file calls `tools.execute("camera_capture", ...)` + `memory.save()` + uses `skill_<name>_` table prefix + parses cleanly + passes smoke test
+- 3-attempt retry: first plan call returns garbage, retry, succeed
+- elif-first regression shield — feeds the exact buggy LLM output from the field session, asserts post-process rewrites to `if`
 
-### Floating "scroll to latest" button
+Field result after these fixes: created `camera_diagnostics` from a chat prompt — 5580-byte skill with 3 tools (`camera_benchmark`, `camera_health`, `camera_baseline_reset`), direct `cv2.VideoCapture(0)` for raw frame grab, `statistics.stdev()` for FPS variance, properly-namespaced `skill_camera_diagnostics_benchmarks` table, baseline comparison logic. Worked first try (190s pipeline). Real engineering skill generated from a paragraph of natural-language description.
 
-Adds a circular chevron-down button that appears in the chat column when the user has scrolled up >200px from the bottom. Clicking smooth-scrolls back to the latest message. Auto-hides as soon as the user is within 200px of bottom. Sticky positioning inside the chat-scroll viewport with `bottom: 96px` keeps it just above the composer, negative margin keeps it out of the flex flow so the composer's vertical position is unchanged.
+## 🖱 Chat UI: task_update no longer creates ghost streaming messages
 
-### Slash-command chips above the composer were inert
+Symptom: after invoking `create_skill`, the chat indicator stayed in "generating" state with the typing dot blinking forever, even after the original turn completed.
 
-The hint bar above the composer rendered four chips:
+Root cause: `skill_creator._notify()` broadcasts pipeline progress as `{type: "task_update", name, text}` over WS. The client's `handleWsMessage` had a fall-through branch that fired for ANY non-status event, including `task_update`, treating each "Step 2/5: generating tools" as the start of a new agent turn. Since `task_update` has no follow-up `done` event, `state.streaming.streaming` stayed `true` forever.
 
-> Continue the thread, or try: `/recall` `/remember` `/cron` `/tools`
+Fix: handle `task_update` explicitly at the top of `handleWsMessage` — surface as a toast (✅/❌ styling based on the message text), return before the streaming-message-creation gate. Side benefit: user now actually SEES skill creation progress as toasts (`camera_diagnostics: Step 2/5: generating tools` → `camera_diagnostics: ✅ Created and enabled!`) instead of getting zero UI feedback during the 2-5 minute background pipeline. Plus auto-refresh of the skills list on success so new tools appear without manual reload.
 
-These had `data-slash="..."` attributes but **no handlers wired anywhere**. Clicking did nothing. Two-part fix:
+## 📷 Camera: configurable resolution + JPEG quality
 
-1. Click handler in `wireEvents()` — inserts the command + trailing space into the textarea, focuses, places caret at end.
-2. Client-side interception in `sendMessage()` so commands actually do something predictable instead of being sent to the LLM as prose:
-   - `/cron` → navigates to Scheduler
-   - `/tools` → opens the ⌘K palette
-   - `/recall <q>` → rewrites as `"search memory for: <q>"` so the LLM picks `memory_search` reliably
-   - `/remember <fact>` → rewrites as `"remember this fact: <fact>"`
-   - Bare `/recall` or `/remember` without an argument → toast usage hint, doesn't submit
+Two new settings in Settings → Camera → Capture quality:
 
-## 🧩 Skill creator: expose the full agent runtime
+**`camera_resolution`**: `auto` / `480p` / `720p` / `1080p`. Applied to `cv2.VideoCapture` via `CAP_PROP_FRAME_WIDTH`/`CAP_PROP_FRAME_HEIGHT` on device open. Each preset also carries a max-pixels cap for the resize step before JPEG encoding — so users picking 1080p don't end up with the legacy 256×192 default cap:
 
-Generated skills used to be told they could only touch the `db` module. The LLM-facing `INSTRUCTION` listed `db.kv_get`/`kv_set`/`_get_conn` and explicitly forbade everything else — so skills came out as isolated mini-CRUD apps with no way to use the agent's actual capabilities. A user asking "build a meal logger that takes a photo and remembers what I ate" couldn't get that skill because the LLM didn't know it could call `camera_capture` or `memory.save`.
+| Preset | Capture | Sent to LLM |
+|---|---|---|
+| auto | camera default | up to 256×192 (49K pixels) |
+| 480p | 640×480 | up to 256×192 (49K pixels) |
+| 720p | 1280×720 | up to 512×384 (196K pixels) |
+| 1080p | 1920×1080 | up to 1024×768 (786K pixels) |
 
-Now the prompt context documents:
+**`camera_quality`**: int 1-100, default 70. Replaces the hardcoded `cv2.IMWRITE_JPEG_QUALITY=70`. Read on every encode (no restart needed); resolution requires a camera reset to re-open with the new size.
 
-- `memory.save` / `memory.search` (semantic recall)
-- `tools.execute("<any_tool>", {...})` — `camera_capture`, `http_request`, `read_file`, `write_file`, `send_file`, `open_url`, `secret_save`, `secret_get`
-- `providers.get_client()` for direct LLM calls
-- `scheduler` / `tasks` for background work
-- ALWAYS / NEVER bullets at the end (lazy imports, no hardcoded secrets, no blocking external waits)
-
-`STEP1_PLAN` got composability hints + 3 cross-feature plan examples (fitness coach, meal logger, slack notify). `STEP3_CODE` got 3 new code examples (camera+memory, secret+http, memory.search) to give the LLM patterns to copy.
-
-### Table namespacing rule
-
-Important architectural correction. qwe-qwe uses a single shared SQLite for everything — core agent tables (`messages`, `kv`, `threads`, `scheduled_tasks`, `routine_runs`) live in the same DB as every skill's tables. Without a naming rule, two user-generated skills both creating a `notes` or `logs` table would silently share rows. New rule in both `INSTRUCTION` and `STEP1_PLAN`:
-
-> ALWAYS prefix tables with `skill_<skill_name>_<purpose>`:
-> `skill_meal_logger_meals`, `skill_workout_tracker_sets`, …
-> NEVER use generic names: `notes`, `logs`, `tasks`, `users`, `items`, `records`.
-
-### Tests
-
-`skills/skill_creator.py` was 1318 lines with **zero test coverage**. New `tests/test_skill_creator_smoke.py` with 25 tests covering:
-
-- Pure helpers: `_sanitize_id`, `_infer_op`, `_extract_json` (4 cases), `_extract_code`, `_build_table_ddl`
-- Deterministic mapping path: `_build_mapping_from_tools` + `_assemble_from_mapping` (AST-validates the assembled body)
-- `delete_skill` protections: built-in refuse, invalid identifier, missing skill
-- `execute()` dispatch
-- Integration: `skill_creator` in `_DEFAULT_SKILLS`, `tool_search('skill')` surfaces the right tools
-- Prompt content fences: pin that `INSTRUCTION` documents memory/tools/providers/db, that `STEP1_PLAN` mentions composability, that `STEP3_CODE` shows camera/memory/secret/http examples, that the table-namespacing rule lands in both prompts
-
-The fence tests guard against accidental narrowing on future refactors — if someone drops the camera example from STEP3_CODE, the LLM stops generating camera-using skills, and we'd never notice without these tests.
+Trade-off the user controls now: 1080p + quality 90 sends a sharp ~1MB base64 to the vision LLM (slow, expensive, but readable text + tiny details). auto + quality 50 sends a cheap 256×192 thumbnail (fast, cheap, blurry). 9 unit tests pin the preset table, helper behaviour, exception handling, and config metadata.
 
 ## 🔄 Upgrading
 
 ```bash
 git pull && pip install -e .
-# restart cli.py --web for camera fixes to take effect
-# hard-reload the browser tab (Ctrl+Shift+R) for the UI fixes
+# restart cli.py --web for camera + skill_creator fixes
+# hard-reload the browser tab (Ctrl+Shift+R) for the UI fix
 ```
 
 No data migration needed.
 
 ## 📊 Stats
 
-- 9 commits since v0.18.1
-- 394 → 394 tests passing (added skill_creator coverage offset by one earlier integration; net +25 from skill_creator)
-- All fixes verified via field session — camera went from "all black" to working capture in real time
+- 5 commits since v0.18.2
+- 394 → 409 tests passing (+15: 4 pipeline e2e tests, 9 camera-settings tests, +2 minor)
+- All fixes verified live — `camera_diagnostics` skill generation went from 100% failure rate to first-try success after the elif→if fix landed
+
+## 🐞 Filed as follow-up issues
+
+Tech debt surfaced during the session — open for community contributions:
+
+- [#13](https://github.com/deepfounder-ai/qwe-qwe/issues/13) (good first issue): `smoke_test` param-usage check looks at whole source instead of `execute()` body — let a real `num_samples` vs `samples` mismatch slip through
+- [#14](https://github.com/deepfounder-ai/qwe-qwe/issues/14) (help wanted): AST-level fix for code outside `if`/`elif` branches — the second half of the LLM-codegen failure mode, prompt-only mitigated for now
+- [#15](https://github.com/deepfounder-ai/qwe-qwe/issues/15) (help wanted): `delete_skill` leaves orphan tables in shared SQLite
