@@ -1161,3 +1161,42 @@ def test_consent_version_bumped_to_2(fresh_tel):
     is caught here — without this, opted-in users would never see
     the re-confirm banner for the new event type."""
     assert fresh_tel._CURRENT_CONSENT_VERSION >= 2
+
+
+# ── Browser cache contract for /api/telemetry/status ─────────────────
+
+
+def test_api_helper_disables_http_cache():
+    """The reported "modal opens after every reload" bug had this
+    sequence:
+
+        boot → GET /status → cdm:false → cached by browser
+        user clicks Enable → POST /opt-in → backend stores cdm:true
+        reload → GET /status → browser serves CACHED cdm:false
+        modal re-opens → forever loop
+
+    Backend was always correct; FastAPI just doesn't set Cache-Control
+    headers on JSON responses, and browsers heuristic-cache them. The
+    fix lives in the JS `api()` helper: every call MUST opt into
+    `cache: 'no-store'` so the browser never replays a stale response.
+
+    This test pins the contract by reading static/index.html and
+    asserting the directive is present in api(). If a future refactor
+    drops it, this test fails loud — much faster than waiting for
+    the modal-loop bug to be reported again.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    # Locate the api() declaration
+    needle_start = "const api = async (path, opts) =>"
+    idx = src.find(needle_start)
+    assert idx >= 0, "api() declaration not found — was it renamed?"
+    # Scan a reasonable window after it for the no-store opt-in
+    body = src[idx: idx + 2000]
+    assert "no-store" in body, (
+        "api() helper no longer sets cache:'no-store'. "
+        "JSON API calls will be browser-cached, which causes stale-state "
+        "bugs (e.g. the telemetry modal re-opening on every reload). "
+        "Restore the directive in static/index.html."
+    )
+

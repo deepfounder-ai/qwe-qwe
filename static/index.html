@@ -1634,6 +1634,15 @@ const api = async (path, opts) => {
   const hasJsonBody = opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData);
   opts.headers = Object.assign({}, opts.headers, hasJsonBody ? { 'Content-Type': 'application/json' } : {});
   if (hasJsonBody) opts.body = JSON.stringify(opts.body);
+  // Always bypass the HTTP cache for JSON API calls — server is the
+  // authoritative source. Without this, browsers heuristic-cache GET
+  // responses (FastAPI sends no Cache-Control headers) and we end up
+  // serving stale state right after a mutating POST. Concrete bug
+  // this prevents: boot calls GET /status (cdm=false), user clicks
+  // Enable → POST /opt-in (stores cdm=true), reload calls GET /status
+  // → browser serves the cached cdm=false → telemetry modal re-opens
+  // forever. `no-store` makes that whole class of bugs impossible.
+  if (!opts.cache) opts.cache = 'no-store';
   const r = await fetch(path, opts);
   if (r.status === 401) {
     // Password-protected install — show login modal and retry after auth
