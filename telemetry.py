@@ -59,7 +59,8 @@ _log = logging.getLogger("qwe.telemetry")
 # them with the new defaults visible.
 #   v1 = first release with a default project endpoint
 #        (qwelytics.deepfounder.ai Countly)
-_CURRENT_CONSENT_VERSION = 1
+#   v2 = added `thread_created` event + extended SOURCES with "preset"
+_CURRENT_CONSENT_VERSION = 2
 
 # ── HTTP send tunables ───────────────────────────────────────────────
 # Single timeout cap for the whole urlopen call. urllib doesn't separate
@@ -155,6 +156,15 @@ ALLOWED_EVENTS: dict[str, dict[str, type]] = {
         # preset_activate / knowledge_index_url / knowledge_index_file
         "feature": str,
     },
+    "thread_created": {
+        # Fires every time a new chat thread is created. Lets us see how
+        # often users start fresh conversations vs continue existing ones,
+        # and whether the trigger was the user (web/cli/telegram) or the
+        # system (scheduler/preset). Source is the only field — no thread
+        # name, no id, nothing that could carry user-typed content.
+        # Allowed values: web / cli / telegram / scheduler / preset / other
+        "source": str,
+    },
 }
 
 # Categories used for tool_categories_used and tool_error.tool_category.
@@ -170,8 +180,11 @@ ERROR_KINDS = frozenset({
     "aborted", "blocked", "not_found", "unauthorized", "other",
 })
 
-# Sources for turn_complete.source.
-SOURCES = frozenset({"web", "cli", "telegram", "scheduler", "other"})
+# Sources for turn_complete.source and thread_created.source.
+# `preset` is only meaningful for thread_created (preset activation
+# creates a thread); turn_complete won't emit it but keeping one
+# enum keeps the validator simple.
+SOURCES = frozenset({"web", "cli", "telegram", "scheduler", "preset", "other"})
 
 # Provider kinds.
 PROVIDER_KINDS = frozenset({
@@ -205,6 +218,7 @@ _ENUM_CONSTRAINTS: dict[tuple[str, str], frozenset] = {
     ("tool_error", "error_kind"): ERROR_KINDS,
     ("skill_creator_pipeline", "outcome"): PIPELINE_OUTCOMES,
     ("feature_first_use", "feature"): FEATURES,
+    ("thread_created", "source"): SOURCES,
 }
 
 # ── Module state ─────────────────────────────────────────────────────

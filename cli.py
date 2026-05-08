@@ -627,7 +627,7 @@ def handle_thread(args: str):
     # /thread new <name>
     if cmd == "new":
         name = parts[1] if len(parts) > 1 else f"Thread {len(threads.list_all()) + 1}"
-        t = threads.create(name)
+        t = threads.create(name, source="cli")
         threads.switch(t["id"])
         console.print(f"  [green]✓ Created & switched to '{name}' ({t['id']})[/]")
         return

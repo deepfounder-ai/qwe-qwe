@@ -445,7 +445,7 @@ def _get_or_create_thread_for_topic(chat_id: int, topic_id: int, topic_name: str
             return tid
     # Create new thread
     name = topic_name or f"TG Topic #{topic_id}"
-    t = threads.create(name, meta={"telegram_chat_id": chat_id, "telegram_topic_id": topic_id})
+    t = threads.create(name, meta={"telegram_chat_id": chat_id, "telegram_topic_id": topic_id}, source="telegram")
     set_thread_for_topic(chat_id, topic_id, t["id"])
     _log.info(f"created thread '{name}' ({t['id']}) for topic {topic_id} in chat {chat_id}")
     return t["id"]
@@ -462,7 +462,7 @@ def _get_or_create_dm_thread(chat_id: int) -> str:
         if t:
             return tid
     # Create new thread for this DM
-    t = threads.create("Telegram DM", meta={"telegram_chat_id": chat_id, "telegram_dm": True})
+    t = threads.create("Telegram DM", meta={"telegram_chat_id": chat_id, "telegram_dm": True}, source="telegram")
     db.kv_set(kv_key, t["id"])
     _log.info(f"created DM thread ({t['id']}) for chat {chat_id}")
     return t["id"]

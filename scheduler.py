@@ -121,7 +121,7 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
                 "routine_name": name,
                 "schedule": schedule,
                 "created_at": time.time(),
-            })
+            }, source="scheduler")
             routine_thread_id = t["id"]
         except Exception as e:
             _log.warning(f"failed to create routine thread for '{name}': {e}")
@@ -715,7 +715,7 @@ def _ensure_routine_thread(cron_id: int, routine_name: str, schedule: str) -> st
             "routine_name": routine_name,
             "schedule": schedule,
             "backfilled": True,
-        })
+        }, source="scheduler")
         tid = t["id"]
         db.execute("UPDATE scheduled_tasks SET thread_id=? WHERE id=?",
                    (tid, cron_id))

@@ -1040,3 +1040,124 @@ def test_opt_out_then_status_reports_decision_made(http_client):
     post = http_client.get("/api/telemetry/status").json()
     assert post["enabled"] is False
     assert post["consent_decision_made"] is True  # decision = "no", but a decision
+
+
+# ── thread_created event ─────────────────────────────────────────────
+
+
+def test_thread_created_event_in_whitelist(fresh_tel):
+    """The event is part of the validator's closed list — adding new
+    events without ALLOWED_EVENTS update is rejected, so confirming
+    membership is the contract this test pins."""
+    assert "thread_created" in fresh_tel.ALLOWED_EVENTS
+    schema = fresh_tel.ALLOWED_EVENTS["thread_created"]
+    # The event carries ONLY a source — no name, no id, no meta. If
+    # someone adds free-text fields here, this test fails loud.
+    assert schema == {"source": str}
+
+
+def test_thread_created_accepts_each_known_source(fresh_tel):
+    """Every source value the call sites use (web/cli/telegram/
+    scheduler/preset) must be accepted by the validator. Catches a
+    typo regression where one site sends e.g. "tg" or "schedule"."""
+    fresh_tel.opt_in()
+    for src in ("web", "cli", "telegram", "scheduler", "preset", "other"):
+        fresh_tel.clear_queue()
+        accepted = fresh_tel.track_event("thread_created", {"source": src})
+        assert accepted is True, f"source={src!r} rejected"
+        assert fresh_tel.queue_size() == 1
+        evt = fresh_tel.get_pending_events()[0]
+        assert evt["event"] == "thread_created"
+        assert evt["props"] == {"source": src}
+
+
+def test_thread_created_rejects_unknown_source(fresh_tel):
+    """Free-text source must be dropped — closed enum is the privacy
+    guarantee that prevents thread names from leaking via this field."""
+    fresh_tel.opt_in()
+    accepted = fresh_tel.track_event("thread_created", {"source": "my_custom_thing"})
+    assert accepted is False
+    assert fresh_tel.queue_size() == 0
+
+
+def test_thread_created_rejects_extra_keys(fresh_tel):
+    """The thread name + meta are NEVER part of the event. If a future
+    refactor tries to attach them, the validator drops the event."""
+    fresh_tel.opt_in()
+    accepted = fresh_tel.track_event("thread_created", {
+        "source": "web",
+        "name": "secret-project-x",  # smuggling attempt
+    })
+    assert accepted is False
+    assert fresh_tel.queue_size() == 0
+
+
+def test_threads_create_emits_telemetry_when_enabled(qwe_temp_data_dir, monkeypatch):
+    """End-to-end: threads.create(source=...) routes through the
+    telemetry helper and lands in the queue with the right shape."""
+    import importlib
+    import sys
+    if "telemetry" in sys.modules:
+        importlib.reload(sys.modules["telemetry"])
+    if "threads" in sys.modules:
+        importlib.reload(sys.modules["threads"])
+    import telemetry as t
+    import threads
+    t.opt_in()
+    t.clear_queue()
+
+    threads.create("hello", source="web")
+
+    assert t.queue_size() == 1
+    evt = t.get_pending_events()[0]
+    assert evt["event"] == "thread_created"
+    assert evt["props"] == {"source": "web"}
+
+
+def test_threads_create_emits_nothing_when_disabled(qwe_temp_data_dir, monkeypatch):
+    """Default OFF — threads.create() must NOT touch the queue when
+    telemetry is disabled. Privacy contract."""
+    import importlib
+    import sys
+    if "telemetry" in sys.modules:
+        importlib.reload(sys.modules["telemetry"])
+    if "threads" in sys.modules:
+        importlib.reload(sys.modules["threads"])
+    import telemetry as t
+    import threads
+    assert t.enabled() is False  # default
+    t.clear_queue()
+
+    threads.create("hello")  # no source kwarg → defaults to "other"
+
+    assert t.queue_size() == 0
+
+
+def test_threads_create_coerces_unknown_source_to_other(qwe_temp_data_dir, monkeypatch):
+    """The helper coerces invalid sources to 'other' so a caller who
+    passes a typo doesn't drop the event entirely (still useful as a
+    count, just bucketed)."""
+    import importlib
+    import sys
+    if "telemetry" in sys.modules:
+        importlib.reload(sys.modules["telemetry"])
+    if "threads" in sys.modules:
+        importlib.reload(sys.modules["threads"])
+    import telemetry as t
+    import threads
+    t.opt_in()
+    t.clear_queue()
+
+    threads.create("hello", source="tgbot")  # not in SOURCES
+
+    assert t.queue_size() == 1
+    evt = t.get_pending_events()[0]
+    assert evt["props"] == {"source": "other"}
+
+
+def test_consent_version_bumped_to_2(fresh_tel):
+    """thread_created adoption bumped consent from v1 to v2. Pinning
+    so a future refactor that lowers it (or forgets to bump again)
+    is caught here — without this, opted-in users would never see
+    the re-confirm banner for the new event type."""
+    assert fresh_tel._CURRENT_CONSENT_VERSION >= 2

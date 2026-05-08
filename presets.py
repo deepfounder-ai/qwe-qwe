@@ -1146,7 +1146,7 @@ def ensure_preset_workspace(preset_id: str) -> None:
         if preset_thread:
             threads.switch(preset_thread["id"])
         else:
-            t = threads.create(preset_thread_name)
+            t = threads.create(preset_thread_name, source="preset")
             threads.switch(t["id"])
         _log.info(f"thread → '{preset_thread_name}'")
 

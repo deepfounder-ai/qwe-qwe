@@ -24,7 +24,7 @@ If you opt in (Settings → Privacy → Telemetry, OR by answering "yes" to the 
 
 ### What gets collected
 
-Every event is declared in [`telemetry.py::ALLOWED_EVENTS`](../telemetry.py) — that's the source of truth, and it's a closed whitelist. Code can't send anything outside this list. Right now there are **5 event types**:
+Every event is declared in [`telemetry.py::ALLOWED_EVENTS`](../telemetry.py) — that's the source of truth, and it's a closed whitelist. Code can't send anything outside this list. Right now there are **6 event types**:
 
 #### `session_start`
 
@@ -57,6 +57,14 @@ Fires when an agent turn finishes (LLM stopped, tool calls done, reply rendered)
 | `output_tokens` | `420` | Same. |
 | `context_hits` | `3` | Memory recall effectiveness. |
 | `source` | `"web"` / `"cli"` / `"telegram"` / `"scheduler"` | Which surface the turn came from. |
+
+#### `thread_created`
+
+Fires every time a new chat thread is created. Lets us see how often users start fresh conversations vs continue existing ones, and whether the trigger was a person or a system surface.
+
+| Field | Example | Why |
+|---|---|---|
+| `source` | One of: `web` / `cli` / `telegram` / `scheduler` / `preset` / `other` | Which surface initiated the thread creation. Closed enum. **Never the thread name, id, or any meta** — those could carry user-typed content like `"acme-Q3-launch"` and deanonymize. |
 
 #### `tool_error`
 

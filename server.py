@@ -2550,7 +2550,7 @@ async def list_threads(include_archived: bool = False):
 async def create_thread(data: dict):
     """Create a new thread."""
     name = data.get("name", "New Thread")
-    t = threads.create(name, meta=data.get("meta"))
+    t = threads.create(name, meta=data.get("meta"), source="web")
     # Seed message — branch from existing conversation
     seed = data.get("seed_message")
     if seed:

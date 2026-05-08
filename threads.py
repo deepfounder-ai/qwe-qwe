@@ -67,8 +67,15 @@ def _gen_id() -> str:
 
 # ── CRUD ──
 
-def create(name: str, meta: dict | None = None) -> dict:
-    """Create a new thread. Returns thread dict."""
+def create(name: str, meta: dict | None = None, source: str = "other") -> dict:
+    """Create a new thread. Returns thread dict.
+
+    `source` identifies which surface initiated the creation, for the
+    opt-in `thread_created` telemetry event. Closed-enum values:
+    web / cli / telegram / scheduler / preset / other. Anything else
+    coerces to "other" inside the telemetry helper. The thread name +
+    meta are NEVER part of the event — only the source.
+    """
     _ensure_table()
     tid = _gen_id()
     now = time.time()
@@ -76,8 +83,24 @@ def create(name: str, meta: dict | None = None) -> dict:
         "INSERT INTO threads (id, name, created_at, updated_at, meta) VALUES (?,?,?,?,?)",
         (tid, name, now, now, json.dumps(meta or {}))
     )
-    _log.info(f"thread created: {tid} '{name}'")
+    _log.info(f"thread created: {tid} '{name}' [source={source}]")
+    _emit_thread_created_telemetry(source)
     return {"id": tid, "name": name, "created_at": now, "updated_at": now, "archived": False, "messages": 0}
+
+
+def _emit_thread_created_telemetry(source: str) -> None:
+    """Lazy-imported telemetry emit. No-op when telemetry is disabled
+    or anything goes wrong — this must NEVER raise into the caller's
+    happy path."""
+    try:
+        import telemetry
+        if not telemetry.enabled():
+            return
+        safe = source if source in telemetry.SOURCES else "other"
+        telemetry.track_event("thread_created", {"source": safe})
+    except Exception:
+        # Belt and suspenders — telemetry must never break thread creation
+        _log.debug("thread_created telemetry emit failed", exc_info=True)
 
 
 def get(tid: str) -> dict | None:
