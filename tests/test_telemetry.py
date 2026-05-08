@@ -971,3 +971,72 @@ def test_default_sender_dispatches_to_raw_by_default(monkeypatch, configured_end
     configured_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
     configured_endpoint._default_sender(configured_endpoint.get_pending_events())
     assert called == {"raw": True, "countly": False}
+
+
+# ── HTTP endpoint flow (mirrors first-run modal in static/index.html) ─
+
+
+@pytest.fixture
+def http_client(fresh_tel):
+    """TestClient bound to a fresh qwe_temp_data_dir + reloaded telemetry.
+
+    Mirrors what the browser does when the first-run modal opens:
+    GET /status → modal opens iff consent_decision_made:false → user
+    clicks Enable → POST /opt-in → on next load, GET /status must say
+    consent_decision_made:true (otherwise the modal would re-prompt).
+    Pinning this contract here prevents a regression like #unknown
+    where a UI-side verify-step started crying false-positive on a
+    correctly-persisted opt-in.
+    """
+    from fastapi.testclient import TestClient
+    import server
+    with TestClient(server.app) as c:
+        yield c
+
+
+def test_status_endpoint_reports_no_decision_on_fresh_install(http_client):
+    """First-run state: telemetry off, no consent stamped, modal would open."""
+    r = http_client.get("/api/telemetry/status")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["enabled"] is False
+    assert j["consent_decision_made"] is False
+    assert j["consent_needs_reprompt"] is False  # nothing to re-prompt yet
+    assert j["current_consent_version"] >= 1
+
+
+def test_opt_in_then_status_reports_decision_made(http_client):
+    """The contract the modal relies on: after POST /opt-in, the next
+    GET /status must report consent_decision_made:true. If this ever
+    breaks, the first-run modal will loop on every page reload.
+    """
+    # Fresh state — modal would open
+    pre = http_client.get("/api/telemetry/status").json()
+    assert pre["consent_decision_made"] is False
+
+    # User clicks Enable
+    r = http_client.post("/api/telemetry/opt-in")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    # Next page load — modal must NOT re-prompt
+    post = http_client.get("/api/telemetry/status").json()
+    assert post["enabled"] is True
+    assert post["consent_decision_made"] is True
+    assert post["consent_needs_reprompt"] is False
+
+
+def test_opt_out_then_status_reports_decision_made(http_client):
+    """Same contract for the No-thanks branch: explicit opt-out must
+    also stamp consent_version so the modal doesn't re-prompt.
+    """
+    pre = http_client.get("/api/telemetry/status").json()
+    assert pre["consent_decision_made"] is False
+
+    r = http_client.post("/api/telemetry/opt-out")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    post = http_client.get("/api/telemetry/status").json()
+    assert post["enabled"] is False
+    assert post["consent_decision_made"] is True  # decision = "no", but a decision

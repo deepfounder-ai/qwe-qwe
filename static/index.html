@@ -7553,15 +7553,6 @@ async function checkTelemetryFirstRun() {
             _decided = true;
             try {
               await api('/api/telemetry/opt-out', { method: 'POST' });
-              // Verify persistence — if the server didn't actually
-              // stamp consent_version, the modal would loop on refresh.
-              // We've seen reports of this; fail-loud so the user gets
-              // a clear error instead of a silent loop.
-              const v = await api('/api/telemetry/status');
-              if (!v.consent_decision_made) {
-                toast('opt-out did not persist — check server logs', 'err');
-                return false;  // keep modal open
-              }
               toast('telemetry off');
             } catch { toast('failed to save choice', 'err'); return false; }
         }},
@@ -7569,11 +7560,6 @@ async function checkTelemetryFirstRun() {
             _decided = true;
             try {
               await api('/api/telemetry/opt-in', { method: 'POST' });
-              const v = await api('/api/telemetry/status');
-              if (!v.consent_decision_made) {
-                toast('opt-in did not persist — check server logs', 'err');
-                return false;
-              }
               toast('telemetry enabled — thank you!');
             } catch { toast('failed to enable', 'err'); return false; }
         }},
