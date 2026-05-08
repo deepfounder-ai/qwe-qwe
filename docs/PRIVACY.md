@@ -113,9 +113,32 @@ The whitelist in `telemetry.py::ALLOWED_EVENTS` is **type-strict** — every pro
 
 Currently: **nowhere by default.** The `telemetry_endpoint` setting is empty out of the box. If you opt in, events queue locally (visible in Settings → Privacy → "View pending events") but nothing leaves the machine until you set an endpoint.
 
-Self-hosted users can point `telemetry_endpoint` at their own PostHog / Plausible / custom collector if they want their own analytics on their own deployment.
-
 A project-operated endpoint (sending to the qwe-qwe project itself) is **not currently shipped** — when one is added in a future release, the consent prompt will surface again so you can re-decide with the new endpoint URL visible.
+
+#### Self-hosted Plausible
+
+[Plausible Analytics](https://plausible.io) is a privacy-friendly, open-source web analytics tool. qwe-qwe ships a built-in transformer for Plausible's `/api/event` format. Setup:
+
+1. Self-host Plausible (Docker compose, one command — see Plausible's docs).
+2. In Plausible's dashboard, register a site domain (e.g. `qwe-qwe.app`).
+3. In qwe-qwe, Settings → Privacy → Telemetry:
+   - Enable telemetry
+   - Set Endpoint URL: `https://your-plausible-host.example/api/event`
+   - Set Format: `plausible`
+   - Set Plausible Domain: `qwe-qwe.app` (matching what you registered)
+4. (Optional) Press "Send now" to verify events land in Plausible's dashboard.
+
+Plausible's data model uses a daily-rotating salt to hash IP+UA+domain into anonymous fingerprints, so cross-day per-user tracking is **impossible by design** — that's a feature, not a bug. To still get accurate unique-install counts, qwe-qwe synthesises a stable IPv4 from your `anonymous_id` (first 4 hex bytes), so each install maps to one Plausible "visitor" without a real IP ever leaving the machine. Loopback (127.x.x.x) and reserved (0.x.x.x) ranges are remapped to 10.x.x.x so Plausible accepts them.
+
+What Plausible sees:
+- Event names (one of our 5 ALLOWED_EVENTS)
+- Synthetic URL: `app://qwe-qwe/event/<event_name>`
+- Domain: whatever you configured
+- Props (flat string/number/bool — lists become CSV strings)
+- Synthetic IPv4 derived from anonymous_id (NOT your real IP)
+- User-Agent: `qwe-qwe/<version>`
+
+Self-hosted users can also point `telemetry_endpoint` at PostHog or any custom HTTP collector that accepts our raw `{events: [...]}` shape — set Format to `raw` for that path.
 
 ### Controls
 

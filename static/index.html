@@ -5676,8 +5676,22 @@ function renderTelemetryPanel(tel) {
       '</div>'
     ) +
     settingRow('Endpoint URL',
-      'Where to POST batched events. Empty = no network calls (events queue locally, you can inspect them below). Self-hosted users can point at their own PostHog / Plausible / custom collector.',
-      '<input type="text" class="setting-input mono" data-setting-key="telemetry_endpoint" data-setting-type="str" value="' + esc(tel.endpoint || '') + '" placeholder="https://your-collector.example/track" style="width:280px">'
+      'Where to POST events. Empty = no network calls (events queue locally, you can inspect them below). For Plausible: full URL including /api/event path.',
+      '<input type="text" class="setting-input mono" data-setting-key="telemetry_endpoint" data-setting-type="str" value="' + esc(tel.endpoint || '') + '" placeholder="https://your-collector.example/api/event" style="width:280px">'
+    ) +
+    settingRow('Format',
+      'raw = single batched POST with our JSON shape (custom collectors). plausible = per-event POST in Plausible Analytics format.',
+      (() => {
+        const cur = (state.allSettings && state.allSettings.telemetry_format && state.allSettings.telemetry_format.value) || 'raw';
+        return '<select class="setting-input mono" data-setting-key="telemetry_format" data-setting-type="str">' +
+          '<option value="raw"' + (cur === 'raw' ? ' selected' : '') + '>raw — custom collector</option>' +
+          '<option value="plausible"' + (cur === 'plausible' ? ' selected' : '') + '>plausible — self-hosted Plausible Analytics</option>' +
+        '</select>';
+      })()
+    ) +
+    settingRow('Plausible domain',
+      'Site domain you registered in your Plausible dashboard (e.g. "qwe-qwe.app"). Required when Format = plausible.',
+      '<input type="text" class="setting-input mono" data-setting-key="telemetry_plausible_domain" data-setting-type="str" value="' + esc((state.allSettings && state.allSettings.telemetry_plausible_domain && state.allSettings.telemetry_plausible_domain.value) || '') + '" placeholder="qwe-qwe.app" style="width:200px">'
     ) +
     settingRow('Queue', 'Events waiting to be sent. Inspect, send manually, or clear.',
       '<div style="display:flex;align-items:center;gap:6px">' +

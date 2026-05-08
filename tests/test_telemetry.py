@@ -630,3 +630,228 @@ def test_request_payload_shape(monkeypatch, configured_endpoint, no_sleep):
         # ts is a UNIX timestamp; serialised as a float by json.
         assert isinstance(ev["ts"], (int, float))
         assert isinstance(ev["props"], dict)
+
+
+# ─── Plausible format ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def plausible_endpoint(fresh_tel):
+    """Opt in + set a Plausible-shaped endpoint + domain."""
+    import config
+    config.set("telemetry_endpoint", "https://stub.invalid/api/event")
+    config.set("telemetry_format", "plausible")
+    config.set("telemetry_plausible_domain", "qwe-qwe.test")
+    fresh_tel.opt_in()
+    return fresh_tel
+
+
+def test_aid_to_synthetic_ip_stable(fresh_tel):
+    aid = "abcdef1234567890" + "00" * 8
+    ip1 = fresh_tel._aid_to_synthetic_ip(aid)
+    ip2 = fresh_tel._aid_to_synthetic_ip(aid)
+    assert ip1 == ip2
+
+
+def test_aid_to_synthetic_ip_distinguishes_users(fresh_tel):
+    aid_a = "11" + "00" * 15
+    aid_b = "ff" + "00" * 15
+    assert fresh_tel._aid_to_synthetic_ip(aid_a) != fresh_tel._aid_to_synthetic_ip(aid_b)
+
+
+def test_aid_to_synthetic_ip_remaps_loopback(fresh_tel):
+    """127.x.x.x and 0.x.x.x get remapped to 10.x.x.x so Plausible
+    accepts them. Otherwise X-Forwarded-For: 127.0.0.1 would collapse
+    every loopback-prefixed UUID into one Plausible visitor."""
+    aid = "7fcafe00" + "00" * 12  # First byte 7f = 127
+    ip = fresh_tel._aid_to_synthetic_ip(aid)
+    assert not ip.startswith("127.")
+    assert not ip.startswith("0.")
+
+
+def test_aid_to_synthetic_ip_handles_short_input(fresh_tel):
+    assert fresh_tel._aid_to_synthetic_ip("") == "10.0.0.1"
+    assert fresh_tel._aid_to_synthetic_ip("ab") == "10.0.0.1"
+    assert fresh_tel._aid_to_synthetic_ip("not-hex!") == "10.0.0.1"
+
+
+def test_to_plausible_props_lists_become_csv(fresh_tel):
+    out = fresh_tel._to_plausible_props({"tool_categories_used": ["memory", "files"]})
+    assert out == {"tool_categories_used": "memory,files"}
+
+
+def test_to_plausible_props_preserves_numbers_bools_strings(fresh_tel):
+    out = fresh_tel._to_plausible_props({"count": 5, "ok": True, "name": "foo"})
+    assert out == {"count": 5, "ok": True, "name": "foo"}
+
+
+def test_to_plausible_props_empty_list_becomes_empty_string(fresh_tel):
+    out = fresh_tel._to_plausible_props({"tools": []})
+    assert out == {"tools": ""}
+
+
+def test_send_plausible_no_endpoint_returns_false(fresh_tel):
+    import config
+    config.set("telemetry_format", "plausible")
+    config.set("telemetry_plausible_domain", "qwe-qwe.test")
+    fresh_tel.opt_in()
+    fresh_tel.track_event("feature_first_use", {"feature": "camera_capture"})
+    assert fresh_tel._send_plausible(fresh_tel.get_pending_events()) is False
+
+
+def test_send_plausible_no_domain_returns_false(fresh_tel):
+    """domain is required by Plausible — refuse to send without it."""
+    import config
+    config.set("telemetry_endpoint", "https://stub.invalid/api/event")
+    config.set("telemetry_format", "plausible")
+    config.set("telemetry_plausible_domain", "")
+    fresh_tel.opt_in()
+    fresh_tel.track_event("feature_first_use", {"feature": "camera_capture"})
+    assert fresh_tel._send_plausible(fresh_tel.get_pending_events()) is False
+
+
+def test_send_plausible_post_shape(monkeypatch, plausible_endpoint, no_sleep):
+    """Verify each POST: URL=endpoint, method=POST, body has Plausible
+    keys (name/url/domain/props), headers carry UA + X-Forwarded-For."""
+    import json as _json
+    import urllib.request as _ur
+
+    captured = []
+
+    def _fake_urlopen(req, *_a, **_kw):
+        captured.append({
+            "url": req.full_url,
+            "method": req.get_method(),
+            "headers": {k: v for k, v in req.header_items()},
+            "body": _json.loads(req.data.decode("utf-8")),
+        })
+        return _FakeResponse(status=202)
+
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    plausible_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
+    plausible_endpoint.track_event("turn_complete", {
+        "duration_ms": 100, "rounds": 1,
+        "tool_categories_used": ["memory", "files"],
+        "tool_calls_count": 2, "tool_errors_count": 0,
+        "input_tokens": 10, "output_tokens": 20, "context_hits": 0,
+        "source": "web",
+    })
+    assert plausible_endpoint._send_plausible(plausible_endpoint.get_pending_events()) is True
+
+    assert len(captured) == 2
+    c0 = captured[0]
+    assert c0["url"] == "https://stub.invalid/api/event"
+    assert c0["method"] == "POST"
+    assert c0["body"]["name"] == "feature_first_use"
+    assert c0["body"]["domain"] == "qwe-qwe.test"
+    assert c0["body"]["url"].startswith("app://qwe-qwe/event/")
+    assert c0["body"]["props"]["feature"] == "camera_capture"
+    headers_lc = {k.lower(): v for k, v in c0["headers"].items()}
+    assert headers_lc["content-type"] == "application/json"
+    assert headers_lc["user-agent"].startswith("qwe-qwe/")
+    assert "x-forwarded-for" in headers_lc
+
+    c1 = captured[1]
+    assert c1["body"]["name"] == "turn_complete"
+    # List prop became CSV string
+    assert c1["body"]["props"]["tool_categories_used"] == "memory,files"
+
+
+def test_send_plausible_synthetic_ip_matches_helper(monkeypatch, plausible_endpoint, no_sleep):
+    """X-Forwarded-For for an event must equal _aid_to_synthetic_ip(aid)."""
+    import urllib.request as _ur
+
+    captured_xff = []
+
+    def _fake_urlopen(req, *_a, **_kw):
+        headers_lc = {k.lower(): v for k, v in req.header_items()}
+        captured_xff.append(headers_lc.get("x-forwarded-for"))
+        return _FakeResponse(status=202)
+
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    plausible_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
+    pending = plausible_endpoint.get_pending_events()
+    aid = pending[0]["anonymous_id"]
+    expected_ip = plausible_endpoint._aid_to_synthetic_ip(aid)
+
+    assert plausible_endpoint._send_plausible(pending) is True
+    assert captured_xff[0] == expected_ip
+
+
+def test_send_plausible_bails_on_first_4xx(monkeypatch, plausible_endpoint, no_sleep):
+    """If event N fails 4xx, don't keep trying events N+1..end. Bail."""
+    import urllib.request as _ur
+
+    call_count = {"n": 0}
+
+    def _fake_urlopen(req, *_a, **_kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _FakeResponse(status=202)  # first event ok
+        raise _make_http_error(400, "bad request")
+
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    plausible_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
+    plausible_endpoint.track_event("feature_first_use", {"feature": "live_voice"})
+    plausible_endpoint.track_event("feature_first_use", {"feature": "telegram_send"})
+
+    assert plausible_endpoint._send_plausible(plausible_endpoint.get_pending_events()) is False
+    # First event ok (1 call), second 400 with no retry (1 call).
+    # Third never attempted.
+    assert call_count["n"] == 2
+
+
+def test_send_plausible_retries_on_5xx_per_event(monkeypatch, plausible_endpoint, no_sleep):
+    import urllib.request as _ur
+
+    call_seq = iter([
+        _make_http_error(503, "down"),
+        _make_http_error(503, "down"),
+        _FakeResponse(status=202),  # third attempt succeeds
+    ])
+    call_count = {"n": 0}
+
+    def _fake_urlopen(req, *_a, **_kw):
+        call_count["n"] += 1
+        nxt = next(call_seq)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    monkeypatch.setattr(_ur, "urlopen", _fake_urlopen)
+
+    plausible_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
+    assert plausible_endpoint._send_plausible(plausible_endpoint.get_pending_events()) is True
+    assert call_count["n"] == 3
+
+
+def test_default_sender_dispatches_to_plausible(monkeypatch, plausible_endpoint, no_sleep):
+    """When format=plausible, _default_sender routes through
+    _send_plausible, not _send_raw."""
+    called = {"raw": False, "plausible": False}
+    monkeypatch.setattr(plausible_endpoint, "_send_raw",
+                        lambda evs: (called.update(raw=True), True)[1])
+    monkeypatch.setattr(plausible_endpoint, "_send_plausible",
+                        lambda evs: (called.update(plausible=True), True)[1])
+
+    plausible_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
+    plausible_endpoint._default_sender(plausible_endpoint.get_pending_events())
+    assert called == {"raw": False, "plausible": True}
+
+
+def test_default_sender_dispatches_to_raw_by_default(monkeypatch, configured_endpoint, no_sleep):
+    """Default format=raw routes through _send_raw, not _send_plausible."""
+    import config
+    config.set("telemetry_format", "raw")
+    called = {"raw": False, "plausible": False}
+    monkeypatch.setattr(configured_endpoint, "_send_raw",
+                        lambda evs: (called.update(raw=True), True)[1])
+    monkeypatch.setattr(configured_endpoint, "_send_plausible",
+                        lambda evs: (called.update(plausible=True), True)[1])
+
+    configured_endpoint.track_event("feature_first_use", {"feature": "camera_capture"})
+    configured_endpoint._default_sender(configured_endpoint.get_pending_events())
+    assert called == {"raw": True, "plausible": False}

@@ -422,7 +422,22 @@ def flush(send_fn: Callable[[list[dict]], bool] | None = None) -> int:
 
 
 def _default_sender(events: list[dict]) -> bool:
-    """Built-in HTTP sender. POSTs the batch as JSON to
+    """Dispatch by `telemetry_format` to the right wire encoder.
+
+    Two supported formats:
+    - "raw" (default) — single batched POST with `{"events": [...]}`
+      shape. For custom collectors that accept our schema directly.
+    - "plausible" — per-event POST in Plausible Analytics' `/api/event`
+      format. For users who self-host Plausible (https://plausible.io).
+    """
+    fmt = (config.get("telemetry_format") or "raw").strip().lower()
+    if fmt == "plausible":
+        return _send_plausible(events)
+    return _send_raw(events)
+
+
+def _send_raw(events: list[dict]) -> bool:
+    """Built-in HTTP sender (raw format). POSTs the batch as JSON to
     `telemetry_endpoint`.
 
     Returns True only on a 2xx response from the receiver, in which case
@@ -535,6 +550,171 @@ def _default_sender(events: list[dict]) -> bool:
         "telemetry: send failed after %d retries: %s",
         _MAX_ATTEMPTS, last_err_class,
     )
+    return False
+
+
+def _aid_to_synthetic_ip(aid: str) -> str:
+    """Map an anonymous_id hex string to a stable synthetic IPv4.
+
+    Plausible counts unique visitors by hashing IP+UA+domain+rotating
+    daily salt. Without a per-user IP, every visit folds into one
+    "visitor" and unique counts collapse. With our anonymous_id
+    deterministically mapped to a synthetic IPv4, Plausible counts
+    unique opted-in installs without ever seeing a real IP.
+
+    The IP is purely synthetic — derived from the first 4 bytes of the
+    hex anonymous_id. Two installs only collide if their UUIDs share
+    the first 4 bytes (1 in 4 billion).
+
+    127.x.x.x (loopback) and 0.x.x.x (reserved) are remapped to the
+    10.x.x.x RFC1918 private range so Plausible doesn't reject them.
+    """
+    if not aid or len(aid) < 8:
+        return "10.0.0.1"
+    try:
+        b1 = int(aid[0:2], 16)
+        b2 = int(aid[2:4], 16)
+        b3 = int(aid[4:6], 16)
+        b4 = int(aid[6:8], 16)
+        if b1 in (0, 127):
+            b1 = 10
+        return f"{b1}.{b2}.{b3}.{b4}"
+    except ValueError:
+        return "10.0.0.1"
+
+
+def _to_plausible_props(props: dict) -> dict:
+    """Plausible accepts string / number / boolean prop values only,
+    no nested objects or arrays. Coerce our props to that shape.
+
+    Lists become comma-joined strings (TOOL_CATEGORIES are short enums,
+    so the resulting string is always small + bounded cardinality —
+    Plausible can group on "memory,files" as a discrete value).
+
+    Booleans pass through. Ints and floats are stringified at the JSON
+    serialiser later — keep as numbers here so Plausible knows the type.
+    """
+    out: dict = {}
+    for k, v in (props or {}).items():
+        if isinstance(v, list):
+            out[k] = ",".join(str(x) for x in v) if v else ""
+        elif isinstance(v, (bool, int, float, str)):
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
+
+
+def _send_plausible(events: list[dict]) -> bool:
+    """POST each event individually to Plausible's /api/event endpoint.
+
+    Why per-event (not batch): Plausible's API doesn't accept arrays —
+    each event is its own POST. We send sequentially with per-event
+    retry on 5xx. Returns True only if ALL events succeeded; on partial
+    failure the queue is preserved so the next flush retries
+    (potentially producing duplicates in Plausible — accepted trade-off
+    for at-least-once delivery semantics).
+
+    Plausible requires:
+    - User-Agent (we send `qwe-qwe/{version}`)
+    - X-Forwarded-For (we send a synthetic IPv4 derived from
+      anonymous_id, so unique-visitor counts match unique installs)
+    - body.domain matching a site registered in the Plausible dashboard
+      (read from `telemetry_plausible_domain` setting)
+    - body.url — synthetic `app://qwe-qwe/event/<event_name>` since
+      qwe-qwe isn't a website and we have no real URL to attribute
+    - body.name — the event name (one of our 5 ALLOWED_EVENTS)
+    - body.props — flat string/number/bool key-value (we coerce lists
+      to comma-joined strings)
+    """
+    endpoint = (config.get("telemetry_endpoint") or "").strip()
+    if not endpoint:
+        return False
+    domain = (config.get("telemetry_plausible_domain") or "").strip()
+    if not domain:
+        _log.warning("telemetry: format=plausible but telemetry_plausible_domain is empty — set it to the site you registered in Plausible")
+        return False
+
+    sent_count = 0
+    for ev in events:
+        ok = _send_one_plausible(ev, endpoint, domain)
+        if not ok:
+            # First failure → bail. Don't burn through the queue trying
+            # each event when the network or config is bad.
+            _log.warning(
+                "telemetry: plausible send failed at event %d/%d, keeping queue",
+                sent_count + 1, len(events),
+            )
+            return False
+        sent_count += 1
+
+    _log.info("telemetry: sent %d events to plausible", sent_count)
+    return True
+
+
+def _send_one_plausible(ev: dict, endpoint: str, domain: str) -> bool:
+    """Single-event POST to Plausible. Internal retry on 5xx using the
+    same backoff as `_send_raw`. Returns True on 2xx, False otherwise."""
+    event_name = ev.get("event") or "unknown"
+    aid = ev.get("anonymous_id") or ""
+    sid = ev.get("session_id") or ""
+
+    # Build Plausible-shaped props. Drop anonymous_id from props since
+    # it's already used to synthesize the IP for unique-counting; keep
+    # session_id so the receiver can group within a single run.
+    props = _to_plausible_props(ev.get("props") or {})
+    if sid:
+        props["session_id"] = sid
+
+    body_obj = {
+        "name": event_name,
+        "url": f"app://qwe-qwe/event/{event_name}",
+        "domain": domain,
+        "props": props,
+    }
+
+    try:
+        body = json.dumps(body_obj).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"qwe-qwe/{config.VERSION}",
+            "X-Forwarded-For": _aid_to_synthetic_ip(aid),
+        }
+        req = urllib.request.Request(
+            endpoint, data=body, headers=headers, method="POST"
+        )
+    except Exception as e:
+        _log.warning("telemetry: plausible request build failed: %s", type(e).__name__)
+        return False
+
+    last_err: str = "unknown"
+    for attempt in range(_MAX_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(_BACKOFF_SCHEDULE_S[attempt - 1])
+        try:
+            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
+                status = getattr(resp, "status", None)
+                if status is None:
+                    try:
+                        status = resp.getcode()
+                    except Exception:
+                        status = 0
+                if 200 <= int(status) < 300:
+                    return True
+                last_err = f"HTTP{status}"
+                if 400 <= int(status) < 500:
+                    return False
+        except urllib.error.HTTPError as he:
+            code = int(getattr(he, "code", 0) or 0)
+            last_err = f"HTTP{code}"
+            if 400 <= code < 500:
+                return False
+        except urllib.error.URLError as ue:
+            last_err = type(ue).__name__
+        except Exception as e:
+            last_err = type(e).__name__
+
+    _log.debug("telemetry: plausible event %r failed: %s", event_name, last_err)
     return False
 
 
