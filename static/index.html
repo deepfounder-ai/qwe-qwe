@@ -5622,6 +5622,27 @@ function renderTelemetryPanel(tel) {
     ? '<span class="status-badge ok"><span class="sbdot"></span>opted in</span>'
     : '<span class="status-badge"><span class="sbdot"></span>off (default)</span>';
 
+  // Re-consent banner: shown when the project has changed either the
+  // ALLOWED_EVENTS schema or the default destination endpoint since the
+  // user opted in. Surfaces a clear "review the new policy and either
+  // re-confirm or disable" affordance — never silently routes data to
+  // a new place under stale consent.
+  const reprompt = enabled && tel.consent_needs_reprompt
+    ? '<div style="margin-bottom:14px;padding:12px;background:rgba(245,158,11,0.08);border:1px solid var(--warn);border-radius:8px">' +
+        '<div style="display:flex;align-items:flex-start;gap:10px">' +
+          '<div style="font-size:18px;line-height:1">⚠️</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-size:12.5px;font-weight:500;color:var(--fg);margin-bottom:3px">Telemetry policy updated</div>' +
+            '<div style="font-size:11.5px;color:var(--fg-3);line-height:1.5">The default destination or list of collected events changed since you opted in. Review what\'s collected below and either re-confirm or disable. Until you take action, events stay queued locally and nothing is sent.</div>' +
+            '<div style="margin-top:8px;display:flex;gap:6px">' +
+              '<button class="btn-primary" data-act="telemetry-opt-in" style="padding:5px 12px;font-size:11.5px">Re-confirm</button>' +
+              '<button class="btn-secondary" data-act="telemetry-opt-out" style="padding:5px 12px;font-size:11.5px">Disable</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>'
+    : '';
+
   const eventsList = (tel.allowed_events || []).map(e =>
     '<li><span class="mono" style="color:var(--fg-2)">' + esc(e) + '</span></li>'
   ).join('');
@@ -5631,6 +5652,7 @@ function renderTelemetryPanel(tel) {
     : '<span class="mono" style="font-size:11px;color:var(--fg-5)">(none — generated on opt-in)</span>';
 
   return settingsSection('Anonymous telemetry',
+    reprompt +
     // Status row + main toggle
     '<div style="display:flex;align-items:center;gap:12px;padding:6px 0 14px;border-bottom:1px solid var(--line-2);margin-bottom:14px">' +
       '<div style="flex:1">' +

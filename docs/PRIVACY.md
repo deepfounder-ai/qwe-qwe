@@ -111,9 +111,17 @@ The whitelist in `telemetry.py::ALLOWED_EVENTS` is **type-strict** — every pro
 
 ### Where the data goes
 
-Currently: **nowhere by default.** The `telemetry_endpoint` setting is empty out of the box. If you opt in, events queue locally (visible in Settings → Privacy → "View pending events") but nothing leaves the machine until you set an endpoint.
+Telemetry is still **off by default** — you have to explicitly opt in via Settings → Privacy → Telemetry or via the future first-run prompt.
 
-A project-operated endpoint (sending to the qwe-qwe project itself) is **not currently shipped** — when one is added in a future release, the consent prompt will surface again so you can re-decide with the new endpoint URL visible.
+If you opt in WITHOUT changing the default endpoint, events go to the project-operated Countly instance at **`https://qwelytics.deepfounder.ai/i`**. This is the analytics endpoint operated by the qwe-qwe project (deepfounder.ai). It's a self-hosted Countly Community Edition — same code you can run yourself, same privacy guarantees on the wire, same data inventory documented in this file.
+
+If you want your data to go somewhere you control instead — or nowhere at all — you have three options:
+
+1. **Self-hosted Countly** (most privacy-sensitive deployments): set `telemetry_endpoint` to your own Countly URL, set `telemetry_countly_app_key` to your app key. Data flows to YOUR Countly, never touches deepfounder.ai.
+2. **Custom HTTP collector**: set `telemetry_format=raw` + `telemetry_endpoint=https://your-collector.example/track`. Data POSTs as `{"events": [...]}` for you to handle.
+3. **Stay opted in but local-only**: clear `telemetry_endpoint` (set to empty). Events queue locally, you can inspect them in Settings → Privacy → "View pending events", but nothing leaves the machine.
+
+When the project changes either the default destination or the schema of `ALLOWED_EVENTS`, the **`telemetry_consent_version`** bumps. Users who opted in under the old policy see a "policy updated, please re-confirm" banner in Settings → Privacy before any new event is sent — you always see the new defaults before they take effect.
 
 #### Self-hosted Countly
 

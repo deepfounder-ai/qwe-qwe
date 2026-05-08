@@ -173,11 +173,30 @@ EDITABLE_SETTINGS = {
     # without explicit opt-in via Settings → Privacy or first-run prompt.
     # See `docs/PRIVACY.md` for the full data inventory + privacy contract.
     "telemetry_enabled":      ("setting:telemetry_enabled",     int, 0,     "Send anonymous usage metrics to the configured endpoint. Default OFF. Opt-in only. No chat content / no soul / no PII collected. See Settings → Privacy → Telemetry for the full list of what's sent. See docs/PRIVACY.md for details.", 0, 1),
-    "telemetry_endpoint":     ("setting:telemetry_endpoint",    str, "",    "URL to POST batched telemetry events to. Empty = no network calls (events queue locally for inspection). Self-hosted users can point this at their own Countly / custom collector. For Countly: full URL including /i path (e.g. https://countly.example.com/i).", "", ""),
-    "telemetry_format":       ("setting:telemetry_format",      str, "raw", "Wire format. 'raw' = single POST with our JSON shape ({events: [...]}) suited for custom collectors. 'countly' = batched POST in Countly's /i format using anonymous_id as device_id (cross-day per-user tracking works natively).", "", ""),
-    "telemetry_countly_app_key": ("setting:telemetry_countly_app_key", str, "", "Countly app key from your dashboard (Settings → Apps). Required when telemetry_format=countly — Countly rejects events whose app_key doesn't match a registered app.", "", ""),
+    # Project-default destination is the deepfounder.ai self-hosted Countly
+    # instance. This is the endpoint your events go to IF you explicitly
+    # opt in via Settings → Privacy → Telemetry. Default is still OFF; the
+    # endpoint just tells the queue where to flow when enabled. Override
+    # with empty string (queue locally, nothing leaves) or any other URL
+    # (point at your own Countly / collector).
+    "telemetry_endpoint":     ("setting:telemetry_endpoint",    str, "https://qwelytics.deepfounder.ai/i", "URL to POST batched telemetry events to. Project default is the deepfounder.ai self-hosted Countly instance. Empty = no network calls. Override to point at your own Countly / custom collector. For Countly: full URL including /i path.", "", ""),
+    "telemetry_format":       ("setting:telemetry_format",      str, "countly", "Wire format. 'raw' = single POST with our JSON shape ({events: [...]}) suited for custom collectors. 'countly' = batched POST in Countly's /i format using anonymous_id as device_id (cross-day per-user tracking works natively).", "", ""),
+    # Public app_key for the project's Countly instance. App keys are
+    # NOT secrets in Countly's threat model — they ride in plain HTML on
+    # any Countly-tracked website. Hardcoding the project default here
+    # is intentional and equivalent to PostHog/Sentry projects publishing
+    # their public DSN. Self-hosted users override this with their own
+    # Countly app key.
+    "telemetry_countly_app_key": ("setting:telemetry_countly_app_key", str, "4fdcd9057fcbfa22a66d9c66e4e15f3c64f22741", "Countly app key from your dashboard (Settings → Apps). Project default points at the deepfounder.ai instance. Required when telemetry_format=countly. Override with your own app key when self-hosting.", "", ""),
     "telemetry_anonymous_id": ("setting:telemetry_anonymous_id", str, "",   "Random UUID generated on first opt-in. Read-only (rotate via Settings → Privacy → Reset). Never derived from PII.", "", ""),
-    "telemetry_consent_version": ("setting:telemetry_consent_version", int, 0, "Consent policy version the user agreed to. Bumped when ALLOWED_EVENTS changes shape, triggering a re-prompt. Internal — not user-edited.", 0, 1000),
+    # Consent policy version. Bumped when the project changes either
+    # ALLOWED_EVENTS shape or the default destination (so users see the
+    # new endpoint URL before silently routing there). Wire-up of the
+    # re-prompt-on-mismatch logic lands in a follow-up — for now this is
+    # informational metadata that stamps which policy the user accepted.
+    # Version 1 = first release with a default project endpoint
+    # (deepfounder.ai Countly).
+    "telemetry_consent_version": ("setting:telemetry_consent_version", int, 0, "Consent policy version the user agreed to. Bumped when ALLOWED_EVENTS changes shape OR default endpoint changes, triggering a re-prompt. Internal — not user-edited.", 0, 1000),
     # ── Vision (Camera) ──
     "camera_index":         ("setting:camera_index",          int, -1,    "Camera index for agent vision (-1 = auto-detect best, 0/1/2 = specific camera)", -1, 10),
     "camera_resolution":    ("setting:camera_resolution",     str, "auto", "Capture resolution: auto (camera default), 480p (640x480), 720p (1280x720), 1080p (1920x1080). Higher = sharper vision but bigger payload to LLM.", "", ""),

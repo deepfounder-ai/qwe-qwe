@@ -53,6 +53,14 @@ import config
 
 _log = logging.getLogger("qwe.telemetry")
 
+# Bumped whenever ALLOWED_EVENTS shape changes OR the default project
+# endpoint changes. opt_in() stamps this onto telemetry_consent_version
+# so we can detect users who agreed to an older policy and re-prompt
+# them with the new defaults visible.
+#   v1 = first release with a default project endpoint
+#        (qwelytics.deepfounder.ai Countly)
+_CURRENT_CONSENT_VERSION = 1
+
 # ── HTTP send tunables ───────────────────────────────────────────────
 # Single timeout cap for the whole urlopen call. urllib doesn't separate
 # connect/read — one cap is fine for our purposes (collector receives
@@ -245,12 +253,33 @@ def opt_in() -> str:
     """Enable telemetry + ensure anonymous_id exists. Returns the id.
 
     Called by the first-run prompt or the Settings → Privacy toggle.
-    Idempotent — safe to call repeatedly.
+    Idempotent — safe to call repeatedly. Stamps the current consent
+    version so future policy changes (new event types, new default
+    endpoint) can be detected and trigger a re-prompt.
     """
     aid = anonymous_id()  # generates if missing
     config.set("telemetry_enabled", 1)
-    _log.info("telemetry enabled (anonymous_id=%s)", aid[:8] + "...")
+    config.set("telemetry_consent_version", _CURRENT_CONSENT_VERSION)
+    _log.info("telemetry enabled (anonymous_id=%s, consent v%d)",
+              aid[:8] + "...", _CURRENT_CONSENT_VERSION)
     return aid
+
+
+def consent_needs_reprompt() -> bool:
+    """True if the user's stored consent version is older than the
+    current `_CURRENT_CONSENT_VERSION`. The UI can use this to surface
+    a "the policy / endpoint changed, please re-confirm" prompt before
+    continuing to send events under the old assumption.
+
+    Returns False when:
+    - telemetry is disabled (no consent in force, no prompt needed)
+    - the user is up-to-date with the current consent version
+    - the user has never opted in (consent_version stays at 0)
+    """
+    if not enabled():
+        return False
+    stored = int(config.get("telemetry_consent_version") or 0)
+    return stored < _CURRENT_CONSENT_VERSION
 
 
 def opt_out() -> None:

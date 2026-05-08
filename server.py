@@ -1556,6 +1556,11 @@ async def telemetry_status():
         "queue_size": telemetry.queue_size(),
         "session_id": telemetry.session_id(),
         "allowed_events": list(telemetry.ALLOWED_EVENTS.keys()),
+        # When True, the UI should show a "policy / default endpoint
+        # changed since you opted in — re-confirm" banner. Calling
+        # opt_in() again restamps consent_version and clears this.
+        "consent_needs_reprompt": telemetry.consent_needs_reprompt(),
+        "current_consent_version": telemetry._CURRENT_CONSENT_VERSION,
     }
 
 

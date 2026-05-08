@@ -110,6 +110,46 @@ def test_reset_anonymous_id_rotates_without_disabling(fresh_tel):
     assert fresh_tel.enabled() is True  # still enabled
 
 
+# ── Consent versioning ──────────────────────────────────────────────
+
+
+def test_opt_in_stamps_current_consent_version(fresh_tel):
+    """opt_in() persists _CURRENT_CONSENT_VERSION so we can detect
+    later when the policy moved past what the user agreed to."""
+    import config
+    fresh_tel.opt_in()
+    stored = int(config.get("telemetry_consent_version") or 0)
+    assert stored == fresh_tel._CURRENT_CONSENT_VERSION
+    assert stored >= 1
+
+
+def test_consent_needs_reprompt_false_when_disabled(fresh_tel):
+    """No active consent → no prompt needed regardless of stored version."""
+    import config
+    config.set("telemetry_consent_version", 0)  # stale
+    assert fresh_tel.enabled() is False
+    assert fresh_tel.consent_needs_reprompt() is False
+
+
+def test_consent_needs_reprompt_true_when_stored_below_current(fresh_tel):
+    """User opted in under v0 (legacy), policy moved to v1 → prompt."""
+    import config
+    fresh_tel.opt_in()
+    # Simulate older consent version (legacy install)
+    config.set("telemetry_consent_version", 0)
+    assert fresh_tel.consent_needs_reprompt() is True
+
+
+def test_consent_needs_reprompt_false_after_reopt_in(fresh_tel):
+    """Re-confirming via opt_in() restamps the version, clears flag."""
+    import config
+    fresh_tel.opt_in()
+    config.set("telemetry_consent_version", 0)
+    assert fresh_tel.consent_needs_reprompt() is True
+    fresh_tel.opt_in()  # re-confirm
+    assert fresh_tel.consent_needs_reprompt() is False
+
+
 # ── Whitelist enforcement ────────────────────────────────────────────
 
 
@@ -245,6 +285,9 @@ def test_anonymous_id_stable_across_calls(fresh_tel):
 
 
 def test_flush_is_noop_without_endpoint(fresh_tel):
+    """Empty endpoint → flush is no-op, queue intact."""
+    import config
+    config.set("telemetry_endpoint", "")  # explicit override (project ships a default)
     fresh_tel.opt_in()
     fresh_tel.track_event("feature_first_use", {"feature": "camera_capture"})
     sent = fresh_tel.flush()
@@ -374,10 +417,12 @@ def no_sleep(monkeypatch):
 
 @pytest.fixture
 def configured_endpoint(fresh_tel):
-    """Opt in + set a stub endpoint so flush() / _default_sender don't
-    short-circuit on the empty-endpoint guard."""
+    """Opt in + set a stub endpoint + force raw format. Project default
+    is now countly; tests that exercise the raw codepath need to opt
+    out of that explicitly."""
     import config
     config.set("telemetry_endpoint", "https://stub.invalid/track")
+    config.set("telemetry_format", "raw")
     fresh_tel.opt_in()
     return fresh_tel
 
