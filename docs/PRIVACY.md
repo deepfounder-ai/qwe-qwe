@@ -117,6 +117,12 @@ Every event is wrapped with:
 
 The whitelist in `telemetry.py::ALLOWED_EVENTS` is **type-strict** — every prop has a declared Python type, and string-valued props that could carry free text instead use a closed enum (e.g. `provider_kind`, `tool_category`, `error_kind`). A future refactor that accidentally added a string field couldn't sneak chat content past the validator without explicitly editing the whitelist.
 
+### Other project-controlled outbound HTTP (NOT telemetry)
+
+These are not subject to the opt-in toggle because no user data is sent — but for full transparency:
+
+- **Blog feed** — when you open the Presets view, the qwe-qwe server fetches `https://deepfounder.ai/tag/qwe-qwe/rss/` to render the "From the blog" strip with project announcements. Cached server-side for 30 minutes, request body is empty, no `anonymous_id` or telemetry data is attached. The only signal `deepfounder.ai` receives is "an install asked for the feed" (your IP + a `qwe-qwe/<version>` User-Agent). Disable by simply not visiting Presets; we may add an explicit toggle if users ask.
+
 ### Where the data goes
 
 Telemetry is **off by default** — you must explicitly opt in via the first-run prompt or Settings → Privacy → Telemetry.

@@ -2051,6 +2051,102 @@ async def file_browse(request: Request):
     }
 
 
+# ── Project blog feed (shown in the Presets view) ───────────────────────
+#
+# Fetches https://deepfounder.ai/tag/qwe-qwe/rss/ server-side, parses it,
+# returns a small JSON list. Server-side fetch keeps:
+#   - the user's IP off deepfounder.ai (only the install reaches out, and
+#     we cache for 30 min so the request rate is bounded);
+#   - the wire format normalized — UI renders a tiny shape, not raw XML;
+#   - graceful degradation — if deepfounder.ai is down, we return the
+#     last cached items + an `error` field, never break the Presets view.
+#
+# Privacy: this is a project-controlled outbound HTTP, not telemetry.
+# It carries no body, no anonymous_id — the only signal deepfounder.ai
+# sees is "an install asked for the feed". Documented in PRIVACY.md.
+
+_FEED_URL = "https://deepfounder.ai/tag/qwe-qwe/rss/"
+_FEED_CACHE_TTL_S = 1800  # 30 min — feed `<ttl>` says 60 (minutes) so we're well under
+_FEED_TIMEOUT_S = 15.0
+_FEED_MAX_ITEMS = 10
+_feed_cache_lock = threading.Lock()
+_feed_cache: dict = {"items": [], "fetched_at": 0.0, "etag": ""}
+
+
+def _parse_blog_feed_xml(xml_bytes: bytes) -> list[dict]:
+    """Parse an RSS 2.0 feed into a small JSON list.
+
+    Bounds every string so a malicious/malformed feed can't blow up the
+    response. Skips items missing title or link. Returns at most
+    `_FEED_MAX_ITEMS` newest entries (RSS feeds list newest first).
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_bytes)
+    out: list[dict] = []
+    # `iter("item")` walks the tree depth-first — works whether items are
+    # at /rss/channel/item or wrapped differently in some Ghost variants.
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if not title or not link:
+            continue
+        description = (item.findtext("description") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        guid = (item.findtext("guid") or "").strip()
+        cats = []
+        for c in item.findall("category"):
+            txt = (c.text or "").strip()
+            if txt:
+                cats.append(txt[:50])
+            if len(cats) >= 8:
+                break
+        out.append({
+            "title": title[:300],
+            "link": link[:500],
+            "description": description[:500],
+            "pub_date": pub_date[:64],
+            "guid": guid[:128],
+            "categories": cats,
+        })
+        if len(out) >= _FEED_MAX_ITEMS:
+            break
+    return out
+
+
+@app.get("/api/feed/blog")
+async def blog_feed():
+    """Project blog feed (RSS) for the Presets view.
+
+    Cached in-process for 30 minutes. On fetch failure, returns the last
+    successful payload (if any) plus a non-fatal `error` field so the UI
+    can render gracefully. Always returns 200; never raises into the UI.
+    """
+    now = time.time()
+    with _feed_cache_lock:
+        if _feed_cache["items"] and (now - _feed_cache["fetched_at"]) < _FEED_CACHE_TTL_S:
+            return {"items": _feed_cache["items"], "cached": True,
+                    "fetched_at": _feed_cache["fetched_at"]}
+    try:
+        ua = f"qwe-qwe/{config.VERSION}"
+        req = urllib.request.Request(_FEED_URL, headers={"User-Agent": ua})
+        with urllib.request.urlopen(req, timeout=_FEED_TIMEOUT_S) as r:
+            body = r.read()
+        items = _parse_blog_feed_xml(body)
+        with _feed_cache_lock:
+            _feed_cache["items"] = items
+            _feed_cache["fetched_at"] = now
+        return {"items": items, "cached": False, "fetched_at": now}
+    except Exception as e:
+        # Never break the UI — fall back to whatever we cached previously,
+        # or an empty list on cold cache. Log loudly so operators notice.
+        _log.warning("blog feed fetch failed: %s", e)
+        with _feed_cache_lock:
+            stale = list(_feed_cache["items"])
+            stale_ts = _feed_cache["fetched_at"]
+        return {"items": stale, "cached": False, "fetched_at": stale_ts,
+                "error": str(e)[:200]}
+
+
 # ── Business presets ────────────────────────────────────────────────────
 
 @app.get("/api/presets")
