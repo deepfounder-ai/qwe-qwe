@@ -828,6 +828,8 @@ def _delete_skill(skill_name: str) -> str:
     if not target.exists():
         return f"Error: skill '{skill_name}' not found in {user_dir}"
 
+    dropped_tables = _drop_skill_owned_tables(skill_name, target)
+
     # Disable first
     disable(skill_name)
 
@@ -842,7 +844,59 @@ def _delete_skill(skill_name: str) -> str:
         for cached in pycache.glob(f"{skill_name}*"):
             cached.unlink(missing_ok=True)
 
+    if dropped_tables:
+        return f"Deleted skill '{skill_name}' ({dropped_tables} skill table(s) dropped)"
     return f"Deleted skill '{skill_name}'"
+
+
+def _drop_skill_owned_tables(skill_name: str, skill_path: Path) -> int:
+    """Drop SQLite tables declared by this skill's own namespaced DDL."""
+    try:
+        source = skill_path.read_text(encoding="utf-8")
+        tables = _extract_skill_owned_tables(source, skill_name)
+        if not tables:
+            return 0
+
+        import db
+
+        conn = db._get_conn()
+        dropped = 0
+        for table in tables:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                continue
+            conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+            dropped += 1
+        if dropped:
+            conn.commit()
+        return dropped
+    except Exception as e:
+        import logger
+
+        logger.get("skill_creator").warning(
+            f"failed to clean tables for {skill_name}: {e}"
+        )
+        return 0
+
+
+def _extract_skill_owned_tables(source: str, skill_name: str) -> list[str]:
+    """Return safe table names with the skill_<skill_name>_ prefix."""
+    prefix = f"skill_{skill_name}_"
+    pattern = re.compile(
+        r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+[`\"'\[]?"
+        r"([A-Za-z_][A-Za-z0-9_]*)"
+        r"[`\"'\]]?",
+        re.IGNORECASE,
+    )
+    tables = {
+        table
+        for table in pattern.findall(source)
+        if table.startswith(prefix) and table.isidentifier()
+    }
+    return sorted(tables)
 
 
 def _create_skill_async(skill_name: str, description: str) -> str:

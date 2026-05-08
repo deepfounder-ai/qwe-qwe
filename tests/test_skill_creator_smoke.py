@@ -210,6 +210,65 @@ def test_delete_skill_missing_returns_friendly_error(sc):
     assert "not found" in result.lower()
 
 
+def test_delete_skill_drops_only_owned_namespaced_tables(sc, qwe_temp_data_dir):
+    import db
+
+    target = qwe_temp_data_dir / "skills" / "cleanup_demo.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '''
+def execute(name, args):
+    conn.execute("""CREATE TABLE IF NOT EXISTS skill_cleanup_demo_items (
+        id INTEGER PRIMARY KEY,
+        body TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS skill_cleanup_demo_events (
+        id INTEGER PRIMARY KEY,
+        body TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS shared_items (
+        id INTEGER PRIMARY KEY
+    )""")
+''',
+        encoding="utf-8",
+    )
+
+    conn = db._get_conn()
+    conn.execute("CREATE TABLE skill_cleanup_demo_items (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE skill_cleanup_demo_events (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE shared_items (id INTEGER PRIMARY KEY)")
+    conn.commit()
+
+    result = sc._delete_skill("cleanup_demo")
+
+    assert "Deleted skill 'cleanup_demo'" in result
+    assert "2 skill table(s) dropped" in result
+    assert not target.exists()
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_cleanup_demo_items'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_cleanup_demo_events'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='shared_items'"
+    ).fetchone() is not None
+
+
+def test_extract_skill_owned_tables_ignores_other_skill_prefixes(sc):
+    source = '''
+conn.execute("""CREATE TABLE IF NOT EXISTS skill_notes_data (id INTEGER)""")
+conn.execute("""CREATE TABLE IF NOT EXISTS skill_notes_archive (id INTEGER)""")
+conn.execute("""CREATE TABLE IF NOT EXISTS skill_notes2_data (id INTEGER)""")
+conn.execute("""CREATE TABLE IF NOT EXISTS notes (id INTEGER)""")
+'''
+
+    assert sc._extract_skill_owned_tables(source, "notes") == [
+        "skill_notes_archive",
+        "skill_notes_data",
+    ]
+
+
 # ── execute() dispatch ───────────────────────────────────────────────
 
 
