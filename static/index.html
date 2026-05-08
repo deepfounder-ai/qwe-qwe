@@ -6921,7 +6921,7 @@ function wireEvents() {
   });
   document.querySelectorAll('[data-act="camera-reload"]').forEach(b => { b.onclick = loadCameras; });
 
-  // Telemetry controls — every action goes through /api/telemetry/* so
+  // Telemetry controls — every action routes through the dedicated
   // there's one audit-friendly surface. Each button posts and reloads.
   document.querySelectorAll('[data-act="telemetry-opt-in"]').forEach(b => {
     b.onclick = async () => {
