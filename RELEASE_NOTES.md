@@ -1,109 +1,143 @@
-# v0.18.5 — Anonymous opt-in telemetry + first-run consent flow + blog feed in Presets
+# v0.18.6 — Hardware support: serial / USB-COM (scales, scanners, GPS, label printers, PLCs)
 
-The headline in v0.18.5 is the **opt-in anonymous usage telemetry system** — fully built end to end this cycle (Stages 1–9), guarded by a strict whitelist + closed enums + two-gate consent contract. **Default OFF.** Every event is documented in `docs/PRIVACY.md`. There is no UI surface to redirect telemetry elsewhere — this is by design (single trust target, not a buffet of "alternative endpoints").
+The headline of this release is **first-class hardware integration** via the new built-in **`serial_port`** skill. qwe-qwe runs on a real machine — and your machine is plugged into real hardware. Cloud agents can't see your warehouse floor; qwe-qwe can. This release closes that gap.
 
-Three other features round out the release: a `thread_created` event for new-chat volume signal, a "From the blog" RSS strip in the Presets view, and two browser-cache bug fixes that were biting users immediately after opt-in.
+Cross-platform via `pyserial`: same API on **Windows** (`COM3`), **macOS** (`/dev/tty.usbserial-…`), and **Linux** (`/dev/ttyUSB0`). Auto-active on every install — `tool_search("serial")` (or `"scale"`, `"modbus"`, `"rfid"`, `"barcode"`, `"gps"`, `"plc"`, `"hardware"`) unlocks the tools without any manual setup.
 
-## 📊 Anonymous opt-in telemetry — the long arc closes
+## 🔌 What this means in practice
 
-`telemetry.py` ships with **6 whitelisted event types**, each prop type-strict and string-valued props enum-constrained. A future refactor that accidentally added a free-text field can't smuggle chat content past the validator without explicitly editing `ALLOWED_EVENTS`.
+The universe of devices that talk USB-serial / RS-232 / RS-485 is exactly the universe of hardware sitting in real businesses:
 
-Events:
+| Category | Examples | What qwe-qwe can now do |
+|---|---|---|
+| **Weighing scales** | Mettler Toledo, CAS, Ohaus | Read weight, log it, route to ERP / Telegram, trigger reorder thresholds |
+| **Barcode / RFID readers** | Datalogic, Honeywell (RS-232), UHF inventory readers | Receiving, stocktake, asset tracking, real-time inventory |
+| **GPS modules** | u-blox NEO-6M / 9M | Fleet tracking, geofence triggers, route logging |
+| **Label printers** | Zebra (ZPL), TSC, Godex (ESC/P) | "Print this shipping label for the order I just packed" |
+| **Receipt printers** | Epson / Star / Bixolon (ESC/POS) | POS, kitchen tickets, queue numbers |
+| **Industrial PLCs** | Anything Modbus RTU / RS-485 | Read sensors, command motors, monitor production lines |
+| **VFDs / inverters** | Modbus-RTU drives | Pump and motor control with safety gating |
+| **Environmental sensors** | pH, conductivity, gas, humidity, temperature | Greenhouses, labs, cold-chain monitoring |
+| **Energy meters** | RS-485 with DLMS/COSEM | Plant-floor power monitoring, billing |
+| **Cash drawers / fingerprint scanners / SCUD turnstiles** | Standard serial-trigger devices | POS, time tracking, access control |
 
-- `session_start` — version, OS, Python, provider kind, model size bucket, feature flags (booleans), counts (skills, jobs, indexed sources). **Never** the URL, model id, skill names.
-- `turn_complete` — duration, rounds, tool *categories* used (closed enum), token counts, recall hits, source surface.
-- `tool_error` — tool category + error kind (both enums). Never tool name, args, or message text.
-- `skill_creator_pipeline` — outcome enum, attempts, duration, generated tools count.
-- `feature_first_use` — first-time-per-session activation of major features (camera_capture, live_voice, scheduler_create, …) — closed enum.
-- `thread_created` — new this release, see below.
+### Three concrete scenarios
 
-### Wire format: Countly Community Edition
+**1. Weighing flow — warehouse digitization in 30 seconds of conversation:**
 
-After a Plausible detour, settled on **self-hosted Countly** at `https://qwelytics.deepfounder.ai/i`. Native cross-day per-user retention without persistent server-side state — Plausible's daily-rotating salt would have made retention metrics impossible. Same code anyone could run; same privacy guarantees on the wire; same data inventory in `docs/PRIVACY.md`.
-
-The HTTP sender is **production-grade**:
-
-- Retry with exponential backoff `[1s, 2s, 4s]` on 5xx + network errors
-- 4xx does NOT retry (config error, re-sending just spams)
-- 10s urlopen timeout, single cap (urllib doesn't separate connect/read)
-- Bounded queue (`maxlen=1000`) — never grows unbounded if a never-flushed install sits offline forever
-- Lists become CSV strings on the wire (Countly's segmentation type)
-- `duration_ms` props auto-mapped to Countly's native `dur` field for receiver-side averaging
-
-### First-run consent flow
-
-Two surfaces, same contract:
-
-- **Web** (`static/index.html` boot hook) — modal "Help improve qwe-qwe?" appears once, only when `consent_decision_made` is false. Either button stamps the version. X / ESC fallback fires silent opt-out via `onClose` so the modal can't loop forever.
-- **CLI** (`cli.py:main`) — TTY prompt, defaults to opt-out on no-interactive. Identical wording.
-
-Settings → Privacy → Telemetry stripped to **two choices**: enable / disable. No "alternative endpoint" override surfaced — operators / forks edit `config.py::EDITABLE_SETTINGS` defaults directly.
-
-### Two-gate consent enforcement
-
-Both `track_event()` AND `flush()` refuse when `consent_needs_reprompt()` is true (stored consent version < `_CURRENT_CONSENT_VERSION`). Events queue but don't send. The yellow "policy updated, please re-confirm" banner in Settings → Privacy is now backed by **actual gates**, not advisory text.
-
-Bumped to **consent v2** this release because `ALLOWED_EVENTS` shape changed (`thread_created` added, `SOURCES` enum widened). Existing v1 opt-ins see the re-confirm banner; events queue but don't send until they re-stamp.
-
-### What's NEVER sent
-
-> Chat content. Soul / personality. Memory entries. Knowledge-base text. RAG queries. File paths. Tool args / results. Exact model name. Provider URL. Skill names. IP / hostname / username / machine id. API keys. Telegram tokens.
-
-Audit by grep — every collection goes through `telemetry.track_event()`, single funnel:
-
-```bash
-grep -rn "telemetry.track_event" .
+```
+You:    Scales on COM3, baud 9600. When something is weighed, ask me what
+        it is on Telegram and remember it.
+Agent:  [tool_search("scale")] → 3 serial tools activated
+        [serial_list_ports] → "COM3 — USB-Serial CH340 (wch.cn)"
+        [serial_read_once port=COM3 until="newline"] → "ST,GS,+00012.345,kg"
+        [telegram_notify_owner "Weighed 12.345 kg — what was it?"]
+        [memory_save "Weighed 12.345 kg of pears, 2026-05-09 14:32"]
 ```
 
-## 💬 `thread_created` event — see how often new chats are created
+A week later you ask "сколько яблок я завесил в среду?" and the answer comes from memory. No ERP integration, no custom dashboard — just chat + scales.
 
-Single-field event (`source` from a closed enum) firing once per `threads.create()` call. Lets the project see whether new-thread volume is driven by users (web/cli/telegram) or system surfaces (scheduler activations / preset onboarding). The thread name and meta are **never** part of the event — just the source bucket.
+**2. Modbus RTU on a VFD with safety gate:**
 
-Wired into 6 production call sites: `cli.py`, `server.py`, `telegram_bot.py` (topic + DM), `scheduler.py` (create + backfill), `presets.py`. Lazy-imported helper in `threads.py` swallows any telemetry hiccup so a queue full / network blip never breaks thread creation.
+```
+You:    Read frequency setpoint from the VFD on COM5 (Modbus addr 1, reg 0x2000).
+Agent:  [serial_read_once] constructs "01 03 20 00 00 01 8E 0B" frame,
+        decodes response → "Setpoint: 50.0 Hz"
 
-## 📰 "From the blog" RSS strip in Presets
+You:    Set it to 30 Hz.
+Agent:  [serial_write data="01 06 20 00 01 2C ..." confirm=false]
+        DRY RUN — pass confirm=true to actually send.
+          port: COM5  bytes: 8  hex: 010620000 12C...
+        This will write 30.0 Hz (0x012C) to register 0x2000.
+        Confirm to proceed.
+You:    yes
+Agent:  [serial_write ... confirm=true] → "Wrote 8 bytes to COM5."
+```
 
-The Presets view now renders up to 5 newest project posts above the preset grid, fetched server-side from `https://deepfounder.ai/tag/qwe-qwe/rss/`. Compact list: title + relative date + 2-line description. Empty feed → nothing rendered, no empty box.
+**Every actuator write is gated by `confirm=true`.** Default is dry-run that shows a hex preview without opening the port. Read-only on dry-run, ack-then-act on live. Set wrong, a Modbus write can damage motors or open valves — the gate is mandatory.
 
-Backend is forgiving: 30-min in-process cache, 15s upstream timeout, every parser field length-bounded so a malicious upstream can't blow up the response. On any fetch error the endpoint still returns 200 with the last-known cached items + an `error` field — the Presets view never breaks because deepfounder.ai is down.
+**3. GPS-triggered scheduled routine:**
 
-This is **project-controlled outbound HTTP, not telemetry** — empty body, no `anonymous_id`. The only signal `deepfounder.ai` receives is "an install asked for the feed" (your IP + `qwe-qwe/<ver>` UA). Documented under a new "Other project-controlled outbound HTTP" section in `docs/PRIVACY.md`.
+```
+You:    Every 5 min read GPS on COM4. If I'm within 200m of the warehouse
+        coordinates (52.0123, 4.5678) — ping me on Telegram.
+Agent:  [tool_search("schedule")] [tool_search("gps")]
+        [schedule_task every="5m"] →
+          serial_read_once port=COM4 until="newline"
+          parse $GPRMC, haversine, telegram_notify_owner if <200m
+        Routine #4 scheduled.
+```
 
-## 🐛 Browser-cache bugs that were biting users immediately after opt-in
+These three patterns — read sensors → route signals, command actuators with safety, schedule polling — cover the majority of real shop-floor automation.
 
-Two related fixes, both rooted in browsers heuristic-caching JSON GET responses (FastAPI doesn't set `Cache-Control` headers):
+## ⚙️ How it ships
 
-### #22 — "opt-in did not persist" false-positive toast (`bdcd459`)
+### Three tools, gated by `tool_search`
 
-The defensive verify-step added during the consent flow build was reading **stale-from-cache** `/status` responses right after a successful POST `/opt-in`. Backend persisted correctly; browser served the cached `cdm:false` to the verify call; UI screamed "did not persist". Removed the verify entirely — POST 2xx is now trusted, and HTTP-flow regression tests pin the actual contract in pytest where it belongs.
+```python
+serial_list_ports                                 # discovery
+serial_read_once(port, baud, until, format)       # text or hex frames
+serial_write(port, data, format, confirm=True)    # safety-gated writes
+```
 
-### #25 — telemetry modal re-opening on every reload (`f81cd49`)
+`format="hex"` works for any binary protocol (Modbus RTU, vendor frames). Whitespace, colons, commas, semicolons are stripped automatically — paste a copied hex stream from a manual and it parses.
 
-Same root cause, different code path. Boot's `checkTelemetryFirstRun()` was getting served the cached pre-opt-in `/status` response on every page reload, re-opening the modal forever even though the backend correctly stored `consent_version=2`. **One-line generic fix**: `api()` helper now sets `cache: 'no-store'` on every JSON call. Server is the authoritative source; browsers never replay stale state. Prevents an entire class of "stale UI after POST" bugs across every settings panel.
+### Cross-platform error handling
 
-## 🤝 Community merges
+`Permission denied` and `Could not open port` get translated into platform-aware advice:
 
-### #13 + #18 closed by @forhim007 — timer skill cancel + smoke_test scope (PR #20)
+- **Linux**: "Run `sudo usermod -aG dialout $USER` and re-login."
+- **macOS**: "Apple Silicon CH340 cables need the WCH driver: <link>."
+- **Windows**: "Check Device Manager — yellow triangle means missing driver."
 
-Combined PR landing two related fixes:
+### Doctor check
 
-- **Smoke-test scope** — `_extract_execute_body()` AST helper scopes `_smoke_test`'s param-usage check to the body of `execute()` only, not the whole module source. Caught the field-session `camera_diagnostics` regression where `tool def: num_samples` / `code: args.get("samples", 30)` slipped through because `num_samples` literally appeared in the `TOOLS` dict.
-- **Timer skill** — `list_timers` + `cancel_timer` tools added, backed by a thread-safe in-memory registry with 8-char UUID ids. Cancel removes from registry; the daemon thread's print-on-fire becomes a no-op.
+`qwe-qwe --doctor` (or auto-run on startup) now reports:
 
-13 new unit tests pinning both behaviors.
+```
+Serial: + 2 port(s): COM3, COM7
+```
 
-## 🛠️ Build / docs
+or, on a fresh Linux install where the user isn't in `dialout`:
 
-- **Docker** image now publishes to `ghcr.io/deepfounder-ai/qwe-qwe` on every push to main + tags. Playwright/Chromium dependencies added to the image so the browser skill works out of the box.
-- **`CLAUDE.md`** refreshed for the v0.18.x state — new sections for Skill Creator (5-step pipeline) and Telemetry (privacy contract + Countly), updated test count and provider count, soul rules 14 + 16 documented, extended add-a-feature checklist with telemetry + skills/gitignore quirks.
-- **`docs/PRIVACY.md`** is now the single source of truth for what telemetry collects, where it goes, and what the project will never touch.
+```
+Serial: + 1 port(s): /dev/ttyUSB0  [note: 'kir' not in 'dialout' group —
+                                    serial reads may need: sudo usermod -aG dialout kir]
+```
 
-## 🔢 Stats
+The agent itself reads this diagnostic on startup. **In one user's actual install, the agent saw "pyserial not installed" and ran `pip install pyserial` itself before the user had a chance to** — exactly the closed-loop self-repair the diagnostic is designed for.
 
-- **520+ tests pass**, 3 skip, 0 fail (was 495 in v0.18.4)
-- **520 passed in 60s** in the full suite
-- New test files: `test_blog_feed.py`, expanded `test_telemetry.py` (70 tests, was ~40)
-- Coverage floor 24% holds
+### Mocked tests, real CI
+
+24 new unit tests in `tests/test_serial_port_skill.py` that mock pyserial entirely — CI runs identically on Linux runners with no hardware. Coverage:
+
+- Discovery: empty list with platform hints, multi-device render, handles None metadata from cheap clones
+- Reads: text and hex output, all `until` modes (`newline` / `bytes:N` / `timeout`), parity validation, port-not-found / permission-error translation
+- Writes: dry-run NEVER opens the port (Serial() raises if called), `confirm=true` actually writes, hex payload decoding with separator stripping, odd-length / non-hex rejection
+- Wiring: skill is in `_DEFAULT_SKILLS`, all 16 tool_search keywords resolve to the right tool subset
+
+### `docs/HARDWARE.md`
+
+New pattern doc — serial_port as the reference, then a checklist for adding new hardware skills:
+
+1. Closed parameter schemas
+2. Safety gates on actuators (`confirm=true` mandatory)
+3. Lazy imports of heavy hardware libraries
+4. Doctor check with platform-aware hints
+5. Mocked tests (no real hardware in CI)
+6. Tight `tool_search` keyword wiring
+7. Honest platform support declaration
+8. Bridge to Home Assistant for the 2000+ devices that don't speak serial
+
+## 🐛 Other fixes shipped this cycle
+
+### `splitFiles()` in the chat reload path (#26)
+
+Reported: an image the agent sent via `send_file` rendered inline during the live turn, then flipped to a download chip after the user left the thread and came back. Root cause: the live WS path ran `msg.files` through `splitFiles()` (which routes image-extensions to `_images` for inline render), but the reload path treated all of `meta.files` as plain attachments. Same data, different bucket. Fix mirrors the live path so live + reload render identically. Pinned by `tests/test_ws_attachments.py::test_reload_path_runs_meta_files_through_splitfiles`.
+
+### `CLAUDE.md` refresh for v0.18.x
+
+Surgical update keeping the existing structure: test count refresh, telemetry section bumped to 6 events with `thread_created` documented, new "Project blog feed" subsection covering `/api/feed/blog`, two cache-related Web UI contracts pinned (`api()` no-store + `splitFiles` symmetry).
 
 ## 🚀 Upgrade
 
@@ -113,6 +147,22 @@ pip install -e . --upgrade        # from a checkout
 pip install --upgrade qwe-qwe     # if installed as a package
 ```
 
-Telemetry stays off unless you opt in. Existing v1 opt-ins will see a yellow "policy updated, please re-confirm" banner the first time they open Settings → Privacy after upgrading — events queue but don't send until you re-stamp.
+`pyserial` is now a hard dependency (~100 KB pure Python, no native compile). It auto-installs on upgrade. If somehow you end up without it, the doctor check flags the gap and the skill returns a friendly install hint.
 
-Hard-refresh the web UI once after upgrade (Ctrl+Shift+R / Cmd+Shift+R) to drop any stale browser cache from the pre-fix `api()` helper.
+## 🔢 Stats
+
+- **546 tests pass**, 3 skipped, 0 failing (was 522)
+- **24 new unit tests** for the serial_port skill
+- **+8 built-in skill** (`serial_port` joins browser, mcp_manager, skill_creator, soul_editor, notes, timer, weather)
+- **+3 always-discoverable tools** via `tool_search`
+- New 16 keywords in `_TOOL_SEARCH_INDEX` mapping hardware vocabulary to the same three tools
+
+## What's NOT in scope yet
+
+- **Listener mode** (`serial_listen(port, on_frame=...)` — sit on a port and trigger turns when frames arrive). Requires async event-driven turns, which is an architecture change. Tracked.
+- **Hardware abstraction layer** in core. Premature until ~5 hardware skills exist and we see real shared patterns.
+- **Auto-discovery dialog** in Settings → Hardware tab. For now, call `serial_list_ports` from chat.
+
+For non-serial hardware, the practical bridge today is **Home Assistant via MCP**: add an HA MCP server through `mcp_manager` and expose all 2000+ integrations to the agent. A reference `home_assistant` skill is on the roadmap.
+
+— Full pattern docs: [`docs/HARDWARE.md`](docs/HARDWARE.md). Privacy: [`docs/PRIVACY.md`](docs/PRIVACY.md). Architecture: [`ARCHITECTURE.md`](ARCHITECTURE.md). Contributor flow: [`CONTRIBUTING.md`](CONTRIBUTING.md).

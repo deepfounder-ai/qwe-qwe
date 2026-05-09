@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.18.5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.18.6-blue" alt="version">
   <img src="https://img.shields.io/badge/python-3.11+-green" alt="python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license">
@@ -31,7 +31,7 @@
 
 ## What is qwe-qwe?
 
-A **business-oriented AI agent** built to drop into real workflows: customer ops, internal automation, knowledge retrieval, scheduled reporting, custom integrations. Deploys on your infrastructure — a workstation, your own server, or the cloud account you already have. Chat via web UI, terminal, or Telegram, with tools, semantic memory, browser control, MCP integrations, and a cron-like scheduler.
+A **business-oriented AI agent** built to drop into real workflows: customer ops, internal automation, knowledge retrieval, scheduled reporting, custom integrations, **hardware on the floor**. Deploys on your infrastructure — a workstation, your own server, or the cloud account you already have. Chat via web UI, terminal, or Telegram, with tools, semantic memory, browser control, MCP integrations, a cron-like scheduler, and direct USB/serial access to scales, scanners, GPS, label printers, and PLCs.
 
 **Bring your own LLM**: works with any OpenAI-compatible provider — Azure OpenAI, AWS Bedrock, OpenAI, Groq, OpenRouter, DeepSeek, Together — or a local model via LM Studio / Ollama if you need everything on-prem. Your provider, your context window, your budget. Switch providers per-thread without restarting the agent.
 
@@ -47,6 +47,7 @@ A **business-oriented AI agent** built to drop into real workflows: customer ops
 | **Cost model** | Your existing LLM bill, no per-seat | Per-seat / per-action SaaS pricing |
 | **Compliance** | Self-hosted = your audit trail | Vendor's compliance posture |
 | **Extensibility** | Skills, MCP, custom tools | Vendor's marketplace |
+| **Hardware access** | Native USB / serial — scales, scanners, GPS, PLCs | None (cloud agents can't see your floor) |
 | **Reliability** | No vendor outages or rate limits | Vendor SLA |
 
 ## Quick Start
@@ -124,7 +125,7 @@ LM Studio / Ollama are auto-detected on localhost during setup. If your server i
 export QWE_LLM_URL=http://<your-ip>:1234/v1
 ```
 
-### Hardware
+### System requirements
 
 For **hosted-LLM** deployments, qwe-qwe itself is light — any modern laptop or small VM works (the agent process is ~300MB resident, plus Qdrant on disk for memory).
 
@@ -145,21 +146,23 @@ Works on: gaming laptops, desktop GPUs (RTX 3060+), Mac M1+ (via Ollama), Linux 
 CLI (terminal)  <--+           +-- RAG (file indexing & search)
 Web UI (browser) <--+-- Agent -+-- SQLite (history, threads, state)
 Telegram bot    <--/    Loop   +-- Tools (8 core + tool_search)
-                        |      +-- Skills (7 built-in, user-creatable)
+                        |      +-- Skills (8 built-in, user-creatable)
                         |      +-- Browser (Playwright/Chromium)
                         |      +-- MCP (external tool servers)
                         |      +-- Scheduler (cron tasks)
                         |      +-- Vault (encrypted secrets)
+                        |      +-- Hardware (USB/serial via pyserial — scales,
+                        |                    scanners, GPS, PLCs, sensors)
                         v
                    LLM (local or cloud)
-                   7 providers supported
+                   10 providers supported
 ```
 
 ### Engineering around the LLM
 
 These are the techniques the agent uses to stay reliable across model sizes — they make small models capable enough for production work *and* keep large models cheap by burning fewer tokens per turn:
 
-- **Tool Search** — only 8 core tools loaded by default (~750 tokens); model calls `tool_search("keyword")` to activate more. Saves **75% tokens** vs loading all 46 tools
+- **Tool Search** — only 8 core tools loaded by default (~750 tokens); model calls `tool_search("keyword")` to activate more. Saves **75% tokens** vs loading all 49 tools
 - **Compact system prompt** (~1200 tokens) — no redundant tool descriptions
 - **JSON repair engine** — fixes malformed tool calls (trailing commas, unclosed brackets, single quotes)
 - **Anti-hedge nudge** — if model talks instead of acting, it gets pushed to use tools
@@ -247,7 +250,7 @@ This saves **~3000 tokens per request** compared to loading all 46 tools.
 
 ## Tools
 
-46 tools total across core + extensions + skills:
+49 tools total across core + extensions + skills:
 
 | Category | Tools | Loaded |
 |----------|-------|--------|
@@ -261,6 +264,7 @@ This saves **~3000 tokens per request** compared to loading all 46 tools.
 | **Notes** | `create_note`, `list_notes`, `read_note`, `edit_note`, `delete_note` | Search |
 | **Model** | `switch_model` | Search |
 | **Profile** | `user_profile_update`, `user_profile_get` | Search |
+| **Hardware (serial)** | `serial_list_ports`, `serial_read_once`, `serial_write` | Search |
 
 ## Skills
 
@@ -275,6 +279,7 @@ Pluggable skill system — built-in skills + create your own from chat:
 | `notes` | Note management |
 | `timer` | Countdown timers |
 | `weather` | Weather reports via wttr.in |
+| `serial_port` | Talk to USB-serial / RS-232 / RS-485 hardware (scales, scanners, GPS, label printers, PLCs over Modbus RTU) — Windows / macOS / Linux |
 
 ### Creating skills from chat
 
@@ -297,6 +302,91 @@ Agent: [tool_search("browser")] -> [browser_open] -> [browser_snapshot]
 Tools: `browser_open`, `browser_snapshot`, `browser_screenshot`, `browser_click`, `browser_fill`, `browser_eval`, `browser_close`
 
 Activated via `tool_search("browser")`. The agent can navigate pages, read content, fill forms, click buttons, and take screenshots.
+
+## Hardware
+
+qwe-qwe runs on a real machine — and your machine is plugged into real hardware. Cloud agents can't see your floor; qwe-qwe can. The built-in **`serial_port`** skill talks USB-serial / RS-232 / RS-485 to the universe of business devices that show up on every loading dock, lab bench, retail counter, and factory line.
+
+Cross-platform via `pyserial`: same API on **Windows** (`COM3`), **macOS** (`/dev/tty.usbserial-…`), and **Linux** (`/dev/ttyUSB0`).
+
+**Tools** (activated via `tool_search("serial")` / `"scale"` / `"modbus"` / `"rfid"` / `"barcode"` / `"gps"` / `"plc"` / `"hardware"`):
+
+| Tool | Purpose |
+|---|---|
+| `serial_list_ports` | Enumerate plugged-in devices with description, manufacturer, VID:PID |
+| `serial_read_once` | Open → read one frame (line / N bytes / timeout) → close. Text or hex. |
+| `serial_write` | Open → write → close. **Gated by `confirm=true`** — writes to PLCs / actuators can damage equipment. |
+
+### What you can plug in
+
+| Category | Examples | Use case |
+|---|---|---|
+| **Weighing scales** | Mettler Toledo, CAS, Ohaus | Warehouse: "weigh pallet → ID via barcode → log to inventory + print label" |
+| **Barcode / RFID readers** | Datalogic, Honeywell (RS-232), UHF inventory readers | Receiving, stocktake, asset tracking, real-time inventory |
+| **GPS modules** | u-blox NEO-6M / 9M | Fleet tracking, geofence-into-warehouse triggers |
+| **Label printers** | Zebra (ZPL), TSC, Godex (ESC/P) | "Print this shipping label for the order I just packed" |
+| **Receipt printers** | Epson / Star / Bixolon (ESC/POS) | POS, kitchen display tickets |
+| **Industrial PLCs** | Anything Modbus RTU over RS-485 | Factory automation — read sensors, command motors, monitor production lines |
+| **VFDs / inverters** | Modbus-RTU drives | Pump and motor control |
+| **Environmental sensors** | pH, conductivity, gas, humidity, temperature | Greenhouses, labs, climate-controlled storage |
+| **Energy meters** | RS-485 with DLMS/COSEM | Plant-floor power monitoring, billing |
+| **Cash drawers / fingerprint scanners / SCUD turnstiles** | Standard serial-trigger devices | POS, time tracking, access control |
+
+### Concrete scenarios that just work
+
+**Weighing flow with Telegram alerts:**
+
+```
+You: I have Mettler Toledo scales on COM3 baud 9600. When I weigh
+     something, ask me what it is via Telegram and log it.
+Agent: [tool_search("scale")] → activates 3 serial tools
+       [serial_list_ports] → confirms "USB-Serial CH340 (COM3)"
+       [serial_read_once port=COM3 baud=9600 until="newline"]
+         → "ST,GS,+00012.345,kg"
+       [telegram_notify_owner "I just weighed 12.345 kg — what was it?"]
+       [memory_save "Weighed 12.345 kg of [user reply] on 2026-05-09 14:32"]
+       Done.
+```
+
+**Modbus RTU on a VFD with safety:**
+
+```
+You: Read the current frequency setpoint from the VFD on COM5
+     (Modbus address 1, register 0x2000).
+Agent: [serial_read_once] → constructs Modbus frame in hex,
+       decodes the response → "Setpoint is 50.0 Hz (raw 0x01F4)"
+
+You: Now set it to 30 Hz.
+Agent: [serial_write data="01 06 20 00 01 2C ..." confirm=false]
+       (DRY RUN — pass confirm=true to actually send.
+        port: COM5, bytes: 8, hex: 0106200001 2C...)
+       This will write 30.0 Hz (0x012C) to register 0x2000.
+       Confirm to proceed.
+You: yes go ahead
+Agent: [serial_write ... confirm=true] → "Wrote 8 bytes to COM5."
+```
+
+The `confirm=true` gate is mandatory on every actuator write — set incorrectly, a PLC write can physically damage equipment, so the agent always shows a hex preview first and requires explicit confirmation.
+
+**GPS-triggered routine:**
+
+```
+You: every 5 min read the GPS on COM4 and if I'm within 200m of
+     the warehouse coordinates (52.0123, 4.5678) ping me on Telegram.
+Agent: [tool_search("schedule")] [tool_search("gps")]
+       [schedule_task every="5m"] running:
+         serial_read_once port=COM4 until="newline"
+         parse $GPRMC, compute haversine, telegram_notify_owner if <200m
+       Done. Routine #4 scheduled.
+```
+
+### Setup notes
+
+- **Linux**: serial reads need `dialout` group membership. `qwe-qwe --doctor` flags this and prints the fix: `sudo usermod -aG dialout $USER` then re-login.
+- **macOS**: FTDI cables work out of the box. CH340 / CH341 cables on Apple Silicon need the [WCH driver](https://www.wch.cn/downloads/CH34XSER_MAC_ZIP.html).
+- **Windows**: drivers usually auto-install via Windows Update. CH340 may need the [WCH driver](https://www.wch.cn/download/CH341SER_EXE.html); FTDI cables are plug-and-play.
+
+For non-serial hardware (Zigbee, Z-Wave, Wi-Fi, MQTT), the practical bridge is **Home Assistant** — adding an HA MCP server through `mcp_manager` exposes its 2000+ integrations. Pattern docs in [`docs/HARDWARE.md`](docs/HARDWARE.md).
 
 ## MCP
 
