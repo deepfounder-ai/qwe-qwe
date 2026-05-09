@@ -47,6 +47,11 @@ dependencies = [
     # PotToken workarounds and is actively maintained. rag.index_url() tries
     # yt-dlp first for youtube.com / youtu.be URLs.
     "yt-dlp>=2025.1.0",
+    # Cross-platform serial / USB-COM driver. Powers the `serial_port` skill
+    # — talks to scales, barcode scanners, RFID readers, GPS modules, label
+    # printers, PLCs (Modbus RTU), industrial sensors, etc. Tiny dependency
+    # (~100 KB pure Python). Works identically on Windows / macOS / Linux.
+    "pyserial>=3.5",
 ]
 
 [project.optional-dependencies]

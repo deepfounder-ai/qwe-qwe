@@ -38,5 +38,6 @@ skills/
 !skills/mcp_manager.py
 !skills/browser.py
 !skills/spicy_duck.py
+!skills/serial_port.py
 .claude/
 CLAUDE.md

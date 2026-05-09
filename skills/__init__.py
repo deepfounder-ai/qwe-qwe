@@ -135,7 +135,7 @@ def list_all() -> list[dict]:
     return skills
 
 
-_DEFAULT_SKILLS = {"mcp_manager", "soul_editor", "skill_creator", "browser"}  # always-on built-in skills
+_DEFAULT_SKILLS = {"mcp_manager", "soul_editor", "skill_creator", "browser", "serial_port"}  # always-on built-in skills
 
 
 def get_active() -> set[str]:

@@ -1207,6 +1207,24 @@ _TOOL_SEARCH_INDEX = {
     "url": ["browser_open"],
     "site": ["browser_open", "browser_snapshot"],
     "page": ["browser_open", "browser_snapshot"],
+    # Serial / USB-COM hardware skill — scales, barcode/RFID readers, GPS,
+    # label printers, PLCs over Modbus RTU, industrial sensors, etc.
+    "serial": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "serial_port": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "com": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "rs232": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "rs485": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "modbus": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "scale": ["serial_list_ports", "serial_read_once"],
+    "weigh": ["serial_list_ports", "serial_read_once"],
+    "rfid": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "barcode": ["serial_list_ports", "serial_read_once"],
+    "gps": ["serial_list_ports", "serial_read_once"],
+    "nmea": ["serial_list_ports", "serial_read_once"],
+    "plc": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "hardware": ["serial_list_ports", "serial_read_once", "serial_write"],
+    "usb": ["serial_list_ports"],
+    "port": ["serial_list_ports"],
     "lovense": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
     "spicy": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
     "duck": ["lovense_connect", "lovense_vibrate", "lovense_pattern", "lovense_preset", "lovense_stop", "lovense_status"],
@@ -1295,7 +1313,7 @@ def _do_tool_search(query: str) -> str:
                 found.add(fn["name"])
 
     if not found:
-        return f"No tools found for '{query}'. Available keywords: browser, notes, schedule, secret, mcp, profile, rag, skill, soul, timer, model"
+        return f"No tools found for '{query}'. Available keywords: browser, notes, schedule, secret, mcp, profile, rag, skill, soul, timer, model, serial, modbus, scale, rfid, barcode, gps, plc, hardware"
 
     # Check if tools already activated — short-circuit to prevent repeated tool_search
     if found and found.issubset(_active_extra_tools):

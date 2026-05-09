@@ -1807,6 +1807,40 @@ def doctor():
             return "⚠ opencv not installed (pip install opencv-python-headless)"
     check("Camera", _check_camera)
 
+    def _check_serial():
+        """Hardware: enumerate serial / USB-COM ports + permission hints.
+        Reports plain count + flags Linux dialout group missing (the #1
+        gotcha for the serial_port skill on fresh installs)."""
+        try:
+            import serial.tools.list_ports as lp
+        except ImportError:
+            return "- pyserial not installed"
+        try:
+            ports = list(lp.comports())
+        except Exception as e:
+            return f"- enumeration failed: {e}"
+        suffix = ""
+        if sys.platform.startswith("linux"):
+            try:
+                import grp
+                import getpass
+                user = getpass.getuser()
+                groups = [g.gr_name for g in grp.getgrall() if user in g.gr_mem]
+                if "dialout" not in groups:
+                    suffix = (" [yellow](note: '" + user + "' not in 'dialout' "
+                              "group - serial reads may need: sudo usermod "
+                              "-aG dialout " + user + ")[/]")
+            except Exception:
+                pass
+        if not ports:
+            return f"- no devices plugged in" + suffix
+        # Compact: count + first 3 device names. Avoid Unicode in cli
+        # output (cp1251 terminals).
+        names = [p.device for p in ports[:3]]
+        more = f" (+{len(ports) - 3} more)" if len(ports) > 3 else ""
+        return f"+ {len(ports)} port(s): {', '.join(names)}{more}{suffix}"
+    check("Serial", _check_serial)
+
     # ── 13. Knowledge Graph ──
     console.print("  [dim]── Knowledge ──[/]")
     def _check_rag():
