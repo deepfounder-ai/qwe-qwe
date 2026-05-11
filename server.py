@@ -1525,14 +1525,17 @@ async def request_canvas_prompt(html: str, title: str = "",
         "title": title or "Form",
         "html": html,
     })
-    _track_canvas_render_for_history(title=title or "Form", html=html, slug=None)
 
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         _pending_canvas_prompts.pop(req_id, None)
         # Tell the UI to close the panel so it doesn't sit there
-        # waiting forever.
+        # waiting forever. NOTE: we deliberately do NOT track this
+        # prompt into meta.canvas — a form that timed out without
+        # submission shouldn't litter the chip strip with restorable
+        # entries (the agent never got the data, so re-opening this
+        # canvas wouldn't help). Track only after submit succeeds.
         try:
             await _broadcast({"type": "canvas_close", "request_id": req_id})
         except Exception:
@@ -1541,7 +1544,14 @@ async def request_canvas_prompt(html: str, title: str = "",
 
     entry = _pending_canvas_prompts.pop(req_id, {})
     if entry.get("closed"):
+        # User closed without submit — same logic as timeout: don't
+        # persist a "ghost form" the user already chose to dismiss.
         return {}
+    # Only on actual submission do we record the form into history,
+    # so the chip strip's "re-open last canvas" path makes sense
+    # (re-opening shows the form they ANSWERED, not one they
+    # ignored).
+    _track_canvas_render_for_history(title=title or "Form", html=html, slug=None)
     return entry.get("data")
 
 
@@ -3137,19 +3147,15 @@ async def websocket_chat(ws: WebSocket):
                         if req_id and req_id in _pending_canvas_prompts:
                             _pending_canvas_prompts[req_id]["closed"] = True
                             _pending_canvas_prompts[req_id]["event"].set()
-                    elif event_kind == "save":
-                        # User clicked a "Save" button rendered by the
-                        # canvas chrome (not by the model's HTML). Upsert
-                        # into canvas_artifacts and ack.
-                        try:
-                            _canvas_save_artifact(
-                                slug=msg.get("slug") or "",
-                                title=msg.get("title") or "Untitled",
-                                html=msg.get("html") or "",
-                                thread_id=None,
-                            )
-                        except Exception as e:
-                            _log.warning(f"canvas save failed: {e}")
+                    # NOTE: 'save' is INTENTIONALLY not handled here.
+                    # The iframe is sandboxed but it can still postMessage
+                    # arbitrary {slug, title, html} to the parent. If we
+                    # then accepted that and wrote to canvas_artifacts,
+                    # model-generated HTML could overwrite any saved
+                    # slug (including ones the user trusts). Saving is
+                    # parent-chrome only — the Save / Save-as buttons in
+                    # the canvas header hit POST /api/canvas/artifacts
+                    # directly through the authenticated `api()` helper.
                     continue
 
                 user_input = msg.get("text", "").strip()

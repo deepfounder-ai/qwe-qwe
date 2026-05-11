@@ -1973,6 +1973,21 @@ const wsConnect = () => {
 };
 
 // Partition files list → images vs non-image downloads
+// Compact hash for de-duplicating canvas html. Uses a fold-based
+// 32-bit hash (similar shape to Java String#hashCode) — collisions
+// are exponentially less likely than the previous "length + first
+// 32 chars" key which collided on any two HTMLs that started with
+// the same `<!doctype html>...` boilerplate. Not cryptographic; just
+// needs to distinguish dashboards from one another for state-dedup.
+const canvasHash = (s) => {
+  if (!s) return 'h:0';
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return 'h:' + s.length + ':' + (h >>> 0).toString(36);
+};
+
 const splitFiles = (files) => {
   const images = [], others = [];
   for (const f of (files || [])) {
@@ -2080,9 +2095,9 @@ const handleWsMessage = (msg) => {
     // by html identity for slug-less renders. Cap at 12 to keep the
     // strip from sprawling — oldest dropped first.
     if (!state.threadCanvases) state.threadCanvases = [];
-    const key = entry.slug || ('h:' + entry.html.length);
+    const key = entry.slug || canvasHash(entry.html);
     state.threadCanvases = state.threadCanvases.filter(c =>
-      (c.slug ? c.slug : ('h:' + (c.html || '').length)) !== key);
+      (c.slug ? c.slug : canvasHash(c.html || '')) !== key);
     state.threadCanvases.push({
       html: entry.html, title: entry.title, slug: entry.slug, ts: entry.ts,
     });
@@ -2791,12 +2806,19 @@ async function loadActiveMessages(opts) {
         for (const c of meta.canvas) {
           if (!c) continue;
           if (!state.threadCanvases) state.threadCanvases = [];
+          // Dedupe on insert — same key fn as the live push path. A
+          // thread where the agent re-renders the same dashboard each
+          // turn shouldn't produce 50 identical chips on reload.
+          const incomingHtml = c.html || '';
+          const key = c.slug || canvasHash(incomingHtml);
+          state.threadCanvases = state.threadCanvases.filter(prev =>
+            (prev.slug ? prev.slug : canvasHash(prev.html || '')) !== key);
           state.threadCanvases.push({
             title: c.title || 'Canvas',
             slug: c.slug || '',
-            html: c.html || '',
+            html: incomingHtml,
             truncated: !!c.truncated,
-            html_size: c.html_size || (c.html || '').length,
+            html_size: c.html_size || incomingHtml.length,
             ts: c.ts || (meta.ts || 0),
           });
         }
@@ -4232,9 +4254,10 @@ function patchCanvasIframe() {
   const html = (state.canvas && state.canvas.html) || '';
   // Only update srcdoc when the content actually changed — otherwise
   // every parent re-render would blow away in-progress form input.
-  if (iframe.dataset.canvasHtmlHash !== ('' + html.length + ':' + html.slice(0, 32))) {
+  const hash = canvasHash(html);
+  if (iframe.dataset.canvasHtmlHash !== hash) {
     iframe.srcdoc = html;
-    iframe.dataset.canvasHtmlHash = '' + html.length + ':' + html.slice(0, 32);
+    iframe.dataset.canvasHtmlHash = hash;
     // Store request_id on the iframe element so the postMessage
     // listener can attach it to outgoing canvas_submit events.
     iframe.dataset.canvasRequestId = (state.canvas && state.canvas.request_id) || '';
@@ -6956,6 +6979,20 @@ function wireEvents() {
         // natural UX — the canvas lives next to the chat.
         state.canvas = { html: r.html, title: r.title || slug, slug: r.slug || slug };
         state.inspectorOn = false;
+        // Also push into threadCanvases so the composer's chip strip
+        // surfaces this artifact alongside agent-rendered ones. Without
+        // this, opening from the gallery leaves the strip empty in the
+        // current thread — confusing inconsistency with the
+        // canvas_render → chip flow.
+        if (!state.threadCanvases) state.threadCanvases = [];
+        const key = r.slug || canvasHash(r.html);
+        state.threadCanvases = state.threadCanvases.filter(c =>
+          (c.slug ? c.slug : canvasHash(c.html || '')) !== key);
+        state.threadCanvases.push({
+          html: r.html, title: r.title || slug, slug: r.slug || slug,
+          html_size: (r.html || '').length, ts: Date.now(),
+        });
+        if (state.threadCanvases.length > 12) state.threadCanvases = state.threadCanvases.slice(-12);
         go('chat');
       } catch { toast('Failed to load canvas', 'err'); }
     };
@@ -8079,11 +8116,18 @@ function openShortcutsModal() {
 }
 
 // Canvas postMessage bridge: the sandboxed iframe can't talk to the
-// agent directly. It posts {type: 'canvas_submit', data: {...}} (or
-// 'canvas_close_request' / 'canvas_save_request') to the parent
-// window; we relay it through the WS as a canvas_event so the server
-// can resolve any pending canvas_prompt or persist a save. Attached
-// once on boot — never per-render.
+// agent directly. It posts {type: 'canvas_submit', data: {...}} or
+// 'canvas_close_request' to the parent window; we relay through the
+// WS as a canvas_event so the server can resolve any pending
+// canvas_prompt. Attached once on boot — never per-render.
+//
+// SECURITY NOTE: this listener does NOT accept 'canvas_save_request'
+// from the iframe. Saving an artifact is parent-chrome only (the
+// header's Save / Save-as buttons hit /api/canvas/artifacts directly).
+// Routing save through postMessage would let model-generated HTML
+// overwrite any slug in canvas_artifacts (the iframe chooses slug +
+// html), enabling a model to stash impersonating content under a
+// name the user trusts. Code review caught this — keep it out.
 window.addEventListener('message', (e) => {
   const iframe = document.querySelector('[data-canvas-iframe]');
   if (!iframe || e.source !== iframe.contentWindow) return;
@@ -8115,18 +8159,9 @@ window.addEventListener('message', (e) => {
     } catch {}
     state.canvas = null;
     render();
-  } else if (d.type === 'canvas_save_request') {
-    try {
-      state.ws.send(JSON.stringify({
-        type: 'canvas_event',
-        event: 'save',
-        slug: d.slug || '',
-        title: d.title || (state.canvas && state.canvas.title) || 'Untitled',
-        html: d.html || (state.canvas && state.canvas.html) || '',
-      }));
-    } catch {}
-    toast('Canvas saved');
   }
+  // Any other d.type is silently ignored — we don't trust arbitrary
+  // messages from the iframe, only the two protocol verbs above.
 });
 
 (async function boot() {

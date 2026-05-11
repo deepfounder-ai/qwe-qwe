@@ -1076,10 +1076,18 @@ def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
         msg = resp.choices[0].message
 
         if msg.tool_calls:
+            # `function.arguments` is normalized to valid JSON before
+            # replay — see agent_loop.normalize_args_for_api for the
+            # rationale (Alibaba DashScope 400s on empty/malformed
+            # arguments where OpenAI silently accepts them). Scheduled
+            # tasks hit the SAME LLM tool-call loop as agent.run(), so
+            # they need the SAME guard.
+            from agent_loop import normalize_args_for_api
             assistant_msg = {"role": "assistant", "content": msg.content or ""}
             assistant_msg["tool_calls"] = [
                 {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                 "function": {"name": tc.function.name,
+                              "arguments": normalize_args_for_api(tc.function.arguments)}}
                 for tc in msg.tool_calls
             ]
             messages.append(assistant_msg)

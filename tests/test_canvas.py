@@ -634,3 +634,136 @@ def test_ws_reply_assembly_drains_pending_renders():
         "WS reply handler doesn't write _pending_canvas_renders into "
         "meta_dict[\"canvas\"] — reload restoration is broken."
     )
+
+
+# ── Code-review follow-up fixes ────────────────────────────────────
+
+
+def test_save_request_postMessage_path_is_not_handled():
+    """Code review caught: the iframe is sandboxed but can postMessage
+    arbitrary {slug, title, html} to the parent. If we accepted
+    'canvas_save_request' and wrote to canvas_artifacts, model-generated
+    HTML could overwrite any saved slug (including one the user trusts
+    by name). Saving must remain parent-chrome-only via the
+    authenticated REST POST. This test pins that the postMessage
+    listener does NOT relay save requests to the WS layer."""
+    src = _read_index_html()
+    # Find the postMessage listener
+    listener_at = src.find("window.addEventListener('message'")
+    assert listener_at >= 0
+    # Walk to the next top-level statement (window.addEventListener body)
+    listener_block = src[listener_at: listener_at + 3000]
+    # Must handle submit + close requests
+    assert "canvas_submit" in listener_block
+    assert "canvas_close_request" in listener_block
+    # Must NOT handle save requests — that path lets model HTML
+    # overwrite arbitrary artifacts.
+    assert "canvas_save_request" not in listener_block, (
+        "Iframe → parent postMessage listener is relaying "
+        "canvas_save_request. This re-opens the model-can-overwrite-"
+        "arbitrary-slug bug. Saving is parent-chrome-only via the "
+        "authenticated REST POST /api/canvas/artifacts."
+    )
+
+
+def test_ws_canvas_event_save_branch_removed():
+    """Mirror of the JS test on the server side. The WS handler used to
+    accept event='save' from canvas_event and write to the DB
+    untrusted. Removed in the code-review follow-up."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+    # Find the canvas_event handler
+    handler_at = src.find('msg.get("type") == "canvas_event"')
+    assert handler_at >= 0
+    # Look for the save branch
+    window = src[handler_at: handler_at + 3000]
+    # The 'save' event_kind MUST NOT trigger _canvas_save_artifact in
+    # this handler. We allow a comment referencing 'save' (the rationale)
+    # but no executable branch.
+    assert 'elif event_kind == "save"' not in window, (
+        "WS canvas_event handler still has an executable 'save' branch — "
+        "this lets model HTML overwrite any slug in canvas_artifacts. "
+        "Remove the branch; saves go through POST /api/canvas/artifacts."
+    )
+
+
+def test_canvas_prompt_does_not_track_failed_renders():
+    """Code review caught: _track_canvas_render_for_history was called
+    BEFORE await event.wait(), so a form that timed out or was closed
+    without submission still landed in meta.canvas. The chip strip
+    would then surface dead forms the user never answered.
+
+    Fix: track ONLY after a successful submission. Verify by reading
+    server.py source and confirming the track call lives AFTER the
+    `if entry.get("closed"): return {}` early-return.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+    fn_at = src.find("async def request_canvas_prompt")
+    assert fn_at >= 0
+    body = src[fn_at: fn_at + 4000]
+    track_pos = body.find("_track_canvas_render_for_history")
+    closed_check_pos = body.find('entry.get("closed")')
+    assert track_pos >= 0 and closed_check_pos >= 0
+    assert track_pos > closed_check_pos, (
+        "_track_canvas_render_for_history is being called before the "
+        "submit/close branching — failed prompts will leak into "
+        "meta.canvas as 'ghost' chips. Track only on successful submit."
+    )
+
+
+def test_scheduler_normalizes_tool_call_arguments():
+    """Code review caught: scheduler.py:1082 builds function.arguments
+    raw from tc.function.arguments. Scheduled tasks hit the same
+    Alibaba DashScope 400 ("function.arguments must be in JSON format")
+    that agent_loop + agent already fix via normalize_args_for_api.
+
+    Pin the contract: scheduler.py must reference normalize_args_for_api
+    in its assistant_msg construction. Source-grep matches the existing
+    JS-contract test pattern for agent_loop/agent."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "scheduler.py").read_text(encoding="utf-8")
+    assert "normalize_args_for_api" in src, (
+        "scheduler.py no longer routes tool_call arguments through "
+        "normalize_args_for_api. Scheduled tasks against Alibaba "
+        "DashScope will 400 with the InvalidParameter bug fixed in "
+        "agent_loop+agent — this is the same fix at the third call site."
+    )
+
+
+def test_canvas_hash_avoids_prefix_collision():
+    """The previous dedup key was `length + ':' + html.slice(0,32)`.
+    Two different dashboards both starting with `<!doctype html>` and
+    happening to be the same length would collide. New `canvasHash`
+    helper folds the whole string into a 32-bit number, so collisions
+    are exponentially rare. Pin the function exists + the call sites
+    use it."""
+    src = _read_index_html()
+    # Helper exists
+    assert "const canvasHash = (s) =>" in src, "canvasHash helper missing"
+    # patchCanvasIframe uses it
+    patch_at = src.find("function patchCanvasIframe")
+    assert patch_at >= 0
+    patch_window = src[patch_at: patch_at + 1000]
+    assert "canvasHash(html)" in patch_window
+    # Live WS canvas_render handler dedup uses it
+    handler_at = src.find("t === 'canvas_render'")
+    assert handler_at >= 0
+    handler_window = src[handler_at: handler_at + 1500]
+    assert "canvasHash(" in handler_window
+
+
+def test_gallery_open_pushes_to_threadCanvases():
+    """Code review caught: opening a canvas from the gallery view set
+    state.canvas but did NOT push into state.threadCanvases. That left
+    the composer's chip strip empty even though a canvas was currently
+    open — inconsistent with the agent-rendered flow. Pin the fix."""
+    src = _read_index_html()
+    handler_at = src.find('data-act="canvas-open"]\').forEach')
+    assert handler_at >= 0
+    window = src[handler_at: handler_at + 1500]
+    assert "state.threadCanvases" in window and "push(" in window, (
+        "Gallery canvas-open handler doesn't push the opened artifact "
+        "into state.threadCanvases — chip strip will silently miss it "
+        "compared to agent-rendered canvases."
+    )
