@@ -1388,6 +1388,15 @@ def _run_inner_body(user_input: str, thread_id: str | None,
 
     # Reset tool_search activations for new turn
     tools._reset_active_tools()
+    # Also clear any canvas renders left over from a prior turn (e.g.
+    # if the previous turn crashed mid-flight, server.py's drain
+    # wouldn't have run). Keeps server._pending_canvas_renders bounded.
+    try:
+        import server as _srv
+        if hasattr(_srv, "_pending_canvas_renders"):
+            _srv._pending_canvas_renders.clear()
+    except Exception:
+        pass
 
     # Check if this is a fallback confirmation ("да", "yes")
     if user_input.lower().strip() in ("да", "yes", "y", "давай", "go"):

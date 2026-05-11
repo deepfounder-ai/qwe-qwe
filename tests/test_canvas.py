@@ -472,7 +472,7 @@ def test_canvas_strip_chips_have_reopen_handler():
     # Search globally for the click handler block
     wire_idx = src.find('data-act="reopen-canvas"]\').forEach')
     assert wire_idx >= 0, "reopen-canvas click handler not wired in wireEvents"
-    window = src[wire_idx: wire_idx + 800]
+    window = src[wire_idx: wire_idx + 2000]
     assert "state.threadCanvases" in window
     assert "state.canvas = {" in window
 
@@ -483,8 +483,154 @@ def test_thread_switch_clears_threadCanvases():
     src = _read_index_html()
     load_at = src.find("async function loadActiveMessages")
     assert load_at >= 0
-    window = src[load_at: load_at + 2000]
+    window = src[load_at: load_at + 3500]
     assert "state.threadCanvases = []" in window, (
         "loadActiveMessages doesn't reset state.threadCanvases on "
         "thread switch — the chip strip will leak across threads."
+    )
+
+
+# ── meta.canvas persistence round-trip ────────────────────────────
+
+
+def test_track_canvas_render_appends_to_pending(fresh_server):
+    """The skill's broadcast helpers call _track_canvas_render_for_
+    history after each successful broadcast. Without this drain, the
+    chip strip would be a session-only thing — close the tab and
+    everything's gone. This is the load-bearing function for canvas
+    persistence."""
+    fresh_server._pending_canvas_renders.clear()
+    fresh_server._track_canvas_render_for_history(
+        title="Weekly sales", html="<h1>Sales</h1>", slug="weekly-sales",
+    )
+    assert len(fresh_server._pending_canvas_renders) == 1
+    entry = fresh_server._pending_canvas_renders[0]
+    assert entry["title"] == "Weekly sales"
+    assert entry["slug"] == "weekly-sales"
+    assert entry["html"] == "<h1>Sales</h1>"
+    assert entry["html_size"] > 0
+    assert entry.get("truncated") is not True
+    assert "ts" in entry
+
+
+def test_track_canvas_render_truncates_oversize_html(fresh_server):
+    """HTML over 64KB shouldn't blow up the messages table — entry
+    stores metadata + truncated:True marker and skips the actual html
+    body. Chip still shows up so the user knows a canvas WAS rendered;
+    clicking it then explains the truncation."""
+    fresh_server._pending_canvas_renders.clear()
+    big_html = "x" * (fresh_server._CANVAS_META_HTML_CAP + 100)
+    fresh_server._track_canvas_render_for_history(
+        title="Big dashboard", html=big_html, slug=None,
+    )
+    assert len(fresh_server._pending_canvas_renders) == 1
+    entry = fresh_server._pending_canvas_renders[0]
+    assert entry["title"] == "Big dashboard"
+    assert entry["truncated"] is True
+    assert entry["html"] == ""
+    assert entry["html_size"] >= fresh_server._CANVAS_META_HTML_CAP
+
+
+def test_track_canvas_render_swallows_bad_input(fresh_server):
+    """Robustness: a misbehaving caller (passes a dict, an int, None)
+    shouldn't crash the agent turn. Just no-op."""
+    fresh_server._pending_canvas_renders.clear()
+    fresh_server._track_canvas_render_for_history("t", None, None)
+    fresh_server._track_canvas_render_for_history("t", 42, None)
+    fresh_server._track_canvas_render_for_history("t", {"oops": 1}, None)
+    assert len(fresh_server._pending_canvas_renders) == 0
+
+
+def test_broadcast_helper_appends_render_to_pending(fresh_server, monkeypatch):
+    """Integration: calling broadcast_canvas_render_sync (the public
+    helper used by skills/canvas.py) appends to the pending list when
+    a WS client is connected. Without this connection, neither the
+    broadcast nor the tracking happens (no chip on reload — the user
+    just sees nothing, which is correct for headless / CLI sessions)."""
+    fresh_server._pending_canvas_renders.clear()
+    # Simulate a connected WS client + event loop. The actual
+    # asyncio.run_coroutine_threadsafe will be called against a fake
+    # loop; we don't need it to actually run, just need the helper to
+    # take the success path.
+    fresh_server._ws_clients = {object()}
+    fresh_server._ws_loop = type("L", (), {})()  # truthy
+
+    # Replace asyncio.run_coroutine_threadsafe to no-op so we don't
+    # actually try to schedule on the fake loop. Close the coroutine
+    # the helper passes in so pytest doesn't warn "coroutine was
+    # never awaited" — it's not a real bug, just test-side hygiene.
+    import asyncio
+    def _consume(coro, loop):
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return type("F", (), {"result": lambda *a, **k: None})()
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _consume)
+
+    ok = fresh_server.broadcast_canvas_render_sync(
+        html="<p>test</p>", title="Test", slug="test-slug",
+    )
+    assert ok is True
+    assert len(fresh_server._pending_canvas_renders) == 1
+    entry = fresh_server._pending_canvas_renders[0]
+    assert entry["title"] == "Test"
+    assert entry["slug"] == "test-slug"
+    assert entry["html"] == "<p>test</p>"
+
+
+def test_loadActiveMessages_rebuilds_threadCanvases_from_meta():
+    """The frontend reload path walks `meta.canvas` arrays on each
+    message and populates state.threadCanvases. Without this, the
+    composer's chip strip + "re-open last canvas" button would only
+    work within a single session — F5 / tab close / thread switch
+    would silently lose history. Source-grep contract."""
+    src = _read_index_html()
+    # The .map() walk must check meta.canvas
+    idx = src.find("if (Array.isArray(meta.canvas))")
+    assert idx >= 0, (
+        "loadActiveMessages doesn't walk meta.canvas — chip strip "
+        "won't survive reload."
+    )
+    window = src[idx: idx + 800]
+    assert "state.threadCanvases" in window
+    # Both saved-with-slug and inline html entries must be supported
+    assert "title" in window and "slug" in window and "html" in window
+
+
+def test_truncated_canvas_chip_explains_or_falls_back_to_artifacts():
+    """If a chip's source render was truncated (HTML > 64KB) AND no
+    slug was supplied, clicking should toast a helpful message rather
+    than open a blank panel. If a slug WAS supplied, fetch the full
+    html from /api/canvas/artifacts as fallback. Source-grep."""
+    src = _read_index_html()
+    # Find the reopen handler
+    handler_at = src.find("data-act=\"reopen-canvas\"]').forEach")
+    assert handler_at >= 0
+    window = src[handler_at: handler_at + 1500]
+    # Truncated-aware branch
+    assert "truncated" in window
+    # Fetches from artifacts API when slug exists
+    assert "/api/canvas/artifacts/" in window or "canvas/artifacts/" in window
+    # Friendly toast when no slug
+    assert "too large to persist inline" in window or "ask the agent to re-render" in window
+
+
+def test_ws_reply_assembly_drains_pending_renders():
+    """The WS reply assembly in server.py must drain
+    _pending_canvas_renders into the assistant message's meta.canvas.
+    Without this drain step, the per-turn captures would leak into
+    the next turn (until cleared) AND nothing would land in the DB
+    for reload restoration. Source-grep contract."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+    # The reply assembly must read + clear the list AND assign to
+    # meta_dict["canvas"]
+    assert "_pending_canvas_renders.clear()" in src or "pending_canvases" in src, (
+        "WS reply handler doesn't drain _pending_canvas_renders — "
+        "either entries leak to next turn or never reach DB."
+    )
+    assert 'meta_dict["canvas"] = pending_canvases' in src, (
+        "WS reply handler doesn't write _pending_canvas_renders into "
+        "meta_dict[\"canvas\"] — reload restoration is broken."
     )

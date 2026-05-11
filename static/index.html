@@ -2737,9 +2737,10 @@ async function loadActiveMessages(opts) {
     // way a user scrolled mid-history isn't yanked every 3 seconds.
     if (opts.silent && state.messages.length === items.length) return;
     // Switching threads: reset the in-session canvas strip + close any
-    // open canvas panel. threadCanvases is purely session state — when
-    // we re-enter a thread we don't yet repopulate from history (the
-    // server doesn't persist canvas events into message meta in v1).
+    // open canvas panel. The strip gets rebuilt from message-meta
+    // entries (see the meta.canvas walk in the .map() block below) so
+    // canvases the agent rendered in past turns survive reloads + thread
+    // switches.
     if (!opts.silent) {
       state.threadCanvases = [];
       state.canvas = null;
@@ -2778,6 +2779,28 @@ async function loadActiveMessages(opts) {
         for (const u of split.images) if (u) _images.push(u);
         for (const f of split.others) if (f) _files.push(f);
       }
+      // Canvas renders persisted in meta — populate threadCanvases so
+      // the composer chip strip + "re-open last canvas" affordance
+      // work across reloads. Entries shaped like
+      // {title, slug?, html, html_size, ts, truncated?}. We accept
+      // truncated entries (HTML too big to persist inline) — the chip
+      // still renders so the user can see what was generated, but
+      // clicking it produces a helpful "render was too large, ask the
+      // agent to re-render" message rather than blank panel.
+      if (Array.isArray(meta.canvas)) {
+        for (const c of meta.canvas) {
+          if (!c) continue;
+          if (!state.threadCanvases) state.threadCanvases = [];
+          state.threadCanvases.push({
+            title: c.title || 'Canvas',
+            slug: c.slug || '',
+            html: c.html || '',
+            truncated: !!c.truncated,
+            html_size: c.html_size || (c.html || '').length,
+            ts: c.ts || (meta.ts || 0),
+          });
+        }
+      }
       return {
         id: m.id || ('m-' + i),
         role: m.role,
@@ -2790,6 +2813,12 @@ async function loadActiveMessages(opts) {
         _meta: meta,
       };
     });
+    // Cap the rebuilt strip at the same 12-most-recent the live path
+    // uses, so threads with dozens of historical renders don't render
+    // a sprawling strip.
+    if (state.threadCanvases && state.threadCanvases.length > 12) {
+      state.threadCanvases = state.threadCanvases.slice(-12);
+    }
     hydrateInspectorFromHistory();
     render(); scrollToBottom();
   } catch { state.messages = []; hydrateInspectorFromHistory(); render(); }
@@ -6862,7 +6891,7 @@ function wireEvents() {
     };
   });
   document.querySelectorAll('[data-act="reopen-canvas"]').forEach(b => {
-    b.onclick = (e) => {
+    b.onclick = async (e) => {
       // Click a chip in the canvas-strip → reopen that artifact in
       // the right-side panel. Don't navigate views; the user is in
       // chat and wants the canvas next to it.
@@ -6871,6 +6900,25 @@ function wireEvents() {
       const tc = state.threadCanvases || [];
       const entry = tc[idx];
       if (!entry) return;
+      // Truncated entry — html was too big to persist inline at
+      // render-time. If the user explicitly saved it (entry.slug
+      // present), fetch from canvas_artifacts; otherwise tell them
+      // to ask the agent to re-render.
+      if (entry.truncated && !entry.html) {
+        if (entry.slug) {
+          try {
+            const r = await api('/api/canvas/artifacts/' + encodeURIComponent(entry.slug));
+            if (r && r.html) {
+              state.canvas = { html: r.html, title: r.title || entry.title, slug: r.slug || entry.slug, request_id: '' };
+              state.inspectorOn = false;
+              render();
+              return;
+            }
+          } catch {}
+        }
+        toast('Canvas content was too large to persist inline — ask the agent to re-render or save it explicitly.', 'err');
+        return;
+      }
       state.canvas = {
         html: entry.html, title: entry.title || 'Canvas',
         slug: entry.slug || '', request_id: '',

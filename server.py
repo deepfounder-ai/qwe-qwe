@@ -99,6 +99,20 @@ _pending_frame_requests: dict = {}  # request_id → asyncio.Event + result
 # iframe's postMessage routes a submit/close back to us.
 _pending_canvas_prompts: dict = {}  # request_id → asyncio.Event + result
 
+# Per-turn capture of every canvas render/prompt the skill broadcast,
+# drained by the WS reply assembly to attach to the assistant message's
+# meta.canvas so the chat history remembers what was rendered. This is
+# what makes the composer's "re-open last canvas" affordance + the
+# threadCanvases chip strip survive page reloads + thread switches.
+# Mirrors the `_pending_files` pattern in tools.py.
+#
+# Each entry: {"title": str, "slug": str|None, "html": str, "ts": float}
+# Cap html at 64KB per entry to bound message-meta growth; over that,
+# entries get a `truncated: True` flag and the html is replaced with a
+# short hint so the agent can re-render fresh if needed.
+_pending_canvas_renders: list[dict] = []
+_CANVAS_META_HTML_CAP = 64 * 1024  # per-render cap when persisting to message meta
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -1511,6 +1525,7 @@ async def request_canvas_prompt(html: str, title: str = "",
         "title": title or "Form",
         "html": html,
     })
+    _track_canvas_render_for_history(title=title or "Form", html=html, slug=None)
 
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
@@ -1557,9 +1572,49 @@ def broadcast_canvas_render_sync(html: str, title: str = "",
         payload["slug"] = slug
     try:
         asyncio.run_coroutine_threadsafe(_broadcast(payload), _ws_loop)
+        _track_canvas_render_for_history(title=title or "Canvas", html=html, slug=slug)
         return True
     except Exception:
         return False
+
+
+def _track_canvas_render_for_history(title: str, html: str, slug: str | None) -> None:
+    """Append a canvas render to the per-turn pending list so the WS
+    reply assembly can persist it onto the assistant message's
+    meta.canvas. This is what makes the threadCanvases chip strip
+    survive page reloads + thread switches.
+
+    HTML is capped at `_CANVAS_META_HTML_CAP` per entry to keep
+    message-meta rows bounded. Over the cap, entries store the
+    metadata + a `truncated: True` marker (so the chip still shows
+    up — the user just won't be able to re-render the exact content
+    without asking the agent again or loading from canvas_artifacts
+    if a slug was supplied).
+    """
+    try:
+        if not isinstance(html, str):
+            return
+        size = len(html.encode("utf-8", errors="replace"))
+        if size > _CANVAS_META_HTML_CAP:
+            entry = {
+                "title": title or "Canvas",
+                "slug": slug or None,
+                "html": "",  # too large to persist inline
+                "html_size": size,
+                "ts": time.time(),
+                "truncated": True,
+            }
+        else:
+            entry = {
+                "title": title or "Canvas",
+                "slug": slug or None,
+                "html": html,
+                "html_size": size,
+                "ts": time.time(),
+            }
+        _pending_canvas_renders.append(entry)
+    except Exception as e:
+        _log.debug(f"canvas render tracking failed (non-fatal): {e}")
 
 
 def broadcast_canvas_close_sync() -> bool:
@@ -3295,10 +3350,19 @@ async def websocket_chat(ws: WebSocket):
                     reply_payload["audio_url"] = audio_url
                 # Attach files queued by send_file tool
                 pending = tools.get_pending_files()
-                if pending:
-                    reply_payload["files"] = pending
-                    # Persist files into the last assistant message's meta so
-                    # reloads (F5 / thread switch) restore the download chips.
+                # Drain canvas renders captured this turn — these need to
+                # land in the assistant message's meta so the chip strip
+                # + composer's "re-open last canvas" affordance work
+                # across reloads + thread switches.
+                pending_canvases = list(_pending_canvas_renders)
+                _pending_canvas_renders.clear()
+                if pending or pending_canvases:
+                    if pending:
+                        reply_payload["files"] = pending
+                    # Persist into the last assistant message's meta so
+                    # reloads (F5 / thread switch) restore the download
+                    # chips AND the canvas-strip chips. Both mutate the
+                    # same row so this is a single read/modify/write.
                     try:
                         row = db.fetchone(
                             "SELECT id, meta FROM messages WHERE thread_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
@@ -3307,13 +3371,16 @@ async def websocket_chat(ws: WebSocket):
                         if row:
                             mid, meta_raw = row
                             meta_dict = json.loads(meta_raw) if meta_raw else {}
-                            meta_dict["files"] = pending
+                            if pending:
+                                meta_dict["files"] = pending
+                            if pending_canvases:
+                                meta_dict["canvas"] = pending_canvases
                             if audio_url:
                                 meta_dict["audio_url"] = audio_url
                             db.execute("UPDATE messages SET meta=? WHERE id=?",
                                        (json.dumps(meta_dict), mid))
                     except Exception as e:
-                        _log.debug(f"failed to persist files to message meta: {e}")
+                        _log.debug(f"failed to persist files/canvas to message meta: {e}")
                 if not await _ws_send_safe(ws, reply_payload):
                     break
 
