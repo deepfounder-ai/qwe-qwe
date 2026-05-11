@@ -1169,6 +1169,41 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
 .attach-chip .x { color: var(--fg-4); margin-left: 2px; transition: color 0.12s; }
 .attach-chip .x:hover { color: var(--err); }
 
+/* Canvas chips — saved artifacts the agent rendered in this thread.
+   Click to re-open the canvas in the right-side panel. Lives just
+   above the composer's chip strip / textarea. */
+.canvas-strip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+.canvas-strip-lbl {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; font-family: var(--font-mono);
+  color: var(--fg-4); letter-spacing: 0.04em;
+  text-transform: uppercase; margin-right: 4px;
+}
+.canvas-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 9px; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--line);
+  font-size: 11.5px; color: var(--fg-2);
+  cursor: pointer; transition: all 0.12s;
+  max-width: 220px;
+}
+.canvas-chip:hover { background: var(--surface-2); border-color: var(--line-2); color: var(--fg); }
+.canvas-chip.active {
+  background: var(--accent-dim); border-color: var(--accent-line); color: var(--accent);
+}
+.canvas-chip .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-chip .sub {
+  font-size: 10px; color: var(--fg-4);
+  border-left: 1px solid var(--line-2); padding-left: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 90px;
+}
+
 /* Camera PiP */
 .camera-pip {
   position: fixed; bottom: 20px; right: 20px; z-index: 200;
@@ -1886,6 +1921,13 @@ const state = {
   // inspector and vice versa.
   canvas: null,
   canvasArtifacts: [],      // [{slug,title,created_at,updated_at}] — populated when Canvases view is open
+  // In-session artifacts rendered/loaded by the agent in the active
+  // thread. Each entry: {title, slug?, html, ts}. Populated by
+  // handleWsMessage on canvas_render; cleared on thread switch. The
+  // composer renders these as chips so the user can re-open a canvas
+  // they've already seen this session without going through the
+  // Canvases gallery view.
+  threadCanvases: [],
   cameraOn: false,
   cameraStream: null,
   cameraDeviceId: null,
@@ -2009,15 +2051,32 @@ const handleWsMessage = (msg) => {
   // render would also pop a ghost assistant message into the chat (same
   // class of bug as the v0.18.3 task_update fix).
   if (t === 'canvas_render') {
-    state.canvas = {
+    const entry = {
       html: msg.html || '',
       title: msg.title || 'Canvas',
       slug: msg.slug || '',
       request_id: msg.request_id || '',
+      ts: Date.now(),
     };
+    state.canvas = entry;
     // Mutually exclusive with the inspector — opening canvas auto-closes
     // the inspector (and vice versa via the toggle handler).
     state.inspectorOn = false;
+    // Track in the thread-canvases strip so the user can re-open this
+    // artifact even after closing the panel. Dedupe by slug if present
+    // (same dashboard re-rendered → just bump it to most-recent) OR
+    // by html identity for slug-less renders. Cap at 12 to keep the
+    // strip from sprawling — oldest dropped first.
+    if (!state.threadCanvases) state.threadCanvases = [];
+    const key = entry.slug || ('h:' + entry.html.length);
+    state.threadCanvases = state.threadCanvases.filter(c =>
+      (c.slug ? c.slug : ('h:' + (c.html || '').length)) !== key);
+    state.threadCanvases.push({
+      html: entry.html, title: entry.title, slug: entry.slug, ts: entry.ts,
+    });
+    if (state.threadCanvases.length > 12) {
+      state.threadCanvases = state.threadCanvases.slice(-12);
+    }
     render();
     return;
   }
@@ -2665,6 +2724,14 @@ async function loadActiveMessages(opts) {
     // + scroll-to-bottom steps if the message count hasn't changed — that
     // way a user scrolled mid-history isn't yanked every 3 seconds.
     if (opts.silent && state.messages.length === items.length) return;
+    // Switching threads: reset the in-session canvas strip + close any
+    // open canvas panel. threadCanvases is purely session state — when
+    // we re-enter a thread we don't yet repopulate from history (the
+    // server doesn't persist canvas events into message meta in v1).
+    if (!opts.silent) {
+      state.threadCanvases = [];
+      state.canvas = null;
+    }
     state.messages = items.map((m, i) => {
       const meta = m.meta || {};
       // Server stores tool details inside meta; surface them so the chat UI
@@ -4000,6 +4067,30 @@ function renderChatView() {
           '</div>').join('') +
       '</div>'
     : '';
+  // Thread-canvases strip — only renders when the agent has rendered or
+  // loaded at least one canvas in this thread this session. Sits above
+  // the composer like the attach-strip; chips are clickable to re-open
+  // a canvas the user previously closed. Cleared on thread switch.
+  const tCanvases = state.threadCanvases || [];
+  const canvasStrip = tCanvases.length
+    ? '<div class="canvas-strip">' +
+        '<span class="canvas-strip-lbl">' + ico('image', 11, 'style="color:var(--fg-4)"') + ' Canvases this session</span>' +
+        tCanvases.slice().reverse().map((c, i) => {
+          const isOpen = state.canvas && (
+            (c.slug && state.canvas.slug === c.slug) ||
+            (!c.slug && state.canvas.html === c.html));
+          const label = c.title || c.slug || 'Canvas';
+          const sub = c.slug ? c.slug : '';
+          return '<button class="canvas-chip ' + (isOpen ? 'active' : '') +
+              '" data-act="reopen-canvas" data-canvas-idx="' + (tCanvases.length - 1 - i) + '" ' +
+              'title="' + esc(label) + (sub ? ' (' + esc(sub) + ')' : '') + '">' +
+            ico('image', 10) +
+            '<span class="lbl">' + esc(label) + '</span>' +
+            (sub ? '<span class="sub mono">' + esc(sub) + '</span>' : '') +
+          '</button>';
+        }).join('') +
+      '</div>'
+    : '';
   const voiceStateBadge = state.voiceLive && state.voiceState !== 'idle'
     ? '<span class="voice-state ' + state.voiceState + '"><span class="sbdot"></span>' + state.voiceState + '</span>'
     : '';
@@ -4008,7 +4099,7 @@ function renderChatView() {
       '<div class="hint"><span>Continue the thread, or try:</span>' +
         ['/recall', '/remember', '/cron', '/tools'].map(c => '<button class="slash" data-slash="'+c+'">'+c+'</button>').join('') +
       '</div>' +
-      '<div class="box">' + chipStrip +
+      '<div class="box">' + canvasStrip + chipStrip +
         '<textarea id="composer-ta" rows="1" placeholder="Reply to ' + esc(state.soul.agent_name || 'qwe-qwe') + '…"></textarea>' +
         '<div class="actions">' +
           '<div class="left">' +
@@ -4016,6 +4107,19 @@ function renderChatView() {
             '<button class="icon-btn" data-act="image" title="Attach image">' + ico('image', 14) + '</button>' +
             '<button class="icon-btn ' + (state.cameraOn ? 'active' : '') + '" data-act="camera-toggle" title="Camera">' + ico('eye', 14) + '</button>' +
             '<button class="icon-btn ' + (state.voiceLive ? 'active' : '') + '" data-act="voice-toggle" title="Live voice mode">' + ico('mic', 14) + '</button>' +
+            // Canvas toggle — composer-side affordance to open / close
+            // the right-side canvas panel without going through the
+            // agent. Behavior:
+            //   - panel open → close it
+            //   - panel closed but threadCanvases has entries → reopen
+            //     the most recent one
+            //   - nothing rendered this session → go to Canvases gallery
+            // Highlighted "active" when state.canvas is set.
+            '<button class="icon-btn ' + (state.canvas ? 'active' : '') +
+              '" data-act="canvas-toggle-composer" title="' +
+              (state.canvas ? 'Hide canvas panel' :
+                (tCanvases.length ? 'Re-open last canvas' : 'Open canvases gallery')) +
+              '">' + ico('image', 14) + '</button>' +
             voiceStateBadge +
             '<div class="vdivider" style="margin:0 6px"></div>' +
             '<span class="agent-pill">' + ico('bolt', 10) + ' Agent ' + ico('arrow', 8, 'style="transform:rotate(-90deg)"') + '</span>' +
@@ -6711,6 +6815,53 @@ function wireEvents() {
       // Close the canvas panel. The user can ask the agent to reopen
       // by calling canvas_load(slug=...).
       state.canvas = null;
+      render();
+    };
+  });
+  document.querySelectorAll('[data-act="canvas-toggle-composer"]').forEach(b => {
+    b.onclick = () => {
+      // Three-mode composer toggle:
+      //   1. panel open  →  close it (don't drop threadCanvases — user
+      //                     may want to re-open via a chip)
+      //   2. panel closed AND threadCanvases has entries → re-open the
+      //      most recent canvas. Inspector auto-closes (mutually
+      //      exclusive — same rule as agent-driven render).
+      //   3. nothing rendered yet → route to Canvases gallery so the
+      //      user can pick a saved artifact.
+      if (state.canvas) {
+        state.canvas = null;
+        render();
+        return;
+      }
+      const tc = state.threadCanvases || [];
+      if (tc.length) {
+        const last = tc[tc.length - 1];
+        state.canvas = {
+          html: last.html, title: last.title || 'Canvas',
+          slug: last.slug || '', request_id: '',
+        };
+        state.inspectorOn = false;
+        render();
+      } else {
+        go('canvases');
+      }
+    };
+  });
+  document.querySelectorAll('[data-act="reopen-canvas"]').forEach(b => {
+    b.onclick = (e) => {
+      // Click a chip in the canvas-strip → reopen that artifact in
+      // the right-side panel. Don't navigate views; the user is in
+      // chat and wants the canvas next to it.
+      e.stopPropagation();
+      const idx = parseInt(b.dataset.canvasIdx, 10);
+      const tc = state.threadCanvases || [];
+      const entry = tc[idx];
+      if (!entry) return;
+      state.canvas = {
+        html: entry.html, title: entry.title || 'Canvas',
+        slug: entry.slug || '', request_id: '',
+      };
+      state.inspectorOn = false;
       render();
     };
   });

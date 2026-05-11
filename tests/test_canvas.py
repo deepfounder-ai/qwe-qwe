@@ -424,3 +424,67 @@ def test_canvases_view_wired_in_router():
     assert "case 'canvases':" in src
     assert "renderCanvasesView" in src
     assert "{ id: 'canvases'" in src  # left rail entry
+
+
+def test_composer_has_canvas_toggle_button():
+    """Reported gap: 'нет кнопки включить canvas'. Fix added an icon
+    button in the chat composer (next to attach / image / camera /
+    voice) that opens the canvas panel manually — three-mode toggle:
+    close if open, reopen-last if there's a session artifact, or
+    route to the Canvases gallery if neither. This test pins the
+    affordance is wired so a future refactor that drops the button
+    fails loud."""
+    src = _read_index_html()
+    assert 'data-act="canvas-toggle-composer"' in src, (
+        "Composer-side canvas toggle button missing — users have no "
+        "way to manually open the canvas panel without an agent-driven "
+        "render. Restore the button in the composer .left action group."
+    )
+
+
+def test_state_tracks_thread_canvases():
+    """The threadCanvases array survives the panel close, so a user
+    who renders 3 dashboards in a thread and closes them can still
+    re-open any of them via the chip strip. Pinned at the WS handler
+    and the state declaration so neither can quietly disappear."""
+    src = _read_index_html()
+    assert "threadCanvases: []" in src or "threadCanvases:[]" in src, (
+        "state.threadCanvases missing from initial state."
+    )
+    # Push entry on canvas_render must happen
+    handler_at = src.find("t === 'canvas_render'")
+    assert handler_at >= 0
+    window = src[handler_at: handler_at + 1500]
+    assert "state.threadCanvases" in window and "push(" in window, (
+        "canvas_render handler doesn't push to threadCanvases — the "
+        "session-artifacts chip strip will stay empty even after the "
+        "agent renders."
+    )
+
+
+def test_canvas_strip_chips_have_reopen_handler():
+    src = _read_index_html()
+    assert 'data-act="reopen-canvas"' in src, (
+        "canvas-strip chips missing the reopen handler hook."
+    )
+    # Reopen handler must restore state.canvas from threadCanvases by index
+    handler_at = src.find('data-act="reopen-canvas"')
+    # Search globally for the click handler block
+    wire_idx = src.find('data-act="reopen-canvas"]\').forEach')
+    assert wire_idx >= 0, "reopen-canvas click handler not wired in wireEvents"
+    window = src[wire_idx: wire_idx + 800]
+    assert "state.threadCanvases" in window
+    assert "state.canvas = {" in window
+
+
+def test_thread_switch_clears_threadCanvases():
+    """When the user switches threads, the session-artifacts strip must
+    reset — otherwise old canvases would bleed into the new thread."""
+    src = _read_index_html()
+    load_at = src.find("async function loadActiveMessages")
+    assert load_at >= 0
+    window = src[load_at: load_at + 2000]
+    assert "state.threadCanvases = []" in window, (
+        "loadActiveMessages doesn't reset state.threadCanvases on "
+        "thread switch — the chip strip will leak across threads."
+    )
