@@ -629,13 +629,21 @@ def run_loop(
 
         # ── Process tool calls ──
         if tool_calls_data:
-            # Add assistant message with tool calls
+            # Add assistant message with tool calls. The `arguments`
+            # field is normalized to valid JSON before persistence:
+            # streaming can leave us with `""` (no args were streamed)
+            # or fragmented payloads, and providers like Alibaba
+            # DashScope strictly validate and 400 on anything that
+            # isn't parseable JSON. See `normalize_args_for_api`.
             assistant_msg = {"role": "assistant", "content": full_content}
             assistant_msg["tool_calls"] = [
                 {
                     "id": tc["id"],
                     "type": "function",
-                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": normalize_args_for_api(tc["arguments"], json_repair_fn),
+                    },
                 }
                 for tc in tool_calls_data.values()
             ]
@@ -829,6 +837,38 @@ def _parse_tool_args(raw: str, repair_fn=None) -> dict | None:
                     pass
         _log.warning(f"failed to parse tool args: {raw[:100]}")
         return None
+
+
+def normalize_args_for_api(raw: str, repair_fn=None) -> str:
+    """Return a JSON-string suitable for the assistant message's
+    ``function.arguments`` field. Always returns valid JSON.
+
+    The streaming accumulation in delta.tool_calls.function.arguments
+    can leave us with an empty string (model emitted no args), or a
+    fragmented string that's not parseable as-is. OpenAI's API
+    silently treats ``""`` as ``"{}"``, but **Alibaba DashScope
+    strictly validates** and 400s with ``InternalError.Algo.
+    InvalidParameter: The "function.arguments" parameter of the code
+    model must be in JSON format.``
+
+    Mirroring OpenAI's lenient behavior client-side here keeps every
+    strict-validation provider happy without per-provider branches:
+
+      - empty / whitespace        →  ``"{}"``
+      - valid JSON object         →  re-serialized canonical form
+      - malformed but repairable  →  repaired JSON
+      - truly broken              →  ``"{}"`` (caller's executor
+                                       still sees the raw string via
+                                       its own ``_parse_tool_args`` call
+                                       and surfaces a tool_result error)
+    """
+    parsed = _parse_tool_args(raw, repair_fn)
+    if parsed is None:
+        return "{}"
+    try:
+        return json.dumps(parsed, ensure_ascii=False)
+    except Exception:
+        return "{}"
 
 
 from utils import strip_thinking as _strip_thinking, extract_thinking as _extract_thinking

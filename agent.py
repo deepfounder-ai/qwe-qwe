@@ -1747,12 +1747,22 @@ def _run_inner_body(user_input: str, thread_id: str | None,
 
         # Process tool calls
         if tool_calls_data:
+            # `arguments` is normalized to valid JSON before persistence
+            # — streaming can leave us with `""` (no args streamed) and
+            # strict providers (Alibaba DashScope) 400 with
+            # "InternalError.Algo.InvalidParameter" on the next turn
+            # when this is replayed as history. See
+            # `agent_loop.normalize_args_for_api`.
+            from agent_loop import normalize_args_for_api
             assistant_msg = {"role": "assistant", "content": full_content}
             assistant_msg["tool_calls"] = [
                 {
                     "id": tc["id"],
                     "type": "function",
-                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": normalize_args_for_api(tc["arguments"]),
+                    },
                 }
                 for tc in tool_calls_data.values()
             ]

@@ -137,3 +137,90 @@ def test_empty_tool_names_returns_none():
 def test_plain_prose_returns_none():
     assert _extract_tool_from_text(
         "Hello, just a plain sentence with no tool call.", TOOLS) is None
+
+
+# ── normalize_args_for_api — strict-provider compat ──────────────────
+#
+# Reported: Alibaba DashScope (via OpenRouter) 400s with
+#   InternalError.Algo.InvalidParameter:
+#     The "function.arguments" parameter of the code model must be in
+#     JSON format.
+# Root cause: the streaming accumulation in delta.tool_calls leaves
+# `tc["arguments"]` as `""` when the model emits a tool call with no
+# args. OpenAI accepts `""` silently as `{}`; Alibaba strict-validates.
+# `normalize_args_for_api` mirrors OpenAI's lenient behavior so the
+# message we replay back to ANY strict provider is always valid JSON.
+
+
+from agent_loop import normalize_args_for_api  # noqa: E402
+
+
+def test_normalize_empty_string_becomes_object_literal():
+    """The actual bug: streaming accumulated `""` for a zero-arg tool
+    call. Must round-trip to a parseable `{}`."""
+    assert normalize_args_for_api("") == "{}"
+    assert normalize_args_for_api("   ") == "{}"
+    assert normalize_args_for_api("\n") == "{}"
+
+
+def test_normalize_passes_valid_json_through():
+    out = normalize_args_for_api('{"port": "COM3", "baud": 9600}')
+    # Re-canonicalized but semantically identical
+    import json
+    assert json.loads(out) == {"port": "COM3", "baud": 9600}
+
+
+def test_normalize_unicode_not_escaped():
+    """`ensure_ascii=False` keeps form data and prompts readable. The
+    canvas / memory paths routinely carry Cyrillic / CJK."""
+    raw = '{"title": "Привет"}'
+    out = normalize_args_for_api(raw)
+    assert "Привет" in out
+
+
+def test_normalize_falls_back_to_empty_on_unrepairable():
+    """Truly broken arguments → `{}` rather than passing garbage to the
+    next-turn API call. The executor will still see the raw string and
+    surface a tool_result error."""
+    assert normalize_args_for_api("not even close to JSON {{{") == "{}"
+
+
+def test_normalize_uses_repair_fn_when_supplied():
+    """Common trailing-comma / single-quote repairs that some models
+    emit should round-trip cleanly when a repair_fn is plugged in."""
+    def fake_repair(raw: str) -> str | None:
+        # Pretend our json-repair fixes single quotes
+        return raw.replace("'", '"')
+    out = normalize_args_for_api("{'port': 'COM3'}", fake_repair)
+    import json
+    assert json.loads(out) == {"port": "COM3"}
+
+
+def test_normalize_returns_string_not_dict():
+    """`function.arguments` MUST be a JSON STRING on the wire. Passing
+    a dict here would be re-encoded by the OpenAI client but some
+    providers reject anyway, and this is the contract the OpenAI tool-
+    calling spec specifies."""
+    out = normalize_args_for_api('{"a": 1}')
+    assert isinstance(out, str)
+    out_empty = normalize_args_for_api("")
+    assert isinstance(out_empty, str)
+
+
+def test_normalize_used_when_building_assistant_msg_tool_calls():
+    """The actual fix in agent_loop.py and agent.py: the assistant
+    message's tool_calls[*].function.arguments goes through this
+    helper, so streaming-accumulated raw arguments can never reach the
+    strict-validator providers as `""` or other garbage. Pinned via a
+    source-grep contract — if a future refactor reverts to raw
+    `tc["arguments"]`, this test fails loud."""
+    from pathlib import Path
+    for relpath in ("agent_loop.py", "agent.py"):
+        src = (Path(__file__).resolve().parent.parent / relpath).read_text(encoding="utf-8")
+        # The assistant_msg construction must run arguments through
+        # normalize_args_for_api before persisting.
+        assert "normalize_args_for_api" in src, (
+            f"{relpath} no longer routes tool_call arguments through "
+            f"normalize_args_for_api. This re-opens the Alibaba 400 "
+            f"\"function.arguments must be in JSON format\" bug."
+        )
