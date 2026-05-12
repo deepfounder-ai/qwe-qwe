@@ -130,3 +130,90 @@ def test_scheduler_fires_normally_when_under_budget(qwe_temp_data_dir, mock_llm)
     ).fetchone()
     # Should NOT be skipped — actual run happens (status='ok' or 'err' via mock)
     assert row[0] != "skipped"
+
+
+# ---------------------------------------------------------------------------
+# API endpoint tests
+# ---------------------------------------------------------------------------
+
+def _client():
+    from fastapi.testclient import TestClient
+    import server
+    return TestClient(server.app)
+
+
+def test_get_budget_endpoint_unset(qwe_temp_data_dir):
+    import db
+    conn = db._get_conn()
+    conn.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, enabled) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("test", "x", "0 9 * * *", time.time() + 3600, 1),
+    )
+    conn.commit()
+    cron_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    client = _client()
+    r = client.get(f"/api/routines/{cron_id}/budget")
+    j = r.json()
+    assert j["cap"] is None
+
+
+def test_set_budget_endpoint_happy(qwe_temp_data_dir):
+    import db
+    conn = db._get_conn()
+    conn.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, enabled) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("test", "x", "0 9 * * *", time.time() + 3600, 1),
+    )
+    conn.commit()
+    cron_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    client = _client()
+    r = client.post(f"/api/routines/{cron_id}/budget",
+                    json={"cap": 1.50, "period_sec": 3600})
+    assert r.status_code == 200
+
+    # Verify it stuck
+    r2 = client.get(f"/api/routines/{cron_id}/budget")
+    j = r2.json()
+    assert j["cap"] == 1.50
+    assert j["period_sec"] == 3600
+
+
+def test_set_budget_endpoint_clear(qwe_temp_data_dir):
+    import db
+    conn = db._get_conn()
+    conn.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, enabled, budget_usd_cap) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("test", "x", "0 9 * * *", time.time() + 3600, 1, 5.00),
+    )
+    conn.commit()
+    cron_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    client = _client()
+    r = client.post(f"/api/routines/{cron_id}/budget",
+                    json={"cap": None, "period_sec": 86400})
+    assert r.status_code == 200
+
+    r2 = client.get(f"/api/routines/{cron_id}/budget")
+    assert r2.json()["cap"] is None
+
+
+def test_set_budget_endpoint_rejects_negative(qwe_temp_data_dir):
+    import db
+    conn = db._get_conn()
+    conn.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, enabled) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("test", "x", "0 9 * * *", time.time() + 3600, 1),
+    )
+    conn.commit()
+    cron_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    client = _client()
+    r = client.post(f"/api/routines/{cron_id}/budget",
+                    json={"cap": -1.0, "period_sec": 86400})
+    assert r.status_code == 400

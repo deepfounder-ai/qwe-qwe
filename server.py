@@ -2069,6 +2069,38 @@ async def get_routine_runs(cron_id: int, limit: int = 50):
     return db.get_runs_for_routine(cron_id, limit=limit)
 
 
+@app.get("/api/routines/{cron_id}/budget")
+async def get_routine_budget_endpoint(cron_id: int):
+    """Return current budget config + spend for a routine."""
+    b = db.get_routine_budget(cron_id)
+    if not b:
+        return {"cap": None, "period_sec": 86400, "spent": 0.0}
+    spent = db.get_routine_period_spend(cron_id, b["period_sec"])
+    return {"cap": b["cap"], "period_sec": b["period_sec"], "spent": spent}
+
+
+@app.post("/api/routines/{cron_id}/budget")
+async def set_routine_budget_endpoint(cron_id: int, body: dict):
+    """Set or clear a routine's budget cap.
+
+    body: {"cap": float|null, "period_sec": int}
+    cap=null clears the cap (no enforcement).
+    """
+    cap = body.get("cap")
+    period_sec = int(body.get("period_sec") or 86400)
+    if cap is not None:
+        cap = float(cap)
+        if cap < 0:
+            return JSONResponse({"ok": False, "error": "cap must be >= 0"}, status_code=400)
+    conn = db._get_conn()
+    conn.execute(
+        "UPDATE scheduled_tasks SET budget_usd_cap = ?, budget_period_sec = ? WHERE id = ?",
+        (cap, period_sec, int(cron_id)),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
 @app.post("/api/cron/{task_id}/toggle")
 async def toggle_cron(task_id: int, data: dict | None = None):
     """Pause or resume a routine.
