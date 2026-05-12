@@ -93,14 +93,53 @@ def _list_migrations() -> list[tuple[int, Path]]:
     return out
 
 
+def _iter_sql_statements(sql: str):
+    """Yield individual SQL statements from a migration script.
+
+    Strips ``--`` line comments *before* splitting on ``;`` — comments that
+    contain semicolons (e.g. ``-- doesn't rewrite rows; each …``) would
+    otherwise create spurious statement fragments.  Bare ``BEGIN`` / ``COMMIT``
+    / ``ROLLBACK`` tokens are skipped so callers can manage their own
+    transaction.  Splitting on ``;`` is safe for our migration files — none of
+    them embed semicolons inside string literals.
+    """
+    # Strip line comments first so in-comment semicolons don't mislead the splitter.
+    clean_lines = [ln.split("--")[0] for ln in sql.splitlines()]
+    clean_sql = "\n".join(clean_lines)
+    for raw in clean_sql.split(";"):
+        stmt = raw.strip()
+        if not stmt:
+            continue
+        if stmt.upper() in ("BEGIN", "COMMIT", "ROLLBACK"):
+            continue
+        yield stmt
+
+
 def _apply_one(conn: sqlite3.Connection, path: Path) -> None:
-    """Run one migration file inside a single transaction."""
+    """Run one migration file inside a single transaction.
+
+    Executes statements one-by-one (instead of ``executescript``) so that
+    ``ALTER TABLE ADD COLUMN`` statements that raise ``duplicate column name``
+    can be silently skipped.  This makes migrations idempotent when
+    ``scheduler._ensure_table()`` (or similar helpers) have already added a
+    column before the migration ran — a common cause of test flakiness when
+    the scheduler module is imported before the DB is fully migrated.
+    """
     sql = path.read_text(encoding="utf-8")
-    # We control the outer transaction explicitly so that the whole file
-    # is atomic — if any statement raises, nothing sticks.
     conn.execute("BEGIN")
     try:
-        conn.executescript(sql)
+        for stmt in _iter_sql_statements(sql):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" in str(exc).lower():
+                    # Column already exists — migration is effectively already
+                    # applied for this column; skip and continue.
+                    _log.debug(
+                        f"{path.name}: skipping already-present column ({exc})"
+                    )
+                    continue
+                raise
     except Exception:
         conn.rollback()
         raise
