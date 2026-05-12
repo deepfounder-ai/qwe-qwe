@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -563,3 +564,449 @@ def test_import_modal_handles_451_license_reprompt():
     # Re-opens with the license info
     assert "openSkillImportModal({" in body or "openSkillImportModal({" in body
     assert "accept_license" in body
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Extended coverage — round 2
+# ═══════════════════════════════════════════════════════════════════
+
+
+# ── Real-world SKILL.md samples (Anthropic frontmatter quirks) ────
+
+
+_ANTHROPIC_PDF_SKILL_MD = b"""---
+name: pdf
+description: Comprehensive PDF manipulation toolkit for reading text, extracting tables, creating new documents, merging files, and processing scanned PDFs with OCR.
+license: Complete terms in LICENSE.txt
+metadata:
+  version: 1.0.0
+---
+
+# PDF Skill
+
+Use this skill when you need to read, write, or manipulate PDF files.
+
+## When to Use
+
+- Extracting text or tables from PDFs
+- Creating new PDF documents
+- Merging or splitting PDFs
+"""
+
+# Frontmatter with no trailing newline, leading whitespace in values
+_ANTHROPIC_DOCX_SKILL_MD = b"""---
+name:   docx
+description:    Create and edit Word documents with formatting, tables, and images.
+license:   Complete terms in LICENSE.txt
+metadata:
+    version: 1.0
+---
+# Body
+"""
+
+# Empty `metadata:` block
+_MINIMAL_SKILL_MD = b"""---
+name: minimal
+description: A skill with no metadata.
+---
+
+# Minimal
+"""
+
+
+def test_parse_real_anthropic_pdf_frontmatter(si):
+    p = si.parse_skill_md(_ANTHROPIC_PDF_SKILL_MD.decode("utf-8"))
+    fm = p["frontmatter"]
+    assert fm["name"] == "pdf"
+    assert "PDF manipulation" in fm["description"]
+    # Anthropic's source-available license format — must be preserved
+    # verbatim so we can show it in the confirm panel.
+    assert fm["license"] == "Complete terms in LICENSE.txt"
+    assert isinstance(fm.get("metadata"), dict)
+    assert fm["metadata"].get("version") == "1.0.0"
+
+
+def test_parse_handles_leading_whitespace_in_values(si):
+    p = si.parse_skill_md(_ANTHROPIC_DOCX_SKILL_MD.decode("utf-8"))
+    assert p["frontmatter"]["name"] == "docx"
+    assert p["frontmatter"]["description"].startswith("Create and edit")
+
+
+def test_parse_handles_empty_metadata(si):
+    p = si.parse_skill_md(_MINIMAL_SKILL_MD.decode("utf-8"))
+    assert p["frontmatter"]["name"] == "minimal"
+    # metadata key missing entirely is fine
+    assert "version" not in p["frontmatter"]
+
+
+def test_parse_classifies_anthropic_license_as_non_oss(si):
+    """The Anthropic source-available license string MUST land in
+    the non-OSS bucket so the importer raises license_confirm_required
+    instead of silently installing. This is the main user-protection
+    surface for the whole feature."""
+    p = si.parse_skill_md(_ANTHROPIC_PDF_SKILL_MD.decode("utf-8"))
+    lic = p["frontmatter"]["license"]
+    assert not si._looks_like_oss_license(lic.upper())
+
+
+# ── HTTP error path coverage ──────────────────────────────────────
+
+
+def test_fetch_404_returns_not_found(si, monkeypatch):
+    """When the upstream returns 404 for the SKILL.md, the importer
+    should fall through to the fallback path (skills/<x> vs <x>)
+    and only then surface a clear not_found error."""
+    import urllib.error
+    calls = []
+    def _raise_404(url, max_bytes):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(si, "_fetch_url", _raise_404)
+    with pytest.raises(si.SkillImportError) as exc:
+        si.import_skill("https://skills.sh/anthropics/skills/nonexistent")
+    assert exc.value.code == "not_found"
+    assert exc.value.status == 404
+    # The skills.sh URL has fallback_path enabled → at least 2 attempts
+    # (skills/<x>/SKILL.md and <x>/SKILL.md)
+    assert len(calls) >= 2
+
+
+def test_fetch_500_surfaces_fetch_failed(si, monkeypatch):
+    import urllib.error
+    def _raise_500(url, max_bytes):
+        raise urllib.error.HTTPError(url, 500, "Internal", {}, None)
+    monkeypatch.setattr(si, "_fetch_url", _raise_500)
+    with pytest.raises(si.SkillImportError) as exc:
+        si.import_skill("https://skills.sh/x/y/z")
+    assert exc.value.code == "fetch_failed"
+    assert exc.value.status == 502
+
+
+def test_skill_md_size_cap_enforced(si, monkeypatch):
+    """SKILL.md > 100 KB cap should be rejected by _fetch_url's size
+    guard, surfacing as oversize."""
+    def _oversize(url, max_bytes):
+        raise si.SkillImportError(
+            f"Response exceeds {max_bytes} byte cap (URL={url!r}).",
+            code="oversize", status=413)
+    monkeypatch.setattr(si, "_fetch_url", _oversize)
+    with pytest.raises(si.SkillImportError) as exc:
+        si.import_skill("https://skills.sh/x/y/z")
+    assert exc.value.code == "oversize"
+
+
+def test_url_open_blocks_oversize_responses(si, monkeypatch):
+    """Direct test of the size cap inside _fetch_url itself —
+    monkeypatched urlopen returns more bytes than max_bytes."""
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body
+        def read(self, n=-1):
+            return self._body[:n] if n >= 0 else self._body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        # 50 KB of payload when cap is 30 KB → should be rejected
+        return _FakeResp(b"X" * 50_000)
+
+    # Skip the safety check (mocked DNS would also work but this is
+    # tighter — we just need urlopen to return).
+    monkeypatch.setattr(si, "_check_url_safety", lambda url: None)
+    import urllib.request as _ureq
+    monkeypatch.setattr(_ureq, "urlopen", _fake_urlopen)
+
+    with pytest.raises(si.SkillImportError) as exc:
+        si._fetch_url("https://skills.sh/x", max_bytes=30_000)
+    assert exc.value.code == "oversize"
+    assert exc.value.status == 413
+
+
+# ── Path-traversal defense for asset names ────────────────────────
+
+
+@pytest.mark.parametrize("malicious_path", [
+    "../escape.py",
+    "scripts/../../etc/passwd",
+    "scripts/foo/../../../home/user/.ssh/id_rsa.py",
+    "..",
+    "../",
+])
+def test_asset_path_rejects_traversal(si, malicious_path):
+    """The _is_safe_asset_path guard MUST reject any path containing
+    `..` components. The GitHub trees API wouldn't normally return
+    these, but defense in depth — a compromised intermediate API
+    (or a hand-crafted MITM if SSL bypassed) shouldn't be able to
+    write outside the staging dir."""
+    assert not si._is_safe_asset_path(malicious_path), (
+        f"Path-traversal asset {malicious_path!r} passed safety check"
+    )
+
+
+def test_import_skips_unsafe_asset_paths(si, monkeypatch):
+    """End-to-end: even if the tree API returns a malicious path,
+    the importer must skip it AND continue installing the rest of
+    the skill (one bad apple doesn't fail the whole import)."""
+    _skill_md = b"""---
+name: traversal-test
+description: Skill with malicious tree entries.
+license: MIT
+---
+body
+"""
+    _good_script = b"# good\n"
+
+    def _fake(url, max_bytes):
+        if url.endswith("/SKILL.md"):
+            return _skill_md
+        if "/git/trees/" in url:
+            return json.dumps({
+                "tree": [
+                    {"path": "skills/traversal-test/SKILL.md", "type": "blob", "size": len(_skill_md)},
+                    # Three traversal attempts
+                    {"path": "skills/traversal-test/../../etc/passwd.py", "type": "blob", "size": 100},
+                    {"path": "skills/traversal-test/../escape.py", "type": "blob", "size": 100},
+                    {"path": "skills/traversal-test/scripts/../../../leak.py", "type": "blob", "size": 100},
+                    # Legit
+                    {"path": "skills/traversal-test/scripts/good.py", "type": "blob", "size": len(_good_script)},
+                ],
+            }).encode("utf-8")
+        if url.endswith("/scripts/good.py"):
+            return _good_script
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(si, "_fetch_url", _fake)
+    res = si.import_skill("https://skills.sh/anthropics/skills/traversal-test")
+    assert res["name"] == "traversal-test"
+    # Only SKILL.md + good.py staged
+    assert "SKILL.md" in res["files_imported"]
+    assert "scripts/good.py" in res["files_imported"]
+    # None of the traversal attempts landed
+    assets = Path(res["assets_dir"])
+    for cousin in ("../passwd.py", "../escape.py", "../../leak.py"):
+        assert not (assets / cousin).exists(), (
+            f"path-traversal write succeeded: {cousin}")
+    # Nothing outside the staging dir was created
+    parent = assets.parent.parent  # ~/.qwe-qwe
+    assert not (parent / "passwd.py").exists()
+    assert not (parent / "leak.py").exists()
+
+
+# ── Idempotent re-import cycle ────────────────────────────────────
+
+
+def test_full_import_lifecycle(si, mock_http):
+    """import → exists → delete → gone → re-import → exists.
+    Repeating the cycle 3 times to catch any stale-state leak in
+    DB or filesystem."""
+    url = "https://skills.sh/anthropics/skills/pdf-helper"
+    for cycle in range(3):
+        res = si.import_skill(url, overwrite=(cycle > 0))
+        assert res["name"] == "pdf-helper"
+        assert (si._user_skills_dir() / "pdf-helper.py").exists()
+        rec = si.get_import_record("pdf-helper")
+        assert rec is not None
+        listed = si.list_imports()
+        assert len(listed) == 1, f"cycle {cycle}: duplicate rows in DB"
+
+        ok = si.delete_import("pdf-helper")
+        assert ok is True
+        assert not (si._user_skills_dir() / "pdf-helper.py").exists()
+        assert si.get_import_record("pdf-helper") is None
+        assert si.list_imports() == []
+
+
+def test_overwrite_updates_hash_and_imported_at(si, monkeypatch):
+    """Two imports with different SKILL.md content under the same
+    slug — second one must overwrite the DB record AND files."""
+    bodies = [b"""---
+name: changing
+description: First version.
+license: MIT
+---
+# v1
+""", b"""---
+name: changing
+description: Second version.
+license: MIT
+---
+# v2 NEW BODY
+"""]
+    counter = {"i": 0}
+    def _fake(url, max_bytes):
+        if url.endswith("/SKILL.md"):
+            return bodies[counter["i"]]
+        return b'{"tree": []}'
+    monkeypatch.setattr(si, "_fetch_url", _fake)
+
+    counter["i"] = 0
+    res1 = si.import_skill("https://skills.sh/x/y/changing")
+    rec1 = si.get_import_record("changing")
+    assert rec1["description"] == "First version."
+
+    counter["i"] = 1
+    res2 = si.import_skill("https://skills.sh/x/y/changing", overwrite=True)
+    rec2 = si.get_import_record("changing")
+    assert rec2["description"] == "Second version."
+    assert rec1["hash"] != rec2["hash"], "Hash should change on body change"
+    assert rec2["imported_at"] >= rec1["imported_at"]
+    # File was rewritten with new SKILL.md body embedded
+    py = Path(res2["py_path"]).read_text(encoding="utf-8")
+    assert "v2 NEW BODY" in py
+    assert "v1" not in py.replace("# v2 NEW BODY", "")  # the v1 string shouldn't linger
+
+
+# ── Activate + execute imported skill end-to-end ──────────────────
+
+
+def test_imported_skill_loads_via_skill_loader(si, mock_http):
+    """After import, qwe-qwe's `skills.list_all()` must include the
+    new skill AND `skills.enable()` must succeed AND
+    `skills.get_tools()` must surface the help tool. End-to-end
+    contract — without this, the import "works" but the agent
+    never actually sees the new tool."""
+    res = si.import_skill("https://skills.sh/anthropics/skills/pdf-helper")
+    assert res["name"] == "pdf-helper"
+
+    import skills
+    importlib.reload(skills)  # pick up the new .py file
+    all_skills = skills.list_all()
+    names = [s["name"] for s in all_skills]
+    assert "pdf-helper" in names, f"imported skill not in list_all: {names}"
+
+    # The list_all entry reports the right metadata
+    entry = next(s for s in all_skills if s["name"] == "pdf-helper")
+    assert entry["tools"] == 1  # the single <name>_help tool
+    assert "PDF" in entry["description"] or "pdf" in entry["description"].lower()
+
+
+def test_imported_skill_help_tool_returns_skill_md(si, mock_http):
+    """The <name>_help tool — the whole point of the adapter —
+    must return the SKILL.md body verbatim when called."""
+    res = si.import_skill("https://skills.sh/anthropics/skills/pdf-helper")
+
+    # Load the adapter module directly + call execute()
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_pdf_helper_under_test", res["py_path"])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    out = mod.execute("pdf_helper_help", {})
+    assert "When the user asks about a PDF" in out, (
+        f"<name>_help tool didn't return the SKILL.md body. Got: {out!r}"
+    )
+    # Unknown tool name returns a friendly error, not a crash
+    err = mod.execute("nonexistent", {})
+    assert "Unknown tool" in err
+
+
+# ── SQL injection defense ─────────────────────────────────────────
+
+
+def test_no_sql_injection_via_name_field(si, monkeypatch):
+    """Even if the parser somehow let through a name with SQL meta-
+    characters (which the regex blocks — `[a-z0-9-]` doesn't include
+    `'` `"` `;` `--`), the parametrised INSERT we use can't be
+    exploited. This test is paranoid defense — proves the regex AND
+    the parameterised query both work."""
+    # Direct: bad name fails at _check_name
+    for evil in ["x'; DROP TABLE skill_imports; --", 'x" OR "1"="1', "x;DROP"]:
+        with pytest.raises(si.SkillImportError):
+            si._check_name(evil)
+
+    # If _check_name were somehow bypassed (defence in depth), the
+    # parameterised INSERT still defangs it. We test by writing
+    # directly to _record_import with a weird-but-non-fatal name.
+    si._record_import(
+        name="legit-name", source_url="https://skills.sh/x/y/legit-name",
+        source_kind="skills_sh", hash_="abc",
+        license_field="MIT", description="x';--",
+        meta={"injection": "'; DROP TABLE skill_imports; --"},
+    )
+    # Table still exists + row still readable
+    rec = si.get_import_record("legit-name")
+    assert rec is not None
+    assert rec["description"] == "x';--"  # stored as literal
+
+
+# ── Long-running / oversize file budget ───────────────────────────
+
+
+def test_total_fetch_budget_stops_staging(si, monkeypatch):
+    """Total bytes cap (_TOTAL_FETCH_CAP) should stop the asset-staging
+    loop early — a malicious / huge upstream shouldn't be able to
+    fill our disk via a single import."""
+    big_chunk = b"X" * (si._SKILL_MD_CAP * 3)  # one file = 3/4 of the total cap
+    _md = b"""---
+name: bloat
+description: Big assets.
+license: MIT
+---
+body
+"""
+
+    def _fake(url, max_bytes):
+        if url.endswith("/SKILL.md"):
+            return _md
+        if "/git/trees/" in url:
+            return json.dumps({
+                "tree": [{"path": f"skills/bloat/scripts/big{i}.py",
+                          "type": "blob", "size": len(big_chunk)}
+                         for i in range(5)],
+            }).encode("utf-8")
+        return big_chunk
+    monkeypatch.setattr(si, "_fetch_url", _fake)
+
+    res = si.import_skill("https://skills.sh/x/y/bloat")
+    # Some assets staged, but NOT all 5 — the budget cut in early
+    staged = [f for f in res["files_imported"] if f.startswith("scripts/")]
+    assert 0 < len(staged) < 5, (
+        f"budget didn't cap fetch: staged {len(staged)} files"
+    )
+
+
+# ── Live integration (gated; default skip) ────────────────────────
+
+
+_LIVE_TESTS_ENABLED = bool(os.environ.get("RUN_LIVE_TESTS"))
+
+
+@pytest.mark.skipif(not _LIVE_TESTS_ENABLED,
+                     reason="live network test — opt in with RUN_LIVE_TESTS=1")
+def test_live_anthropic_pdf_skill_imports(si, qwe_temp_data_dir):
+    """End-to-end against the real anthropics/skills repo. Skipped
+    by default — opt in via RUN_LIVE_TESTS=1 for manual verification.
+
+    This test catches:
+      - Real-world frontmatter quirks my parser missed
+      - skills.sh API drift
+      - Network / SSRF guard misconfiguration
+      - GitHub trees API rate limits
+      - 451 confirm flow against the actual Anthropic license
+    """
+    # Anthropic's pdf skill has a non-OSS license — first call MUST
+    # return license_confirm_required.
+    with pytest.raises(si.SkillImportError) as exc:
+        si.import_skill("https://skills.sh/anthropics/skills/pdf")
+    assert exc.value.code == "license_confirm_required", (
+        f"Anthropic pdf no longer returns 451? Got {exc.value.code} / "
+        f"{exc.value.details}"
+    )
+    license_text = exc.value.details.get("license", "")
+    assert license_text, "license missing from 451 details"
+
+    # With accept_license, install succeeds and the adapter validates
+    res = si.import_skill(
+        "https://skills.sh/anthropics/skills/pdf",
+        accept_license=True,
+    )
+    assert res["name"] == "pdf"
+    import skills
+    import importlib as _imp
+    _imp.reload(skills)
+    ok, errs = skills.validate_skill(res["py_path"])
+    assert ok is True, f"live-import adapter failed validation: {errs}"
+
+
