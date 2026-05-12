@@ -371,6 +371,7 @@ def run_loop(
     abort_event=None,
     ctx=None,
     thread_id: str | None = None,
+    system_note: str | None = None,
 ) -> dict:
     """Run the agent loop.
 
@@ -393,6 +394,11 @@ def run_loop(
         ctx: optional :class:`turn_context.TurnContext`. When given, its
             ``abort_event`` is used if ``abort_event=`` wasn't passed, and the
             ctx is stashed on the tools module so tool executions can reach it.
+        system_note: optional one-shot system message injected once at the start
+            of this run, right after the soul system prompt (messages[0]). NOT
+            persisted, NOT carried into subsequent turns. Used by
+            resume_interrupted_run to nudge the model without injecting a
+            [system] user-role message (CLAUDE.md OpenCode lesson).
 
     Returns:
         dict with: reply, thinking, tool_calls, finish_reason, stats
@@ -406,6 +412,15 @@ def run_loop(
     if tool_executor is None:
         import tools as _tools
         tool_executor = _tools.execute
+
+    # Inject system_note as a one-shot system message right after the soul
+    # system prompt (messages[0]). This must happen before any LLM call so
+    # the model sees it on the first (and only) turn it matters. NOT
+    # persisted — lives only in this local messages list copy.
+    if system_note:
+        _insert_idx = 1 if messages and messages[0].get("role") == "system" else 0
+        messages = list(messages)  # shallow copy — don't mutate caller's list
+        messages.insert(_insert_idx, {"role": "system", "content": system_note})
 
     # ── Agent-run instrumentation ──────────────────────────────────────────
     _run_started = time.time()

@@ -119,3 +119,69 @@ def test_get_resumable_run_excludes_already_resumed_original(qwe_temp_data_dir):
                          resumed_from_run_id=original)
     found = db.get_resumable_run_for_thread("t1", source_filter="web", ttl_sec=86400)
     assert found is None
+
+
+def test_agent_run_accepts_system_note_kwarg(qwe_temp_data_dir, monkeypatch):
+    """system_note=... should be accepted; agent.run doesn't crash on it."""
+    from types import SimpleNamespace
+    import agent
+    import providers
+
+    # Build a minimal streaming-compatible fake client.
+    class _Delta:
+        def __init__(self, content=""):
+            self.content = content
+            self.tool_calls = None
+            self.role = "assistant"
+            self.reasoning_content = None
+            self.reasoning = None
+
+    class _Chunk:
+        def __init__(self, content="", finish=None):
+            self.choices = [SimpleNamespace(delta=_Delta(content), finish_reason=finish,
+                                            message=_Delta(content))]
+            self.usage = None
+            self.id = "fake"
+            self.model = "fake-model"
+
+    class _Completions:
+        def create(self, **kw):
+            if kw.get("stream"):
+                def _gen():
+                    yield _Chunk(content="ok", finish=None)
+                    usage = SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7)
+                    yield _Chunk(content="", finish="stop")
+                return _gen()
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="ok", tool_calls=None, role="assistant"),
+                    finish_reason="stop",
+                )],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+                id="fake",
+                model="fake-model",
+            )
+
+    class _FakeClient:
+        chat = SimpleNamespace(completions=_Completions())
+
+    monkeypatch.setattr(providers, "get_client", lambda: _FakeClient(), raising=False)
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model", raising=False)
+
+    # Even with user_input=None, providing a system_note alone should work.
+    # We don't assert on the model's reply here — just that the call accepts
+    # the kwarg and returns something without raising.
+    out = agent.run(
+        user_input=None,
+        thread_id="t-system-note",
+        system_note="Continue from where you left off.",
+        source="cli",
+    )
+    assert out is not None
+
+
+def test_agent_run_user_input_none_with_no_system_note_raises(qwe_temp_data_dir):
+    """user_input=None AND system_note=None is invalid — must raise ValueError."""
+    import agent
+    with pytest.raises(ValueError):
+        agent.run(user_input=None, thread_id="t1", source="cli")
