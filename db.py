@@ -515,7 +515,7 @@ def get_runs_for_thread(thread_id: str, limit: int = 50, offset: int = 0) -> lis
             "started_at", "finished_at", "duration_ms", "status", "error",
             "result_preview", "model", "provider",
             "input_tokens", "output_tokens", "cost_usd")
-    return [dict(zip(cols, r)) for r in rows]
+    return [dict(zip(cols, r, strict=True)) for r in rows]
 
 
 def get_thread_totals(thread_id: str) -> dict:
@@ -591,4 +591,4 @@ def get_runs_for_routine(cron_id: int, limit: int = 50) -> list[dict]:
     cols = ("id", "thread_id", "scheduled_at", "started_at", "finished_at",
             "duration_ms", "status", "error", "result_preview",
             "input_tokens", "output_tokens", "cost_usd", "model", "provider")
-    return [dict(zip(cols, r)) for r in rows]
+    return [dict(zip(cols, r, strict=True)) for r in rows]
