@@ -12,7 +12,10 @@ import json
 import re
 import subprocess
 import time
+import db
 import logger
+import pricing
+import providers
 from agent_events import EventEmitter, AgentEvent, EVT_BUDGET_WARNING
 from agent_budget import BudgetLimits, BudgetStats, check_budget, warning_check
 
@@ -367,6 +370,7 @@ def run_loop(
     extra_kwargs: dict | None = None,
     abort_event=None,
     ctx=None,
+    thread_id: str | None = None,
 ) -> dict:
     """Run the agent loop.
 
@@ -403,6 +407,22 @@ def run_loop(
         import tools as _tools
         tool_executor = _tools.execute
 
+    # ── Agent-run instrumentation ──────────────────────────────────────────
+    _run_started = time.time()
+    _provider = providers.get_active_name()
+    _thread_id = db._tid(thread_id)  # resolve: explicit > active > default
+    _run_id = db.insert_agent_run(
+        thread_id=_thread_id,
+        source=(ctx.source if ctx else "cli"),
+        started_at=_run_started,
+        status="running",
+        cron_id=(ctx.cron_id if ctx else None),
+        model=model,
+        provider=_provider,
+    )
+    _final_status = "ok"
+    _final_error: str | None = None
+
     stats = BudgetStats()
     all_tool_calls: list[str] = []
     all_tool_details: list[dict] = []  # {name, args, result} for history
@@ -426,68 +446,54 @@ def run_loop(
     total_gen_ms = 0
     total_output_tokens = 0
 
-    while True:
-        # ── Budget check ──
-        decision = check_budget(budget, stats)
-        if decision.exceeded:
-            _log.warning(f"budget exceeded: {decision.reason}")
-            emitter.status(f"Budget: {decision.reason}")
-            # Generate summary so model remembers what it did
-            if not final_content and all_tool_calls:
-                tools_summary = ", ".join(dict.fromkeys(all_tool_calls))  # unique, ordered
-                final_content = f"[Task completed with {len(all_tool_calls)} tool calls: {tools_summary}. Budget limit reached.]"
-            break
+    try:
+        while True:
+            # ── Budget check ──
+            decision = check_budget(budget, stats)
+            if decision.exceeded:
+                _log.warning(f"budget exceeded: {decision.reason}")
+                emitter.status(f"Budget: {decision.reason}")
+                # Generate summary so model remembers what it did
+                if not final_content and all_tool_calls:
+                    tools_summary = ", ".join(dict.fromkeys(all_tool_calls))  # unique, ordered
+                    final_content = f"[Task completed with {len(all_tool_calls)} tool calls: {tools_summary}. Budget limit reached.]"
+                break
 
-        # Abort check — user pressed Stop
-        if abort_event and abort_event.is_set():
-            _log.info("abort: user requested stop")
-            final_content = "⏹ Stopped."
-            break
+            # Abort check — user pressed Stop
+            if abort_event and abort_event.is_set():
+                _log.info("abort: user requested stop")
+                final_content = "⏹ Stopped."
+                break
 
-        # Layer 4: force finish — after loop detection, let model produce one more reply then stop
-        if _force_finish and stats.turns > 1 and final_content:
-            _log.info("force finish: breaking after loop detection")
-            break
+            # Layer 4: force finish — after loop detection, let model produce one more reply then stop
+            if _force_finish and stats.turns > 1 and final_content:
+                _log.info("force finish: breaking after loop detection")
+                break
 
-        # Fix 1: Clear old tool results to prevent context overflow (Tier 1 clearing)
-        if stats.turns > 0:
-            _clear_old_tool_results(messages)
+            # Fix 1: Clear old tool results to prevent context overflow (Tier 1 clearing)
+            if stats.turns > 0:
+                _clear_old_tool_results(messages)
 
-        # Budget warning to model (inject once)
-        if not _budget_warned:
-            warning = warning_check(budget, stats)
-            if warning:
-                messages.append({"role": "user", "content": f"[system] {warning}. Give final answer."})
-                emitter.emit(AgentEvent(EVT_BUDGET_WARNING, {"message": warning}))
-                _budget_warned = True
+            # Budget warning to model (inject once)
+            if not _budget_warned:
+                warning = warning_check(budget, stats)
+                if warning:
+                    messages.append({"role": "user", "content": f"[system] {warning}. Give final answer."})
+                    emitter.emit(AgentEvent(EVT_BUDGET_WARNING, {"message": warning}))
+                    _budget_warned = True
 
-        stats.add_turn()
-        emitter.emit(AgentEvent("turn_start", {"turn": stats.turns}))
+            stats.add_turn()
+            emitter.emit(AgentEvent("turn_start", {"turn": stats.turns}))
 
-        # ── Call LLM ──
-        stream_start = time.time()
-        first_token_ts: float | None = None  # moment the first content/reasoning/tool chunk arrives
-        full_content = ""
-        reasoning_content = ""
-        tool_calls_data: dict[int, dict] = {}
-        finish_reason = None
-        usage = None
+            # ── Call LLM ──
+            stream_start = time.time()
+            first_token_ts: float | None = None  # moment the first content/reasoning/tool chunk arrives
+            full_content = ""
+            reasoning_content = ""
+            tool_calls_data: dict[int, dict] = {}
+            finish_reason = None
+            usage = None
 
-        try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
-                temperature=temperature,
-                presence_penalty=presence_penalty,
-                max_tokens=max_tokens,
-                stream=True,
-                stream_options={"include_usage": True},
-                **extra,
-            )
-        except Exception:
-            # Fallback without stream_options
             try:
                 stream = client.chat.completions.create(
                     model=model,
@@ -498,322 +504,362 @@ def run_loop(
                     presence_penalty=presence_penalty,
                     max_tokens=max_tokens,
                     stream=True,
+                    stream_options={"include_usage": True},
                     **extra,
                 )
-            except Exception as e:
-                # Vision fallback — strip images if not supported
-                if "image" in str(e).lower() or "mmproj" in str(e).lower():
-                    _log.warning(f"vision not supported, stripping images")
-                    emitter.status("Model doesn't support images, retrying...")
-                    for m in messages:
-                        if isinstance(m.get("content"), list):
-                            text_parts = [p["text"] for p in m["content"] if p.get("type") == "text"]
-                            m["content"] = " ".join(text_parts) + "\n(Image attached but model doesn't support vision.)"
+            except Exception:
+                # Fallback without stream_options
+                try:
                     stream = client.chat.completions.create(
-                        model=model, messages=messages,
+                        model=model,
+                        messages=messages,
                         tools=tools if tools else None,
                         tool_choice="auto" if tools else None,
-                        temperature=temperature, max_tokens=max_tokens,
-                        stream=True, **extra,
+                        temperature=temperature,
+                        presence_penalty=presence_penalty,
+                        max_tokens=max_tokens,
+                        stream=True,
+                        **extra,
                     )
-                else:
-                    raise
-
-        # ── Process stream ──
-        in_think = False
-        _think_detected = False
-        for chunk in stream:
-            # Abort mid-stream
-            if abort_event and abort_event.is_set():
-                _log.info("abort: stopping stream mid-generation")
-                break
-            # Usage from final chunk
-            if hasattr(chunk, 'usage') and chunk.usage:
-                usage = chunk.usage
-
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if not delta:
-                continue
-
-            finish_reason = chunk.choices[0].finish_reason
-
-            # Mark time-to-first-token on the first chunk carrying any real
-            # output (content / reasoning / tool_calls). `first_token_ts`
-            # then anchors generation-speed measurement, stripping out the
-            # prompt-processing latency that precedes the first token.
-            if first_token_ts is None and (
-                delta.content
-                or getattr(delta, "reasoning_content", None)
-                or getattr(delta, "reasoning", None)
-                or delta.tool_calls
-            ):
-                first_token_ts = time.time()
-
-            # Reasoning content (Qwen/DeepSeek native thinking)
-            rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-            if rc:
-                reasoning_content += rc
-                if not in_think:
-                    emitter.status("thinking...")
-                    in_think = True
-                emitter.thinking(rc)
-
-            # Text content
-            if delta.content:
-                full_content += delta.content
-                text = delta.content
-
-                # Detect <think> tags in content (check only new text, not full_content)
-                if not _think_detected and "<think>" in text:
-                    in_think = True
-                    _think_detected = True
-                    emitter.status("thinking...")
-                elif in_think and "</think>" in text:
-                    in_think = False
-                    emitter.status("writing reply...")
-                elif "<|channel>" in text and not _think_detected:
-                    in_think = True
-                    emitter.status("thinking...")
-                elif in_think:
-                    emitter.thinking(text)
-                elif "<|" in text:
-                    pass  # skip special tokens
-                else:
-                    emitter.content(text)
-
-            # Tool calls
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_calls_data:
-                        tool_calls_data[idx] = {"id": "", "name": "", "arguments": ""}
-                    if tc_delta.id:
-                        tool_calls_data[idx]["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            tool_calls_data[idx]["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tool_calls_data[idx]["arguments"] += tc_delta.function.arguments
-
-        stream_end = time.time()
-        stream_ms = int((stream_end - stream_start) * 1000)
-        if first_token_ts is not None:
-            gen_ms = int((stream_end - first_token_ts) * 1000)
-            ttft_ms = int((first_token_ts - stream_start) * 1000)
-        else:
-            gen_ms = 0
-            ttft_ms = stream_ms
-
-        # Track tokens
-        turn_output_tokens = 0
-        if usage:
-            turn_output_tokens = getattr(usage, 'completion_tokens', 0)
-            stats.add_tokens(
-                input_tok=getattr(usage, 'prompt_tokens', 0),
-                output_tok=turn_output_tokens,
-            )
-        else:
-            # No usage from provider — estimate from content length
-            turn_output_tokens = max(1, len(full_content) // 4)
-
-        # Aggregate across turns so tool-call flows get a sensible average.
-        if gen_ms > 0 and turn_output_tokens > 0:
-            total_gen_ms += gen_ms
-            total_output_tokens += turn_output_tokens
-
-        _log.info(
-            f"turn {stats.turns}: finish={finish_reason}, content={len(full_content)}, "
-            f"tools={len(tool_calls_data)}, ttft_ms={ttft_ms}, gen_ms={gen_ms}, "
-            f"stream_ms={stream_ms}, out_tok={turn_output_tokens}"
-        )
-
-        # ── Process tool calls ──
-        if tool_calls_data:
-            # Add assistant message with tool calls. The `arguments`
-            # field is normalized to valid JSON before persistence:
-            # streaming can leave us with `""` (no args were streamed)
-            # or fragmented payloads, and providers like Alibaba
-            # DashScope strictly validate and 400 on anything that
-            # isn't parseable JSON. See `normalize_args_for_api`.
-            assistant_msg = {"role": "assistant", "content": full_content}
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": normalize_args_for_api(tc["arguments"], json_repair_fn),
-                    },
-                }
-                for tc in tool_calls_data.values()
-            ]
-            messages.append(assistant_msg)
-
-            for tc in tool_calls_data.values():
-                # Layer 3: tool_search short-circuit
-                if tc["name"] == "tool_search":
-                    _tool_search_count += 1
-                    if _tool_search_count > 1:
-                        tool_result = (
-                            "STOP: tools already activated. Do NOT call tool_search again. "
-                            "Call the actual tool directly (e.g., browser_open, browser_snapshot)."
+                except Exception as e:
+                    # Vision fallback — strip images if not supported
+                    if "image" in str(e).lower() or "mmproj" in str(e).lower():
+                        _log.warning(f"vision not supported, stripping images")
+                        emitter.status("Model doesn't support images, retrying...")
+                        for m in messages:
+                            if isinstance(m.get("content"), list):
+                                text_parts = [p["text"] for p in m["content"] if p.get("type") == "text"]
+                                m["content"] = " ".join(text_parts) + "\n(Image attached but model doesn't support vision.)"
+                        stream = client.chat.completions.create(
+                            model=model, messages=messages,
+                            tools=tools if tools else None,
+                            tool_choice="auto" if tools else None,
+                            temperature=temperature, max_tokens=max_tokens,
+                            stream=True, **extra,
                         )
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
-                        continue
+                    else:
+                        raise
 
-                # Parse arguments
-                args = _parse_tool_args(tc["arguments"], json_repair_fn)
-                if args is None:
-                    tool_result = f"Error: invalid JSON arguments: {tc['arguments'][:100]}"
-                    stats.add_error()
-                    _emit_tool_error_telemetry(tc["name"], "validation_failed")
-                else:
-                    # Self-check for dangerous tools
-                    if self_check_fn and args:
-                        ok, fixed = self_check_fn(tc["name"], args)
-                        if not ok and fixed:
-                            args = fixed
-                        elif not ok:
-                            tool_result = "Error: self-check rejected this action."
+            # ── Process stream ──
+            in_think = False
+            _think_detected = False
+            for chunk in stream:
+                # Abort mid-stream
+                if abort_event and abort_event.is_set():
+                    _log.info("abort: stopping stream mid-generation")
+                    break
+                # Usage from final chunk
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = chunk.usage
+
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    continue
+
+                finish_reason = chunk.choices[0].finish_reason
+
+                # Mark time-to-first-token on the first chunk carrying any real
+                # output (content / reasoning / tool_calls). `first_token_ts`
+                # then anchors generation-speed measurement, stripping out the
+                # prompt-processing latency that precedes the first token.
+                if first_token_ts is None and (
+                    delta.content
+                    or getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                    or delta.tool_calls
+                ):
+                    first_token_ts = time.time()
+
+                # Reasoning content (Qwen/DeepSeek native thinking)
+                rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if rc:
+                    reasoning_content += rc
+                    if not in_think:
+                        emitter.status("thinking...")
+                        in_think = True
+                    emitter.thinking(rc)
+
+                # Text content
+                if delta.content:
+                    full_content += delta.content
+                    text = delta.content
+
+                    # Detect <think> tags in content (check only new text, not full_content)
+                    if not _think_detected and "<think>" in text:
+                        in_think = True
+                        _think_detected = True
+                        emitter.status("thinking...")
+                    elif in_think and "</think>" in text:
+                        in_think = False
+                        emitter.status("writing reply...")
+                    elif "<|channel>" in text and not _think_detected:
+                        in_think = True
+                        emitter.status("thinking...")
+                    elif in_think:
+                        emitter.thinking(text)
+                    elif "<|" in text:
+                        pass  # skip special tokens
+                    else:
+                        emitter.content(text)
+
+                # Tool calls
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_data:
+                            tool_calls_data[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc_delta.id:
+                            tool_calls_data[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_data[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_data[idx]["arguments"] += tc_delta.function.arguments
+
+            stream_end = time.time()
+            stream_ms = int((stream_end - stream_start) * 1000)
+            if first_token_ts is not None:
+                gen_ms = int((stream_end - first_token_ts) * 1000)
+                ttft_ms = int((first_token_ts - stream_start) * 1000)
+            else:
+                gen_ms = 0
+                ttft_ms = stream_ms
+
+            # Track tokens
+            turn_output_tokens = 0
+            if usage:
+                turn_output_tokens = getattr(usage, 'completion_tokens', 0)
+                stats.add_tokens(
+                    input_tok=getattr(usage, 'prompt_tokens', 0),
+                    output_tok=turn_output_tokens,
+                )
+            else:
+                # No usage from provider — estimate from content length
+                turn_output_tokens = max(1, len(full_content) // 4)
+
+            # Aggregate across turns so tool-call flows get a sensible average.
+            if gen_ms > 0 and turn_output_tokens > 0:
+                total_gen_ms += gen_ms
+                total_output_tokens += turn_output_tokens
+
+            _log.info(
+                f"turn {stats.turns}: finish={finish_reason}, content={len(full_content)}, "
+                f"tools={len(tool_calls_data)}, ttft_ms={ttft_ms}, gen_ms={gen_ms}, "
+                f"stream_ms={stream_ms}, out_tok={turn_output_tokens}"
+            )
+
+            # ── Process tool calls ──
+            if tool_calls_data:
+                # Add assistant message with tool calls. The `arguments`
+                # field is normalized to valid JSON before persistence:
+                # streaming can leave us with `""` (no args were streamed)
+                # or fragmented payloads, and providers like Alibaba
+                # DashScope strictly validate and 400 on anything that
+                # isn't parseable JSON. See `normalize_args_for_api`.
+                assistant_msg = {"role": "assistant", "content": full_content}
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": normalize_args_for_api(tc["arguments"], json_repair_fn),
+                        },
+                    }
+                    for tc in tool_calls_data.values()
+                ]
+                messages.append(assistant_msg)
+
+                for tc in tool_calls_data.values():
+                    # Layer 3: tool_search short-circuit
+                    if tc["name"] == "tool_search":
+                        _tool_search_count += 1
+                        if _tool_search_count > 1:
+                            tool_result = (
+                                "STOP: tools already activated. Do NOT call tool_search again. "
+                                "Call the actual tool directly (e.g., browser_open, browser_snapshot)."
+                            )
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                            continue
+
+                    # Parse arguments
+                    args = _parse_tool_args(tc["arguments"], json_repair_fn)
+                    if args is None:
+                        tool_result = f"Error: invalid JSON arguments: {tc['arguments'][:100]}"
+                        stats.add_error()
+                        _emit_tool_error_telemetry(tc["name"], "validation_failed")
+                    else:
+                        # Self-check for dangerous tools
+                        if self_check_fn and args:
+                            ok, fixed = self_check_fn(tc["name"], args)
+                            if not ok and fixed:
+                                args = fixed
+                            elif not ok:
+                                tool_result = "Error: self-check rejected this action."
+                                stats.add_error()
+                                _emit_tool_error_telemetry(tc["name"], "blocked")
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                                continue
+
+                        # Pre-dispatch safety gate — same checks text-extracted
+                        # calls go through. Catches dangerous shell commands and
+                        # out-of-whitelist write_file paths that a faulty or
+                        # prompt-injected ``self_check_fn`` might have let
+                        # through (or that ran with no self_check_fn at all).
+                        _block = _pre_dispatch_safety_check(tc["name"], args, self_check_fn=None)
+                        if _block:
+                            _log.warning(f"native {tc['name']} rejected by pre-dispatch: {_block}")
+                            tool_result = f"Rejected: {_block}"
                             stats.add_error()
                             _emit_tool_error_telemetry(tc["name"], "blocked")
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
                             continue
 
-                    # Pre-dispatch safety gate — same checks text-extracted
-                    # calls go through. Catches dangerous shell commands and
-                    # out-of-whitelist write_file paths that a faulty or
-                    # prompt-injected ``self_check_fn`` might have let
-                    # through (or that ran with no self_check_fn at all).
-                    _block = _pre_dispatch_safety_check(tc["name"], args, self_check_fn=None)
-                    if _block:
-                        _log.warning(f"native {tc['name']} rejected by pre-dispatch: {_block}")
-                        tool_result = f"Rejected: {_block}"
-                        stats.add_error()
-                        _emit_tool_error_telemetry(tc["name"], "blocked")
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
-                        continue
+                        # Track per-tool call count (for logging only — no hard limit)
+                        _tool_name_counts[tc["name"]] = _tool_name_counts.get(tc["name"], 0) + 1
 
-                    # Track per-tool call count (for logging only — no hard limit)
-                    _tool_name_counts[tc["name"]] = _tool_name_counts.get(tc["name"], 0) + 1
+                        # Execute tool
+                        args_preview = str(args)[:200]
+                        emitter.tool_start(tc["name"], args_preview)
+                        stats.add_tool_call()
+                        all_tool_calls.append(tc["name"])
 
-                    # Execute tool
-                    args_preview = str(args)[:200]
-                    emitter.tool_start(tc["name"], args_preview)
-                    stats.add_tool_call()
-                    all_tool_calls.append(tc["name"])
+                        tool_start = time.time()
+                        try:
+                            tool_result = _run_tool(tool_executor, tc["name"], args, abort_event, ctx=ctx)
+                        except Exception as e:
+                            tool_result = f"Error: {e}"
+                            stats.add_error()
+                            _emit_tool_error_telemetry(tc["name"], _classify_tool_error(e))
+                        tool_ms = int((time.time() - tool_start) * 1000)
 
-                    tool_start = time.time()
-                    try:
-                        tool_result = _run_tool(tool_executor, tc["name"], args, abort_event, ctx=ctx)
-                    except Exception as e:
-                        tool_result = f"Error: {e}"
-                        stats.add_error()
-                        _emit_tool_error_telemetry(tc["name"], _classify_tool_error(e))
-                    tool_ms = int((time.time() - tool_start) * 1000)
+                        # Fix 4: Cap tool results to prevent context overflow
+                        tool_result = _cap_tool_result(tool_result)
 
-                    # Fix 4: Cap tool results to prevent context overflow
-                    tool_result = _cap_tool_result(tool_result)
+                        result_short = tool_result.replace("\n", " ")[:200]
+                        emitter.tool_end(tc["name"], result_short, tool_ms)
+                        all_tool_details.append({"name": tc["name"], "args": args_preview, "result": result_short})
 
-                    result_short = tool_result.replace("\n", " ")[:200]
-                    emitter.tool_end(tc["name"], result_short, tool_ms)
-                    all_tool_details.append({"name": tc["name"], "args": args_preview, "result": result_short})
+                    # Append tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": tool_result,
+                    })
 
-                # Append tool result to messages
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": tool_result,
-                })
+                # Layer 4: Loop detection — 2 identical calls = force finish
+                _turn_sig = "|".join(f"{tc['name']}:{tc['arguments'][:200]}" for tc in tool_calls_data.values())
+                _recent_tool_sigs.append(_turn_sig)  # deque auto-evicts oldest
+                if len(_recent_tool_sigs) >= 2 and _recent_tool_sigs[-1] == _recent_tool_sigs[-2]:
+                    _log.warning(f"loop detected: {_turn_sig[:80]}")
+                    _force_finish = True
+                    messages.append({"role": "user", "content":
+                        "[system] STOP. You are in a loop. Give your final answer NOW based on what you already have. Do NOT call any more tools."})
 
-            # Layer 4: Loop detection — 2 identical calls = force finish
-            _turn_sig = "|".join(f"{tc['name']}:{tc['arguments'][:200]}" for tc in tool_calls_data.values())
-            _recent_tool_sigs.append(_turn_sig)  # deque auto-evicts oldest
-            if len(_recent_tool_sigs) >= 2 and _recent_tool_sigs[-1] == _recent_tool_sigs[-2]:
-                _log.warning(f"loop detected: {_turn_sig[:80]}")
-                _force_finish = True
-                messages.append({"role": "user", "content":
-                    "[system] STOP. You are in a loop. Give your final answer NOW based on what you already have. Do NOT call any more tools."})
+                continue  # Next turn
 
-            continue  # Next turn
+            # ── No tool calls — check finish reason ──
+            # Clean up nudge messages from previous round (Layer 5)
+            if _nudge_cleanup:
+                if len(messages) >= 2 and messages[-1].get("role") == "user" and "[system]" in str(messages[-1].get("content", "")):
+                    messages.pop()  # remove nudge
+                    if messages and messages[-1].get("role") == "assistant":
+                        messages.pop()  # remove hedge
+                _nudge_cleanup = False
 
-        # ── No tool calls — check finish reason ──
-        # Clean up nudge messages from previous round (Layer 5)
-        if _nudge_cleanup:
-            if len(messages) >= 2 and messages[-1].get("role") == "user" and "[system]" in str(messages[-1].get("content", "")):
-                messages.pop()  # remove nudge
-                if messages and messages[-1].get("role") == "assistant":
-                    messages.pop()  # remove hedge
-            _nudge_cleanup = False
+            # Strip thinking tags from content
+            raw_reply = _strip_thinking(full_content)
+            thinking_content = reasoning_content or _extract_thinking(full_content)
 
-        # Strip thinking tags from content
-        raw_reply = _strip_thinking(full_content)
-        thinking_content = reasoning_content or _extract_thinking(full_content)
+            # Layer 2: Try to extract tool call from text (model described it but didn't call it)
+            if not _force_finish and tools and raw_reply:
+                extracted = _extract_tool_from_text(full_content, _tool_names)
+                if extracted:
+                    _log.info(f"extracted tool from text: {extracted[0]}({str(extracted[1])[:60]})")
+                    # Don't add the hedge text as final reply — execute the tool
+                    # instead. Route through the pre-dispatch safety gate so a
+                    # ``<tool_call>`` regex hit can't bypass shell-safety /
+                    # write-whitelisting, AND pass the per-request abort_event so
+                    # Stop works mid-blocking-tool.
+                    _synthesize_tool_call(
+                        extracted[0], extracted[1],
+                        tool_executor, messages, emitter, stats,
+                        abort_event=abort_event,
+                        self_check_fn=self_check_fn,
+                        ctx=ctx,
+                    )
+                    all_tool_calls.append(extracted[0])
+                    continue  # Let LLM summarize the result
 
-        # Layer 2: Try to extract tool call from text (model described it but didn't call it)
-        if not _force_finish and tools and raw_reply:
-            extracted = _extract_tool_from_text(full_content, _tool_names)
-            if extracted:
-                _log.info(f"extracted tool from text: {extracted[0]}({str(extracted[1])[:60]})")
-                # Don't add the hedge text as final reply — execute the tool
-                # instead. Route through the pre-dispatch safety gate so a
-                # ``<tool_call>`` regex hit can't bypass shell-safety /
-                # write-whitelisting, AND pass the per-request abort_event so
-                # Stop works mid-blocking-tool.
-                _synthesize_tool_call(
-                    extracted[0], extracted[1],
-                    tool_executor, messages, emitter, stats,
-                    abort_event=abort_event,
-                    self_check_fn=self_check_fn,
-                    ctx=ctx,
-                )
-                all_tool_calls.append(extracted[0])
-                continue  # Let LLM summarize the result
+            # Layer 5: Anti-hedge — ONLY for truly empty replies (thinking but no output)
+            # Minimal intervention — don't inject [system] user messages that break model flow.
+            _reply_is_empty = len(raw_reply.strip()) == 0 and (len(full_content) > 0 or len(reasoning_content) > 0)
 
-        # Layer 5: Anti-hedge — ONLY for truly empty replies (thinking but no output)
-        # Minimal intervention — don't inject [system] user messages that break model flow.
-        _reply_is_empty = len(raw_reply.strip()) == 0 and (len(full_content) > 0 or len(reasoning_content) > 0)
+            if not _force_finish and _nudge_count < 1 and _reply_is_empty:
+                _log.info(f"empty reply after thinking — retrying (nudge #{_nudge_count+1})")
+                # Don't inject user message — just let the model try again with context intact
+                messages.append({"role": "assistant", "content": "I need to continue working on this."})
+                _nudge_count += 1
+                _nudge_cleanup = True
+                continue
 
-        if not _force_finish and _nudge_count < 1 and _reply_is_empty:
-            _log.info(f"empty reply after thinking — retrying (nudge #{_nudge_count+1})")
-            # Don't inject user message — just let the model try again with context intact
-            messages.append({"role": "assistant", "content": "I need to continue working on this."})
-            _nudge_count += 1
-            _nudge_cleanup = True
-            continue
+            # Continuation: model was truncated
+            if finish_reason in ("length", "max_tokens"):
+                _log.info("response truncated, requesting continuation")
+                messages.append({"role": "assistant", "content": full_content})
+                messages.append({"role": "user", "content": "[system] Your response was truncated. Continue exactly where you left off."})
+                emitter.status("continuing...")
+                final_content += raw_reply
+                continue
 
-        # Continuation: model was truncated
-        if finish_reason in ("length", "max_tokens"):
-            _log.info("response truncated, requesting continuation")
-            messages.append({"role": "assistant", "content": full_content})
-            messages.append({"role": "user", "content": "[system] Your response was truncated. Continue exactly where you left off."})
-            emitter.status("continuing...")
+            # Normal finish — done
             final_content += raw_reply
-            continue
+            break
 
-        # Normal finish — done
-        final_content += raw_reply
-        break
+        # ── Build result ──
+        # tok/s is measured from first-token-to-last-chunk across ALL turns,
+        # which is the number users compare against llama.cpp / Ollama output.
+        # Including TTFT (time-to-first-token) made this value 2-5× too low
+        # on local models with large prompts.
+        tok_per_sec = 0.0
+        if total_gen_ms > 0 and total_output_tokens > 0:
+            tok_per_sec = round(total_output_tokens / (total_gen_ms / 1000), 1)
 
-    # ── Build result ──
-    # tok/s is measured from first-token-to-last-chunk across ALL turns,
-    # which is the number users compare against llama.cpp / Ollama output.
-    # Including TTFT (time-to-first-token) made this value 2-5× too low
-    # on local models with large prompts.
-    tok_per_sec = 0.0
-    if total_gen_ms > 0 and total_output_tokens > 0:
-        tok_per_sec = round(total_output_tokens / (total_gen_ms / 1000), 1)
-
-    return {
-        "reply": final_content.strip(),
-        "thinking": thinking_content.strip(),
-        "tool_calls": all_tool_calls,
-        "tool_details": all_tool_details,
-        "stats": stats,
-        "tok_per_sec": tok_per_sec,
-        "prompt_tokens": getattr(usage, 'prompt_tokens', 0) if usage else 0,
-        "completion_tokens": getattr(usage, 'completion_tokens', 0) if usage else 0,
-    }
+        return {
+            "reply": final_content.strip(),
+            "thinking": thinking_content.strip(),
+            "tool_calls": all_tool_calls,
+            "tool_details": all_tool_details,
+            "stats": stats,
+            "tok_per_sec": tok_per_sec,
+            "prompt_tokens": getattr(usage, 'prompt_tokens', 0) if usage else 0,
+            "completion_tokens": getattr(usage, 'completion_tokens', 0) if usage else 0,
+        }
+    except Exception as _e:
+        _final_status = "err"
+        _final_error = str(_e)[:500]
+        raise
+    finally:
+        _finished = time.time()
+        if ctx and getattr(ctx, "abort_event", None) and ctx.abort_event.is_set() and _final_status == "ok":
+            _final_status = "aborted"
+        _cost = None
+        try:
+            _cost = pricing.compute_cost(model, stats.input_tokens, stats.output_tokens)
+        except Exception:
+            pass
+        _is_aborted = (_final_status == "aborted")
+        db.finalize_agent_run(
+            run_id=_run_id,
+            finished_at=(None if _is_aborted else _finished),
+            duration_ms=(None if _is_aborted else int((_finished - _run_started) * 1000)),
+            status=_final_status,
+            error=_final_error,
+            result_preview=final_content.strip()[:200],
+            input_tokens=stats.input_tokens,
+            output_tokens=stats.output_tokens,
+            cost_usd=_cost,
+        )
 
 
 def _parse_tool_args(raw: str, repair_fn=None) -> dict | None:

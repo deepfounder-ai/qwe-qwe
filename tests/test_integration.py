@@ -468,3 +468,31 @@ def test_concurrent_agent_runs_no_crosstalk(monkeypatch, qwe_temp_data_dir):
         assert item not in got_b, f"crosstalk: {item!r} leaked A→B"
     for item in got_b:
         assert item not in got_a, f"crosstalk: {item!r} leaked B→A"
+
+
+def test_agent_run_writes_agent_runs_row(monkeypatch, qwe_temp_data_dir):
+    """14. agent.run() instruments agent_runs table via run_loop bracket.
+
+    Verifies that insert_agent_run / finalize_agent_run are called for every
+    turn: the row must exist, have the correct source, a terminal status, and
+    non-negative token counts.
+    """
+    import agent
+    import db
+    import providers
+
+    fake = FakeStreamingClient(reply="hello")
+    monkeypatch.setattr(providers, "get_client", lambda: fake, raising=False)
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model", raising=False)
+    monkeypatch.setattr(providers, "get_active_name", lambda: "fake", raising=False)
+
+    agent.run("hello", thread_id="t-runs-test", source="cli")
+
+    rows = db.get_runs_for_thread("t-runs-test")
+    assert len(rows) >= 1, "expected at least one agent_runs row"
+    r = rows[0]
+    assert r["source"] == "cli"
+    assert r["status"] in ("ok", "err", "aborted")
+    # tokens are non-negative; mock returns 0 for no-usage path or 2 via _FakeUsage
+    assert r["input_tokens"] >= 0
+    assert r["output_tokens"] >= 0

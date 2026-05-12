@@ -1521,6 +1521,7 @@ def _run_inner_body(user_input: str, thread_id: str | None,
             extra_kwargs={"extra_body": {"options": {"num_ctx": config.get("ollama_num_ctx")}}} if providers.get_active_name() == "ollama" else {},
             abort_event=abort_event,
             ctx=ctx,
+            thread_id=tid,
         )
 
         result.reply = _clean_response(loop_result["reply"])
