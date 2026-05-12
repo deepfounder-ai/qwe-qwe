@@ -545,13 +545,30 @@ def finalize_agent_run(
 def insert_skipped_run(
     cron_id: int, thread_id: str, scheduled_at: float, reason: str = "missed"
 ) -> int:
-    """For routine fires that never executed (missed/skipped)."""
+    """For routine fires that never executed (missed / skipped / budget_exceeded).
+
+    ``reason`` is stored in the ``error`` column, not ``status``.  Valid status
+    values are the enum defined in migration 008: running / ok / err / aborted /
+    missed / skipped.  ``reason`` maps to the closest status:
+    - "missed"            → status="missed"
+    - "skipped"           → status="skipped"
+    - "budget_exceeded"   → status="skipped", error="budget_exceeded"
+    Anything unrecognised defaults to status="skipped".
+    """
+    _STATUS_MAP = {
+        "missed": "missed",
+        "skipped": "skipped",
+        "budget_exceeded": "skipped",
+    }
+    status = _STATUS_MAP.get(reason, "skipped")
+    error = reason if status != reason else None  # store in error only when it differs
     conn = _get_conn()
     cur = conn.execute(
         "INSERT INTO agent_runs (thread_id, cron_id, source, scheduled_at, "
-        " started_at, status, input_tokens, output_tokens, cost_usd) "
-        "VALUES (?,?,?,?,?,?,0,0,0.0)",
-        (thread_id or "", cron_id, "routine", scheduled_at, scheduled_at, reason),
+        " started_at, status, error, input_tokens, output_tokens, cost_usd) "
+        "VALUES (?,?,?,?,?,?,?,0,0,0.0)",
+        (thread_id or "", cron_id, "routine", scheduled_at, scheduled_at,
+         status, error),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -610,9 +627,9 @@ def get_period_totals(
     by_src_rows = conn.execute(
         "SELECT source, COALESCE(SUM(input_tokens),0), "
         "       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0.0), "
-        "       COUNT(*) FROM agent_runs WHERE started_at>=? AND started_at<? "
+        f"      COUNT(*) FROM agent_runs WHERE started_at>=? AND started_at<?{src_clause} "
         "GROUP BY source",
-        (start_ts, end_ts),
+        params,  # reuse same params (already includes source filter if set)
     ).fetchall()
     by_source = {
         r[0]: {

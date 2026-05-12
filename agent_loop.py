@@ -426,16 +426,23 @@ def run_loop(
     _run_started = time.time()
     _provider = providers.get_active_name()
     _thread_id = db._tid(thread_id)  # resolve: explicit > active > default
-    _run_id = db.insert_agent_run(
-        thread_id=_thread_id,
-        source=(ctx.source if ctx else "cli"),
-        started_at=_run_started,
-        status="running",
-        cron_id=(ctx.cron_id if ctx else None),
-        model=model,
-        provider=_provider,
-        resumed_from_run_id=(ctx.resumed_from_run_id if ctx else None),  # NEW
-    )
+    # Insert the row BEFORE entering the try/finally so that if the INSERT
+    # itself raises, the finally block never calls finalize_agent_run(None, …).
+    # Use a sentinel None so the finally block can guard on it.
+    _run_id: int | None = None
+    try:
+        _run_id = db.insert_agent_run(
+            thread_id=_thread_id,
+            source=(ctx.source if ctx else "cli"),
+            started_at=_run_started,
+            status="running",
+            cron_id=(ctx.cron_id if ctx else None),
+            model=model,
+            provider=_provider,
+            resumed_from_run_id=(ctx.resumed_from_run_id if ctx else None),
+        )
+    except Exception as _ins_err:
+        _log.warning(f"agent_runs INSERT failed (analytics disabled for this run): {_ins_err}")
     _final_status = "ok"
     _final_error: str | None = None
 
@@ -887,17 +894,18 @@ def run_loop(
             _cost = pricing.compute_cost(model, stats.input_tokens, stats.output_tokens)
         except Exception:
             pass
-        db.finalize_agent_run(
-            run_id=_run_id,
-            finished_at=(None if _is_aborted else _finished),
-            duration_ms=(None if _is_aborted else int((_finished - _run_started) * 1000)),
-            status=_final_status,
-            error=_final_error,
-            result_preview=final_content.strip()[:200],
-            input_tokens=stats.input_tokens,
-            output_tokens=stats.output_tokens,
-            cost_usd=_cost,
-        )
+        if _run_id is not None:
+            db.finalize_agent_run(
+                run_id=_run_id,
+                finished_at=(None if _is_aborted else _finished),
+                duration_ms=(None if _is_aborted else int((_finished - _run_started) * 1000)),
+                status=_final_status,
+                error=_final_error,
+                result_preview=final_content.strip()[:200],
+                input_tokens=stats.input_tokens,
+                output_tokens=stats.output_tokens,
+                cost_usd=_cost,
+            )
 
 
 def _parse_tool_args(raw: str, repair_fn=None) -> dict | None:

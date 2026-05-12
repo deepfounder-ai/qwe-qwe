@@ -130,6 +130,14 @@ _pending_canvas_prompts: dict = {}  # request_id → asyncio.Event + result
 _pending_canvas_renders: dict[str, list[dict]] = {}  # thread_id → list of renders
 _CANVAS_META_HTML_CAP = 64 * 1024  # per-render cap when persisting to message meta
 
+# Deduplication guard for concurrent POST /api/resume/{run_id} requests.
+# Without this, two simultaneous POSTs both pass the SELECT-then-act check
+# and enqueue two background resumes for the same run_id.
+# Dict maps run_id → True while a resume is in-flight; the endpoint checks
+# this atomically under _RESUME_LOCK before enqueuing.
+_RESUME_LOCK = threading.Lock()
+_RESUME_IN_FLIGHT: dict[int, bool] = {}  # run_id → True
+
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -3293,9 +3301,27 @@ async def resume_run_endpoint(run_id: int, background_tasks: BackgroundTasks):
             {"ok": False, "error": f"already resumed by run #{fwd[0]}"},
             status_code=400,
         )
-    # Fire in background so HTTP returns immediately; streaming goes via WS
+    # In-process deduplication: guard against two concurrent POSTs that both
+    # passed the SELECT checks above before either enqueued a background task.
+    with _RESUME_LOCK:
+        if _RESUME_IN_FLIGHT.get(run_id):
+            return JSONResponse(
+                {"ok": False, "error": "resume already in progress"},
+                status_code=409,
+            )
+        _RESUME_IN_FLIGHT[run_id] = True
+
+    # Fire in background so HTTP returns immediately; streaming goes via WS.
+    # Wrapper clears the in-flight flag when the run finishes.
     import agent as _agent_mod
-    background_tasks.add_task(_agent_mod.resume_interrupted_run, run_id)
+
+    def _resume_and_clear():
+        try:
+            _agent_mod.resume_interrupted_run(run_id)
+        finally:
+            _RESUME_IN_FLIGHT.pop(run_id, None)
+
+    background_tasks.add_task(_resume_and_clear)
     return {"ok": True}
 
 
