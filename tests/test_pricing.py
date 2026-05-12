@@ -75,3 +75,41 @@ def test_corrupt_cache_file_falls_back_gracefully(qwe_temp_data_dir):
     pricing._cache_path().write_text("{ malformed ")
     # Should not raise; falls back to bundled
     assert pricing.get_price("gpt-4o-mini", "input") > 0
+
+
+import json
+from pathlib import Path
+
+FIXTURE = Path(__file__).parent / "fixtures" / "litellm_sample.json"
+
+
+def test_normalize_litellm_keeps_chat_models():
+    import pricing
+    raw = json.loads(FIXTURE.read_text())
+    out = pricing._normalize_litellm(raw)
+    assert "gpt-4o-mini" in out
+    assert out["gpt-4o-mini"] == {"input": 0.00000015, "output": 0.00000060}
+    assert "claude-3-5-sonnet-20241022" in out
+
+
+def test_normalize_litellm_skips_sample_spec():
+    import pricing
+    raw = json.loads(FIXTURE.read_text())
+    out = pricing._normalize_litellm(raw)
+    assert "sample_spec" not in out
+
+
+def test_normalize_litellm_skips_non_chat_modes():
+    import pricing
+    raw = json.loads(FIXTURE.read_text())
+    out = pricing._normalize_litellm(raw)
+    assert "text-embedding-3-small" not in out
+    assert "dall-e-3" not in out
+    assert "whisper-1" not in out
+
+
+def test_normalize_litellm_skips_entries_missing_prices():
+    import pricing
+    raw = json.loads(FIXTURE.read_text())
+    out = pricing._normalize_litellm(raw)
+    assert "broken-entry" not in out

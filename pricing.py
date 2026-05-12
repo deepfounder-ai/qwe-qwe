@@ -42,6 +42,8 @@ _BUNDLED_FALLBACK: dict[str, dict[str, float]] = {
 
 _LOCAL_PREFIXES = ("lmstudio:", "ollama:", "local:")
 
+SKIP_MODES = {"embedding", "image_generation", "audio_transcription", "audio_speech"}
+
 _lock = threading.Lock()
 _pricing_cache: dict[str, dict[str, float]] | None = None
 _cache_fetched_at: float | None = None
@@ -114,6 +116,30 @@ def last_updated() -> Optional[float]:
 
 def all_known_models() -> list[str]:
     return sorted(set(_ensure_loaded().keys()) | set(_BUNDLED_FALLBACK.keys()))
+
+
+def _normalize_litellm(raw: dict) -> dict[str, dict[str, float]]:
+    """Convert LiteLLM's JSON into our flat {model: {input, output}} shape.
+
+    Skips:
+      - the 'sample_spec' meta-entry
+      - any entry where mode is in SKIP_MODES (embeddings, images, audio)
+      - any entry missing input_cost_per_token or output_cost_per_token
+    """
+    out: dict[str, dict[str, float]] = {}
+    for name, entry in raw.items():
+        if name == "sample_spec" or not isinstance(entry, dict):
+            continue
+        mode = entry.get("mode")
+        if mode in SKIP_MODES:
+            continue
+        try:
+            in_p = float(entry["input_cost_per_token"])
+            out_p = float(entry["output_cost_per_token"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[name] = {"input": in_p, "output": out_p}
+    return out
 
 
 # refresh_pricing() and start_background_refresher() come in later tasks (7 & 8).
