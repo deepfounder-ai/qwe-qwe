@@ -450,13 +450,14 @@ def insert_agent_run(
     model: str | None = None,
     provider: str | None = None,
     scheduled_at: float | None = None,
+    resumed_from_run_id: int | None = None,
 ) -> int:
     """Insert a new run row. Returns the new id."""
     conn = _get_conn()
     cur = conn.execute(
         "INSERT INTO agent_runs (thread_id, cron_id, source, scheduled_at, "
-        " started_at, status, model, provider) VALUES (?,?,?,?,?,?,?,?)",
-        (thread_id, cron_id, source, scheduled_at, started_at, status, model, provider),
+        " started_at, status, model, provider, resumed_from_run_id) VALUES (?,?,?,?,?,?,?,?,?)",
+        (thread_id, cron_id, source, scheduled_at, started_at, status, model, provider, resumed_from_run_id),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -592,3 +593,68 @@ def get_runs_for_routine(cron_id: int, limit: int = 50) -> list[dict]:
             "duration_ms", "status", "error", "result_preview",
             "input_tokens", "output_tokens", "cost_usd", "model", "provider")
     return [dict(zip(cols, r, strict=True)) for r in rows]
+
+
+def dismiss_run(run_id: int) -> None:
+    """Mark a run dismissed (idempotent — does not overwrite existing dismissed_at)."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE agent_runs SET dismissed_at = ? "
+        "WHERE id = ? AND dismissed_at IS NULL",
+        (time.time(), int(run_id)),
+    )
+    conn.commit()
+
+
+def get_resumable_run_for_thread(
+    thread_id: str,
+    source_filter: str | None = None,
+    ttl_sec: float = 604800,
+) -> dict | None:
+    """Return the most recent aborted run on this thread that's still
+    eligible for resume, or None.
+
+    Filters out:
+      - non-aborted statuses
+      - dismissed runs
+      - runs older than ttl_sec
+      - runs that are themselves resume runs (resumed_from_run_id NOT NULL)
+      - runs that have already been resumed-from (referenced by some later row)
+      - source='cli' (Ctrl+C is intentional stop)
+      - optionally: anything not matching source_filter
+    """
+    cutoff = time.time() - float(ttl_sec)
+    params: list = [thread_id, cutoff]
+    src_clause = ""
+    if source_filter is not None:
+        src_clause = " AND source = ?"
+        params.append(source_filter)
+
+    # Two related-but-different guards (do not collapse):
+    #   resumed_from_run_id IS NULL  → row is not itself a resume run
+    #   id NOT IN (...)              → no later row already resumed from it
+    sql = (
+        "SELECT id, started_at, result_preview, model, source, cron_id "
+        "FROM agent_runs "
+        "WHERE thread_id = ? AND status = 'aborted' "
+        "  AND dismissed_at IS NULL "
+        "  AND started_at >= ? "
+        "  AND resumed_from_run_id IS NULL "
+        "  AND source != 'cli' "
+        "  AND id NOT IN (SELECT resumed_from_run_id FROM agent_runs "
+        "                 WHERE resumed_from_run_id IS NOT NULL) "
+        f"{src_clause} "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    conn = _get_conn()
+    row = conn.execute(sql, params).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "started_at": row[1],
+        "result_preview": row[2],
+        "model": row[3],
+        "source": row[4],
+        "cron_id": row[5],
+    }
