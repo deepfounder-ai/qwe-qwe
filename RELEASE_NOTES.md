@@ -1,3 +1,14 @@
+## v0.20.0 — Auto-resume after interrupt
+
+- Every abort (WS disconnect, Stop button, server crash) is now recoverable.
+- Web UI shows a banner on reconnect: "Previous turn was interrupted — Resume / Dismiss". The agent picks up from where it left off, not from scratch.
+- Telegram exposes `/resume` for the same flow in chat.
+- Routines auto-resume if the abort was within 5 minutes (configurable).
+- CLI Ctrl+C remains an intentional stop — no resume.
+- New per-source TTL settings in Settings → Cost → Auto-resume: Web (7 days), Telegram (24h), Routines (5 min).
+- Migration 009 adds `resumed_from_run_id` + `dismissed_at` to `agent_runs`.
+- Analytics chain resume runs back to their originals.
+
 ## v0.19.0 — Cost tracking & per-session analytics
 
 - New `agent_runs` table replaces `routine_runs`: one row per LLM call site
