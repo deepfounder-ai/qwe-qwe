@@ -275,6 +275,87 @@ def test_tools_literal_preserves_insertion_order(sc):
     assert rendered.find("'type'") < rendered.find("'function'")
 
 
+# ── Template escape: docstring / description / instruction ──────────
+
+
+def test_docstring_block_escapes_triple_quote(sc):
+    """A docstring containing `\"\"\"` would prematurely close the
+    rendered module docstring. The helper must escape."""
+    block = sc._docstring_block('Has """ in it')
+    assert '"""\\"\\"\\"' in block or '\\"\\"\\"' in block
+    # Result must still ast.parse as a module
+    import ast
+    ast.parse(block + '\nX = 1\n')
+
+
+def test_docstring_block_handles_trailing_backslash(sc):
+    """`text\\\\` at the end of a triple-quoted string escapes the
+    closing quote. The helper must defuse."""
+    import ast
+    block = sc._docstring_block('Has a trailing backslash\\')
+    ast.parse(block + '\nX = 1\n')
+
+
+def test_skill_template_survives_quotes_in_user_strings(sc):
+    """Regression: a planner returning `"docstring": 'Logs "important"
+    events'` used to break the rendered .py because the embedded `"`
+    closed the DESCRIPTION literal early. With repr() on the user
+    strings + _docstring_block on the docstring, rendering survives."""
+    import ast
+    code = sc.SKILL_TEMPLATE.format(
+        docstring_block=sc._docstring_block('Has " quotes'),
+        short_description_repr=repr('Quote\'s in here " too'),
+        instruction_repr=repr('Triple """ inside instruction'),
+        tools_json="[]",
+        table_ddl="    pass  # no tables",
+        execute_body="    pass  # no body",
+    )
+    ast.parse(code)
+
+
+def test_skill_template_runs_imports_cleanly(sc, tmp_path):
+    """The escape contract is import-time, not just ast-parse. Bug #2
+    from the recent fix slipped past ast.parse but failed at import.
+    Pin both layers."""
+    import ast
+    import importlib.util
+    code = sc.SKILL_TEMPLATE.format(
+        docstring_block=sc._docstring_block("normal docstring"),
+        short_description_repr=repr("Has 'mixed' \"quotes\""),
+        instruction_repr=repr("Use \"this\" tool."),
+        tools_json="[]",
+        table_ddl="    pass",
+        execute_body='    if name == "x":\n        return ""',
+    )
+    ast.parse(code)
+    p = tmp_path / "test_skill.py"
+    p.write_text(code, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("test_skill", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.DESCRIPTION == "Has 'mixed' \"quotes\""
+    assert "Use" in mod.INSTRUCTION
+
+
+# ── _extract_code accepts parenthesised condition ────────────────────
+
+
+def test_extract_code_accepts_parenthesised_name_check(sc):
+    """Gemma 4B sometimes wraps: `if (name == "x"):`. The anchor
+    regex must catch it; otherwise the rest of the pipeline gets
+    garbage to indent-fix."""
+    raw = (
+        "Some preamble text.\n"
+        '```python\n'
+        'if (name == "foo"):\n'
+        '    return "ok"\n'
+        '```\n'
+    )
+    extracted = sc._extract_code(raw)
+    assert 'if (name == "foo"):' in extracted
+    assert 'return "ok"' in extracted
+
+
 # ── delete_skill protections ─────────────────────────────────────────
 
 
