@@ -290,6 +290,12 @@ async def _check_for_resumable_interrupt(ws, thread_id: str) -> None:
     import db, config, time
     ttl = float(config.get("resume_ttl_web_sec") or 604800)
     cutoff = time.time() - ttl
+    # Two related-but-different guards:
+    #   resumed_from_run_id IS NULL  → this row is not itself a resume run
+    #                                  (we want the ORIGINAL aborted run)
+    #   id NOT IN (...)              → no later row has already resumed
+    #                                  from this one (no double-fire)
+    # Both clauses are intentional; do not collapse them.
     row = db._get_conn().execute(
         "SELECT id, started_at, result_preview, model, source FROM agent_runs "
         "WHERE thread_id=? AND status='aborted' AND dismissed_at IS NULL "
@@ -439,6 +445,12 @@ def resume_interrupted_run(
     if already_used:
         raise ValueError(f"run #{run_id} already resumed by run #{already_used[0]}")
 
+    # NOTE: `resume_interrupted_run` does NOT block CLI source explicitly.
+    # CLI filtering happens at the *trigger* layer (Web banner SQL and
+    # Telegram /resume scope by source). Direct executor calls are rare
+    # — primarily tests and tooling — and accepting any source there
+    # keeps the helper general.
+
     # 2. Build or reuse context
     if ctx is None:
         ctx = turn_context.TurnContext(
@@ -450,13 +462,17 @@ def resume_interrupted_run(
     # 3. Link new run to original for analytics
     ctx.resumed_from_run_id = run_id  # NEW field on TurnContext
 
-    # 4. Fire a normal agent.run. The "[system]" prefix is plain text
-    #    in the user_input, which soul.py / models handle as a clearly
-    #    bracketed instruction without restructuring conversation roles
-    #    (CLAUDE.md Rule 16 / OpenCode lesson).
+    # 4. Fire a normal agent.run with a system_note. CLAUDE.md's OpenCode
+    #    lesson explicitly warns against injecting "[system]" prefixes as
+    #    user-role messages — it breaks model flow. Instead, we add a new
+    #    optional `system_note=` parameter to agent.run; agent_loop reads
+    #    it and prepends one true {role: "system"} message to the chat
+    #    completion request for the next LLM call (only — the note is
+    #    one-shot, not persisted).
     return run(
-        user_input=(
-            "[system] The previous turn was interrupted before completing. "
+        user_input=None,
+        system_note=(
+            "The previous turn was interrupted before completing. "
             "Continue from where you left off — do not restart, do not "
             "repeat tool calls that already ran. If your prior partial "
             "reply was on the right track, pick up the thread."
@@ -467,7 +483,26 @@ def resume_interrupted_run(
     )
 ```
 
-### 7.1 TurnContext extension
+### 7.0a agent.run signature extension
+
+`agent.run` currently takes `user_input: str` as the next conversation turn. Add one optional parameter:
+
+```python
+def run(
+    user_input: str | None,
+    thread_id: str | None = None,
+    source: str = "cli",
+    ctx: "TurnContext | None" = None,
+    system_note: str | None = None,        # NEW — one-shot system message
+    # ... existing params unchanged ...
+) -> dict:
+```
+
+When `system_note` is set, `agent.run` passes it through to `agent_loop.run_loop`. `run_loop` adds one `{role: "system", content: system_note}` message at the head of the chat completion request for the next LLM call only — it's **not** persisted to `messages` (one-shot per resume) and it's **not** carried into subsequent turns (the next user message goes through the normal path).
+
+When `user_input is None and system_note is not None`, the call is a "system-only nudge" — used by resume. The agent emits its next response in that conversational shape, which is consistent with the conversation history (the history already ends with the partial assistant message from the abort).
+
+### 7.0b TurnContext extension
 
 Add one field to `TurnContext` (in `turn_context.py`):
 
@@ -766,7 +801,7 @@ Audit: no new event types, no new payload fields. Privacy contract unchanged.
 ### 12.4 Integration tests (extend `tests/test_integration.py`)
 
 - Full abort + resume cycle: agent.run, force abort mid-stream, call `resume_interrupted_run`, assert two linked rows in `agent_runs` AND messages history shows `interrupted=true` row + new clean reply
-- Token continuity: partial reply's `input_tokens` + resume run's `input_tokens` both > 0 (resume sees the prior conversation)
+- Token continuity: `resume.input_tokens >= original.input_tokens` (resume sees the prior conversation plus the partial reply → strictly more context)
 - Resume's `provider` matches original (model can change if user switched provider, but provider key on the new row is what's actually active when resume fires — not the original)
 
 ### 12.5 Coverage
