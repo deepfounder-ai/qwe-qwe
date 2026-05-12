@@ -16,7 +16,13 @@ Lookup chain (in get_price):
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -25,6 +31,14 @@ import db
 import logger
 
 _log = logger.get("pricing")
+
+DEFAULT_PRICING_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+    "model_prices_and_context_window.json"
+)
+CACHE_TTL_SEC = 24 * 3600
+MAX_BODY_BYTES = 5 * 1024 * 1024  # 5 MB hard cap on JSON download
+REMOTE_TIMEOUT_SEC = 10
 
 # Top-10 fallback. Values in $/token (NOT $/1M tokens).
 _BUNDLED_FALLBACK: dict[str, dict[str, float]] = {
@@ -142,10 +156,63 @@ def _normalize_litellm(raw: dict) -> dict[str, dict[str, float]]:
     return out
 
 
-# refresh_pricing() and start_background_refresher() come in later tasks (7 & 8).
+def _ssrf_allowed(url: str) -> bool:
+    """Block private/loopback/link-local unless QWE_ALLOW_PRIVATE_URLS=1."""
+    import os
+    if os.environ.get("QWE_ALLOW_PRIVATE_URLS") == "1":
+        return True
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+        for fam, _t, _p, _c, sa in socket.getaddrinfo(host, None):
+            ip = ip_address(sa[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def refresh_pricing(force: bool = False) -> bool:
-    """Stub; full implementation in Task 7."""
-    return False
+    """Refresh pricing from remote. Returns True on success.
+
+    Thread-safe; concurrent callers serialize on _lock. Never raises.
+    """
+    global _pricing_cache, _cache_fetched_at
+    url = config.get("pricing_url") or DEFAULT_PRICING_URL
+    if not force and _cache_fetched_at and (time.time() - _cache_fetched_at) < CACHE_TTL_SEC:
+        return True
+    if not _ssrf_allowed(url):
+        _log.warning(f"pricing_url blocked by SSRF guard: {url}")
+        return False
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "qwe-qwe-pricing/1.0"})
+        with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT_SEC) as resp:
+            body = resp.read(MAX_BODY_BYTES + 1)
+        if len(body) > MAX_BODY_BYTES:
+            _log.warning(f"pricing response > {MAX_BODY_BYTES} bytes, refusing")
+            return False
+        raw = json.loads(body.decode("utf-8"))
+        models = _normalize_litellm(raw)
+        if not models:
+            _log.warning("pricing JSON yielded zero usable models; keeping cache")
+            return False
+        payload = {
+            "fetched_at": time.time(),
+            "source_url": url,
+            "models": models,
+        }
+        tmp = _cache_path().with_suffix(".json.tmp")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(_cache_path())
+        with _lock:
+            _pricing_cache = models
+            _cache_fetched_at = payload["fetched_at"]
+        _log.info(f"pricing refreshed: {len(models)} models")
+        return True
+    except Exception as e:
+        _log.warning(f"pricing refresh failed: {e}")
+        return False
 
 
 def start_background_refresher() -> None:

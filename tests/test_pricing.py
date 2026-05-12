@@ -113,3 +113,80 @@ def test_normalize_litellm_skips_entries_missing_prices():
     raw = json.loads(FIXTURE.read_text())
     out = pricing._normalize_litellm(raw)
     assert "broken-entry" not in out
+
+
+from unittest import mock
+import urllib.error
+
+
+def test_refresh_pricing_writes_disk_cache(qwe_temp_data_dir, monkeypatch):
+    import json as _json
+    import config as _config
+    import pricing
+    pricing._pricing_cache = None
+    pricing._cache_fetched_at = None
+    fake_body = _json.dumps({
+        "gpt-4o-mini": {"input_cost_per_token": 1e-7,
+                        "output_cost_per_token": 2e-7,
+                        "litellm_provider": "openai", "mode": "chat"}
+    }).encode()
+    class _Resp:
+        def read(self, n=None): return fake_body[:n] if n else fake_body
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        headers = {"Content-Length": str(len(fake_body))}
+    monkeypatch.setattr(pricing.urllib.request, "urlopen", lambda *a, **kw: _Resp())
+    monkeypatch.setattr(_config, "get", lambda key: None)
+    monkeypatch.setattr(pricing, "_ssrf_allowed", lambda url: True)
+    ok = pricing.refresh_pricing(force=True)
+    assert ok is True
+    assert pricing._cache_path().exists()
+    payload = _json.loads(pricing._cache_path().read_text())
+    assert "gpt-4o-mini" in payload["models"]
+
+
+def test_refresh_pricing_ssrf_blocks_loopback(qwe_temp_data_dir, monkeypatch):
+    import config as _config
+    import pricing
+    monkeypatch.setattr(_config, "get", lambda key: "http://127.0.0.1/x" if key=="pricing_url" else False)
+    ok = pricing.refresh_pricing(force=True)
+    assert ok is False
+
+
+def test_refresh_pricing_respects_body_size_cap(qwe_temp_data_dir, monkeypatch):
+    import config as _config
+    import pricing
+    big_body = b"x" * (pricing.MAX_BODY_BYTES + 1)
+    class _Resp:
+        def read(self, n=None): return big_body[:n] if n else big_body
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        headers = {"Content-Length": str(len(big_body))}
+    monkeypatch.setattr(pricing.urllib.request, "urlopen", lambda *a, **kw: _Resp())
+    monkeypatch.setattr(_config, "get", lambda key: None)
+    monkeypatch.setattr(pricing, "_ssrf_allowed", lambda url: True)
+    ok = pricing.refresh_pricing(force=True)
+    assert ok is False
+
+
+def test_refresh_pricing_network_error_keeps_stale_cache(qwe_temp_data_dir, monkeypatch):
+    import json as _json
+    import config as _config
+    import pricing
+    # Pre-populate disk cache
+    pricing._cache_path().parent.mkdir(parents=True, exist_ok=True)
+    pricing._cache_path().write_text(_json.dumps({
+        "fetched_at": 1, "source_url": "x", "models": {"old": {"input": 1, "output": 2}}
+    }))
+    pricing._pricing_cache = None
+    pricing._cache_fetched_at = None
+    def boom(*a, **kw):
+        raise urllib.error.URLError("nope")
+    monkeypatch.setattr(pricing.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_config, "get", lambda key: None)
+    monkeypatch.setattr(pricing, "_ssrf_allowed", lambda url: True)
+    pricing.refresh_pricing(force=True)
+    # Stale cache still wins
+    assert pricing.get_price("old", "input") == 1
