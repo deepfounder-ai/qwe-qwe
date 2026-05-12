@@ -223,3 +223,43 @@ def test_abort_with_partial_content_writes_interrupted_message(qwe_temp_data_dir
     assert meta.get("interrupted") is True
     assert meta.get("run_id") == rid
     assert meta.get("partial_tokens", {}).get("input") == 320
+
+
+def test_crash_recovery_promotes_running_to_aborted(qwe_temp_data_dir):
+    """Server crash recovery: 'running' rows at startup become 'aborted'
+    with synthesized message marker."""
+    import db
+    import json
+    import time
+    # Simulate a server crash by leaving a 'running' row
+    rid = db.insert_agent_run(thread_id="t-crash", source="web",
+                               started_at=time.time(), status="running")
+
+    # Invoke the recovery hook directly
+    from server import _recover_interrupted_runs_on_startup
+    _recover_interrupted_runs_on_startup()
+
+    # The row should now be aborted
+    row = db._get_conn().execute(
+        "SELECT status, error FROM agent_runs WHERE id=?", (rid,)
+    ).fetchone()
+    assert row[0] == "aborted"
+    assert "restart" in (row[1] or "").lower()
+
+    # The synthesized message marker should be present
+    m = db._get_conn().execute(
+        "SELECT meta FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT 1",
+        ("t-crash",)
+    ).fetchone()
+    assert m is not None
+    meta = json.loads(m[0]) if isinstance(m[0], str) else m[0]
+    assert meta.get("interrupted") is True
+    assert meta.get("crash_recovery") is True
+    assert meta.get("run_id") == rid
+
+
+def test_crash_recovery_idempotent_no_running_rows(qwe_temp_data_dir):
+    """If no 'running' rows exist, recovery is a no-op."""
+    from server import _recover_interrupted_runs_on_startup
+    # Should not raise
+    _recover_interrupted_runs_on_startup()

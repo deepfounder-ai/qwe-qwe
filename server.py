@@ -141,6 +141,43 @@ import threads
 _log = logger.get("server")
 
 
+def _recover_interrupted_runs_on_startup() -> None:
+    """Mark orphaned 'running' agent_runs as 'aborted' at server start.
+
+    Synthesizes an abort marker in messages so the run appears interrupted
+    in the UI. Does NOT auto-resume — Web banner / Telegram /resume /
+    scheduler auto-fire handle user-facing recovery. Must run BEFORE
+    scheduler.start() so scheduler.detect_missed_runs sees the up-to-date
+    'aborted' rows for its 5-min auto-fire window.
+    """
+    try:
+        rows = db._get_conn().execute(
+            "SELECT id, thread_id FROM agent_runs WHERE status='running'"
+        ).fetchall()
+    except Exception as e:
+        _log.warning(f"crash-recovery query failed: {e}")
+        return
+    for (rid, thread_id) in rows:
+        try:
+            db.save_message(
+                role="assistant", content="",
+                thread_id=thread_id,
+                meta={"interrupted": True, "run_id": rid,
+                      "crash_recovery": True},
+            )
+        except Exception as e:
+            _log.debug(f"crash-recovery save_message failed for #{rid}: {e}")
+        try:
+            db.finalize_agent_run(
+                rid, finished_at=None, duration_ms=None,
+                status="aborted", error="server restart",
+            )
+        except Exception as e:
+            _log.debug(f"crash-recovery finalize failed for #{rid}: {e}")
+    if rows:
+        _log.info(f"recovered {len(rows)} interrupted runs from previous session")
+
+
 def _validate_home_path(raw: str) -> Path:
     """Validate path is within user's home directory. Raises ValueError if not."""
     home = Path.home().resolve()
@@ -355,6 +392,12 @@ async def lifespan(app: FastAPI):
             presets.ensure_preset_workspace(active_preset)
     except Exception:
         pass
+    # Recover orphaned 'running' runs from a previous crash — must run before
+    # scheduler.start() so detect_missed_runs sees up-to-date 'aborted' rows.
+    try:
+        _recover_interrupted_runs_on_startup()
+    except Exception as e:
+        _log.warning(f"crash-recovery startup: {e}")
     scheduler.start()
     # Start pricing background refresher
     try:
