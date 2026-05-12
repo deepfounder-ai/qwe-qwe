@@ -1,7 +1,15 @@
 """Skill Creator — generates new skills via multi-step background pipeline."""
 
-import json, re, ast, time, threading
+import ast
+import json
+import re
+import threading
+import time
 from pathlib import Path
+
+import db
+import pricing
+import providers as _providers
 
 DESCRIPTION = "Create new skills by describing what they should do"
 
@@ -950,8 +958,14 @@ def _create_skill_async(skill_name: str, description: str) -> str:
     )
 
 
-def _llm_call(system: str, user: str, max_tokens: int = 2048) -> str:
-    """Make a single LLM call with generous context."""
+def _llm_call(system: str, user: str, max_tokens: int = 2048,
+              _tok_accum: list | None = None) -> str:
+    """Make a single LLM call with generous context.
+
+    If *_tok_accum* is a list, appends a (in_tok, out_tok) tuple so callers
+    can aggregate token counts across multiple calls without changing the
+    return type.
+    """
     import providers
     client = providers.get_client()
     model = providers.get_model()
@@ -965,6 +979,11 @@ def _llm_call(system: str, user: str, max_tokens: int = 2048) -> str:
         temperature=0.2,
         max_tokens=max_tokens,
     )
+    if _tok_accum is not None and getattr(resp, "usage", None):
+        _tok_accum.append((
+            int(getattr(resp.usage, "prompt_tokens", 0) or 0),
+            int(getattr(resp.usage, "completion_tokens", 0) or 0),
+        ))
     raw = resp.choices[0].message.content or ""
     # Strip thinking tags
     raw = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL).strip()
@@ -1341,6 +1360,37 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
     # actually killed the last try (validate vs smoke vs syntax).
     last_failure: str = "max_attempts_exhausted"
 
+    # ── Cost-tracking bracket ──────────────────────────────────────────
+    _sc_thread_id = f"skill:{skill_name}"
+    _rid = db.insert_agent_run(
+        thread_id=_sc_thread_id, source="skill_creator",
+        started_at=start, status="running",
+        model=_providers.get_model(), provider=_providers.get_active_name(),
+    )
+    _tok_accum: list = []   # each _llm_call appends (in_tok, out_tok) here
+    # mutable dict so inner closures can update without nonlocal
+    _run_state: dict = {"status": "ok", "error": None, "preview": None}
+
+    def _finalize_run():
+        """Write final metrics to agent_runs. Called at every exit point."""
+        _finished = time.time()
+        agg_in = sum(t[0] for t in _tok_accum)
+        agg_out = sum(t[1] for t in _tok_accum)
+        _cost = None
+        try:
+            _cost = pricing.compute_cost(_providers.get_model(), agg_in, agg_out)
+        except Exception:
+            pass
+        db.finalize_agent_run(
+            _rid, finished_at=_finished,
+            duration_ms=int((_finished - start) * 1000),
+            status=_run_state["status"], error=_run_state["error"],
+            result_preview=_run_state["preview"],
+            input_tokens=agg_in, output_tokens=agg_out,
+            cost_usd=_cost,
+        )
+    # ──────────────────────────────────────────────────────────────────
+
     def _progress(step: str):
         if task_id:
             tasks.update(task_id, "running", step)
@@ -1357,6 +1407,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                 STEP1_PLAN,
                 f"Create a skill called '{skill_name}'.\nDescription: {description}",
                 max_tokens=1024,
+                _tok_accum=_tok_accum,
             )
             plan = _extract_json(plan_raw)
             if not plan or not isinstance(plan, dict):
@@ -1372,6 +1423,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                 STEP2_TOOLS,
                 f"Skill: {skill_name}\nPlan:\n{json.dumps(plan, indent=2, ensure_ascii=False)}",
                 max_tokens=2048,
+                _tok_accum=_tok_accum,
             )
             tools_list = _extract_json(tools_raw)
             if not tools_list or not isinstance(tools_list, list):
@@ -1427,7 +1479,8 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                     f"returns a string. All code for a tool MUST be indented "
                     f"under its branch — no top-level statements between branches."
                 )
-                custom_raw = _llm_call(STEP3_CODE, custom_prompt, max_tokens=2048)
+                custom_raw = _llm_call(STEP3_CODE, custom_prompt, max_tokens=2048,
+                                       _tok_accum=_tok_accum)
                 custom_code = _extract_code(custom_raw)
                 custom_code = _fix_indentation(custom_code)
                 custom_code = _fix_empty_blocks(custom_code)
@@ -1512,6 +1565,8 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                     tasks.update(task_id, "error", msg)
                 _notify(skill_name, msg)
                 _emit_pipeline_telemetry("validate_fail", attempt, start, 0)
+                _run_state["status"] = "err"; _run_state["error"] = "validate_fail"
+                _finalize_run()
                 return
 
             # Smoke test: try calling execute() with each tool
@@ -1527,6 +1582,8 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                     tasks.update(task_id, "error", msg)
                 _notify(skill_name, msg)
                 _emit_pipeline_telemetry("smoke_fail", attempt, start, 0)
+                _run_state["status"] = "err"; _run_state["error"] = "smoke_fail"
+                _finalize_run()
                 return
 
             # Enable
@@ -1541,11 +1598,15 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
             _save_skill_result(skill_name, description, tool_names, success=True)
             _log.info(f"[{skill_name}] SUCCESS in {elapsed}s, attempt {attempt}")
             _emit_pipeline_telemetry("success", attempt, start, len(tools_list))
+            _run_state["status"] = "ok"
+            _run_state["preview"] = f"created skill: {skill_name} ({len(tools_list)} tools)"
+            _finalize_run()
             return
 
         except Exception as e:
             _log.error(f"[{skill_name}] attempt {attempt} error: {e}", exc_info=True)
             last_failure = "max_attempts_exhausted"
+            _run_state["status"] = "err"; _run_state["error"] = str(e)[:500]
             continue
 
     # All attempts failed
@@ -1557,6 +1618,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
     _save_skill_result(skill_name, description, [], success=False)
     _log.error(f"[{skill_name}] FAILED after {max_attempts} attempts")
     _emit_pipeline_telemetry(last_failure, max_attempts, start, 0)
+    _finalize_run()
 
 
 def _list_skills() -> str:

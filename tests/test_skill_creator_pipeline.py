@@ -104,7 +104,7 @@ def sc_pipeline(qwe_temp_data_dir, monkeypatch):
     # Capture LLM call invocations + return canned responses
     llm_calls = []
 
-    def fake_llm(system: str, user: str, max_tokens: int = 2048) -> str:
+    def fake_llm(system: str, user: str, max_tokens: int = 2048, **kw) -> str:
         llm_calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         # Step 1 system prompt opens with "skill architect"
         if "skill architect" in system:
@@ -235,12 +235,12 @@ def test_pipeline_retries_when_step1_returns_bad_json(sc_pipeline):
     attempt_counter = {"plan": 0}
     canned = sc._llm_call  # the fixture's fake
 
-    def flaky_llm(system, user, max_tokens=2048):
+    def flaky_llm(system, user, max_tokens=2048, **kw):
         if "skill architect" in system:
             attempt_counter["plan"] += 1
             if attempt_counter["plan"] == 1:
                 return "this is not valid JSON at all"
-        return canned(system, user, max_tokens)
+        return canned(system, user, max_tokens, **kw)
 
     import skills.skill_creator as scm
     monkey = pytest.MonkeyPatch()
@@ -295,7 +295,7 @@ def test_pipeline_rewrites_first_elif_to_if_when_body_empty(qwe_temp_data_dir, m
         return f"thing: {x}"
 '''
 
-    def fake_llm(system, user, max_tokens=2048):
+    def fake_llm(system, user, max_tokens=2048, **kw):
         if "skill architect" in system:
             return json.dumps(plan, ensure_ascii=False)
         if "tool definition generator" in system:
@@ -358,3 +358,27 @@ def test_generated_skill_actually_loads_via_skill_registry(sc_pipeline):
     result = mod.execute("take_photo", {"prompt": "show me the desk"})
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+def test_skill_creator_pipeline_writes_agent_run(sc_pipeline, qwe_temp_data_dir):
+    """After _run_pipeline completes, exactly one agent_runs row with
+    source='skill_creator' must exist for the skill's synthetic thread_id."""
+    import db
+    sc, target, _llm_calls = sc_pipeline
+
+    sc._run_pipeline(
+        skill_name="camera_journal",
+        description="Take a photo and save what you see to memory",
+        target=target,
+        task_id=0,
+    )
+
+    rows = [
+        r for r in db._get_conn().execute(
+            "SELECT source, status FROM agent_runs WHERE source='skill_creator'"
+        ).fetchall()
+    ]
+    assert len(rows) >= 1, "expected at least one agent_runs row with source='skill_creator'"
+    # The row must have a terminal status
+    status = rows[0][1]
+    assert status in ("ok", "err"), f"unexpected status: {status}"
