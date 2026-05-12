@@ -61,6 +61,10 @@ from turn_context import TurnContext
 # WebSocket sessions create their own events to avoid cross-source abort.
 _abort_event = threading.Event()
 
+# Fired once per process when a client first opens the per-thread runs endpoint.
+# Signals that the user has discovered the cost-tracking feature.
+_cost_tracking_first_use_seen = False
+
 # Connected WebSocket clients for broadcast (thread-safe via copy-on-iterate)
 import threading as _threading
 _ws_clients: set = set()
@@ -3118,6 +3122,14 @@ async def thread_stats(thread_id: str):
 @app.get("/api/threads/{thread_id}/runs")
 async def get_thread_runs(thread_id: str, limit: int = 50, offset: int = 0):
     """Per-thread agent run history, newest first."""
+    global _cost_tracking_first_use_seen
+    if not _cost_tracking_first_use_seen:
+        _cost_tracking_first_use_seen = True
+        try:
+            import telemetry
+            telemetry.track_event("feature_first_use", {"feature": "cost_tracking"})
+        except Exception:
+            pass
     return db.get_runs_for_thread(thread_id, limit=limit, offset=offset)
 
 

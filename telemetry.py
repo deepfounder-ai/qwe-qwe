@@ -60,7 +60,8 @@ _log = logging.getLogger("qwe.telemetry")
 #   v1 = first release with a default project endpoint
 #        (qwelytics.deepfounder.ai Countly)
 #   v2 = added `thread_created` event + extended SOURCES with "preset"
-_CURRENT_CONSENT_VERSION = 2
+#   v3 = added `cost_tracking` to FEATURES enum (feature_first_use)
+_CURRENT_CONSENT_VERSION = 3
 
 # ── HTTP send tunables ───────────────────────────────────────────────
 # Single timeout cap for the whole urlopen call. urllib doesn't separate
@@ -206,7 +207,7 @@ FEATURES = frozenset({
     "camera_capture", "live_voice", "telegram_send",
     "scheduler_create", "skill_create", "browser_visible",
     "mcp_add", "preset_activate", "knowledge_index_url",
-    "knowledge_index_file",
+    "knowledge_index_file", "cost_tracking",
 })
 
 # Per-property enum constraints — additional check beyond type
