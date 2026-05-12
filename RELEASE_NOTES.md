@@ -1,3 +1,24 @@
+## v0.19.0 — Cost tracking & per-session analytics
+
+- New `agent_runs` table replaces `routine_runs`: one row per LLM call site
+  (main loop, synthesis, skill creator, routine fire) with full token + cost
+  capture.
+- Online pricing from the LiteLLM community JSON, cached locally, with a
+  bundled top-10 fallback for offline / air-gapped operation.
+- Sessions list now shows Tokens + Cost per thread; click a row for a
+  per-run drilldown with model, source, status, duration, tokens, and cost.
+- Routines page shows Cost (30d) so you can spot expensive scheduled jobs.
+- New Settings → Cost tracking section: pricing URL, auto-update toggle,
+  manual refresh button.
+- API: `GET /api/threads` extended with `input_tokens / output_tokens /
+  cost_usd / run_count`; new `GET /api/threads/{id}/runs`,
+  `GET /api/analytics/period`, `GET /api/pricing/status`,
+  `POST /api/pricing/refresh`.
+- Migration 008 atomically replaces legacy `routine_runs` with the new
+  `agent_runs` table.
+
+---
+
 # v0.18.7 — Canvas (sandboxed HTML side panel) + Skill import (skills.sh / Anthropic SKILL.md spec)
 
 Two big features land together because they're the same idea from opposite directions: **richer output → user** (Canvas), and **more capabilities ← community** (Skill import). Plus a Tools & skills tab rebuild so the growing skill list stays usable.
