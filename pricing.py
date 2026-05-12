@@ -16,6 +16,7 @@ Lookup chain (in get_price):
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -158,7 +159,6 @@ def _normalize_litellm(raw: dict) -> dict[str, dict[str, float]]:
 
 def _ssrf_allowed(url: str) -> bool:
     """Block private/loopback/link-local unless QWE_ALLOW_PRIVATE_URLS=1."""
-    import os
     if os.environ.get("QWE_ALLOW_PRIVATE_URLS") == "1":
         return True
     try:
@@ -175,7 +175,11 @@ def _ssrf_allowed(url: str) -> bool:
 def refresh_pricing(force: bool = False) -> bool:
     """Refresh pricing from remote. Returns True on success.
 
-    Thread-safe; concurrent callers serialize on _lock. Never raises.
+    Cache metadata updates are serialised under ``_lock``; concurrent
+    refreshes may fetch independently (network + parse happen without
+    the lock) but disk writes are atomic via ``Path.replace`` and global
+    state is set together. Never raises — network/parse errors are
+    logged and surfaced as ``False``.
     """
     global _pricing_cache, _cache_fetched_at
     url = config.get("pricing_url") or DEFAULT_PRICING_URL
