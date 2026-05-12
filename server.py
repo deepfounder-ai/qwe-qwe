@@ -2908,6 +2908,68 @@ async def list_skills():
     return skills.list_all()
 
 
+# NOTE: literal-path routes (/api/skills/import, /api/skills/imports,
+# /api/skills/imports/{name}) MUST be declared BEFORE the
+# parameterised /api/skills/{name} catch-all. FastAPI matches in
+# declaration order, so putting {name} first swallows "import" as a
+# skill name and routes it to the toggle endpoint. Same gotcha as
+# /api/presets/{preset_id} vs /api/presets/onboarding noted in
+# this file higher up.
+
+
+@app.post("/api/skills/import")
+async def import_skill_endpoint(data: dict):
+    """Import a skill from skills.sh or a GitHub URL.
+
+    Body:
+        {
+            "url": "https://skills.sh/<owner>/<repo>/<name>",
+            "overwrite": false,          // optional, replace existing user skill
+            "accept_license": false      // optional, required for non-OSS licenses
+        }
+
+    Returns the install summary (name, description, license, paths,
+    file count, hash). The Skills list UI calls /api/skills again
+    after a successful import to surface the new entry.
+    """
+    from skills import skill_import
+    url = (data.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"error": "url required"}, status_code=400)
+    try:
+        result = skill_import.import_skill(
+            url=url,
+            overwrite=bool(data.get("overwrite")),
+            accept_license=bool(data.get("accept_license")),
+        )
+    except skill_import.SkillImportError as e:
+        payload = {"error": str(e), "code": e.code}
+        if e.details:
+            payload["details"] = e.details
+        return JSONResponse(payload, status_code=e.status)
+    return result
+
+
+@app.get("/api/skills/imports")
+async def list_skill_imports():
+    """List all imported skills with their provenance (source URL,
+    license, imported_at). Used by the Skills tab to badge entries
+    that came from external sources."""
+    from skills import skill_import
+    return {"items": skill_import.list_imports()}
+
+
+@app.delete("/api/skills/imports/{name}")
+async def delete_skill_import(name: str):
+    """Remove an imported skill — deletes the adapter .py, staged
+    assets, and the provenance record. Built-in skills are not
+    importable in the first place, so this only ever affects
+    user-installed imports."""
+    from skills import skill_import
+    ok = skill_import.delete_import(name)
+    return {"ok": True, "deleted_any": ok}
+
+
 @app.post("/api/skills/{name}")
 async def toggle_skill(name: str, data: dict):
     """Enable or disable a skill."""

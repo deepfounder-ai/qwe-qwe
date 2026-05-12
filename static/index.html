@@ -5967,8 +5967,18 @@ function renderTabTools() {
         : '') +
     '</div>';
 
-  return '<h2>Tools &amp; skills</h2>' +
-    '<p class="intro">Capabilities the agent can invoke. Core tools are always active. Pluggable skills load on demand via <span class="mono">tool_search</span>.</p>' +
+  // Import-skill button sits in the header row alongside the title.
+  // Opens a modal where the user pastes a skills.sh / GitHub URL.
+  const importBtn =
+    '<div style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin-bottom:6px">' +
+      '<h2 style="margin:0">Tools &amp; skills</h2>' +
+      '<button class="btn-secondary" data-act="open-skill-import" title="Import a skill from skills.sh or a GitHub URL">' +
+        ico('download', 12) + ' Import skill' +
+      '</button>' +
+    '</div>';
+
+  return importBtn +
+    '<p class="intro">Capabilities the agent can invoke. Core tools are always active. Pluggable skills load on demand via <span class="mono">tool_search</span>. Import community skills from <a href="https://skills.sh" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">skills.sh</a> via the Import button.</p>' +
     searchBar +
     coreSection +
     skillsSection +
@@ -7747,6 +7757,9 @@ function wireEvents() {
       render();
     };
   });
+  document.querySelectorAll('[data-act="open-skill-import"]').forEach(b => {
+    b.onclick = () => openSkillImportModal({});
+  });
 
   // Voice
   const vm = document.querySelector('[data-voice-mode]');
@@ -8350,6 +8363,113 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); openShortcutsModal();
   }
 });
+
+// Import a skill from a skills.sh / GitHub URL.
+// Two-phase UX: try import → if backend returns 451 license_confirm_required,
+// re-prompt with the license shown + confirm checkbox.
+async function openSkillImportModal(opts) {
+  opts = opts || {};
+  const initialUrl = opts.url || '';
+  const acceptLicense = !!opts.acceptLicense;
+  const overwrite = !!opts.overwrite;
+  const licenseInfo = opts.licenseInfo || null;  // {license, name, description} from 451
+
+  // Prefill the URL field, optionally show license-confirm panel,
+  // optionally show overwrite checkbox if a collision was reported.
+  const licensePanel = licenseInfo
+    ? '<div style="margin-bottom:14px;padding:12px;background:rgba(245,158,11,0.08);border:1px solid var(--warn);border-radius:8px">' +
+        '<div style="display:flex;gap:10px;align-items:flex-start">' +
+          '<div style="font-size:16px;line-height:1">⚠️</div>' +
+          '<div style="flex:1">' +
+            '<div style="font-size:12.5px;font-weight:500;color:var(--fg);margin-bottom:4px">Confirm upstream license</div>' +
+            '<div style="font-size:11.5px;color:var(--fg-3);line-height:1.5">Skill <span class="mono">' + esc(licenseInfo.name) + '</span> declares the license: <span class="mono" style="color:var(--fg-2)">' + esc(licenseInfo.license) + '</span>.</div>' +
+            '<div style="font-size:11.5px;color:var(--fg-3);line-height:1.5;margin-top:6px">Some skills.sh skills (e.g. Anthropic\'s docx / pdf / pptx / xlsx) are <strong>source-available, not open source</strong>. Importing for production / commercial use requires accepting the upstream terms.</div>' +
+            '<label style="display:flex;gap:6px;align-items:center;margin-top:8px;font-size:11.5px;color:var(--fg-2);cursor:pointer">' +
+              '<input type="checkbox" id="skill-import-accept" ' + (acceptLicense ? 'checked' : '') + '>' +
+              'I accept the upstream license terms' +
+            '</label>' +
+          '</div>' +
+        '</div>' +
+      '</div>'
+    : '';
+
+  const body =
+    licensePanel +
+    '<label style="font-size:11.5px;color:var(--fg-3);display:block;margin-bottom:4px">Skill URL</label>' +
+    '<input id="skill-import-url" type="text" placeholder="https://skills.sh/<owner>/<repo>/<skill> or https://github.com/<owner>/<repo>/tree/<ref>/<path>" ' +
+      'value="' + esc(initialUrl) + '" ' +
+      'style="width:100%;padding:9px 11px;background:var(--surface);border:1px solid var(--line);border-radius:6px;color:var(--fg);font-family:var(--font-mono);font-size:12px">' +
+    '<div style="font-size:11px;color:var(--fg-4);margin-top:6px;line-height:1.5">Paste a public URL. The skill\'s <span class="mono">SKILL.md</span> + adjacent scripts will be fetched, validated, and installed under <span class="mono">~/.qwe-qwe/skills/</span>.</div>' +
+    '<label style="display:flex;gap:6px;align-items:center;margin-top:14px;font-size:11.5px;color:var(--fg-2);cursor:pointer">' +
+      '<input type="checkbox" id="skill-import-overwrite" ' + (overwrite ? 'checked' : '') + '>' +
+      'Overwrite if a skill with the same name already exists' +
+    '</label>';
+
+  let _busy = false;
+
+  openModal({
+    title: licenseInfo ? 'Import skill — confirm license' : 'Import skill',
+    body,
+    actions: [
+      { label: 'Cancel', onClick: () => { /* default closes */ } },
+      { label: licenseInfo ? 'Confirm + Import' : 'Import', primary: true,
+        busyLabel: 'Importing…',
+        onClick: async () => {
+          if (_busy) return false;
+          const url = (document.getElementById('skill-import-url').value || '').trim();
+          if (!url) { toast('Paste a URL first', 'err'); return false; }
+          const ov = !!document.getElementById('skill-import-overwrite').checked;
+          const ac = licenseInfo
+            ? !!document.getElementById('skill-import-accept').checked
+            : false;
+          if (licenseInfo && !ac) {
+            toast('Tick the license-confirm checkbox to continue', 'err');
+            return false;
+          }
+          _busy = true;
+          try {
+            const r = await api('/api/skills/import', { method: 'POST', body: {
+              url, overwrite: ov, accept_license: ac,
+            }});
+            toast('Imported ' + (r && r.name ? r.name : 'skill'));
+            await loadSkills();
+            _busy = false;
+            // Returning undefined (≠ false) closes the modal
+          } catch (e) {
+            _busy = false;
+            // Parse the error payload — it's "STATUS PATH" then the
+            // response body is lost by api(). Re-fetch to inspect.
+            try {
+              const resp = await fetch('/api/skills/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                cache: 'no-store',
+                body: JSON.stringify({ url, overwrite: ov, accept_license: ac }),
+              });
+              const j = await resp.json().catch(() => ({}));
+              if (resp.status === 451 && j.code === 'license_confirm_required') {
+                // Re-open with license panel + the prefilled url
+                closeModal();
+                setTimeout(() => openSkillImportModal({
+                  url, overwrite: ov,
+                  licenseInfo: j.details || {},
+                }), 80);
+                return false;
+              }
+              if (resp.status === 409 && j.code === 'user_collision') {
+                toast('Skill already exists — tick "Overwrite" to replace.', 'err');
+              } else {
+                toast(j.error || ('Import failed: ' + resp.status), 'err');
+              }
+            } catch (_) {
+              toast('Import failed: ' + e.message, 'err');
+            }
+            return false;  // keep modal open so user can adjust
+          }
+        }},
+    ],
+  });
+}
 
 function openShortcutsModal() {
   const rows = [

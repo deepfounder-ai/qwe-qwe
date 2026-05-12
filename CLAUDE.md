@@ -162,6 +162,27 @@ Adding a new event: edit `ALLOWED_EVENTS` schema + bump `_CURRENT_CONSENT_VERSIO
 
 Full data inventory + privacy contract: `docs/PRIVACY.md`.
 
+### Skill import from skills.sh / GitHub (`skills/skill_import.py`)
+
+**Added v0.18.x.** Imports community skills following the agentskills.io SKILL.md spec (YAML frontmatter + markdown body + optional `scripts/` `references/` `assets/`). Two layers:
+
+1. **Adapter generation**: skills.sh skills are markdown-instructions-for-LLM, qwe-qwe skills are `TOOLS + execute()` Python modules. The importer writes a thin adapter `.py` to `~/.qwe-qwe/skills/<name>.py` with `DESCRIPTION` / short `INSTRUCTION` / one tool `<name>_help` returning the SKILL.md body verbatim. Generated via `repr()`-substituted source so Windows paths with `\U` etc. don't crash the parser.
+2. **Asset staging**: scripts / references / assets land at `~/.qwe-qwe/skills_imported/<name>/`. Agent reads them via the regular `read_file` / `shell` tools.
+
+Safety surface:
+- Domain allowlist: `skills.sh`, `github.com`, `raw.githubusercontent.com`, `api.github.com`. Everything else → 403 `host_not_allowed`.
+- SSRF guard (private/loopback IPs blocked, `QWE_ALLOW_PRIVATE_URLS=1` opt-out — same env var as `/api/knowledge/url`).
+- Name validation matches the agentskills.io regex `^[a-z0-9]+(-[a-z0-9]+)*$`, ≤64 chars.
+- **Built-in skills are NOT overridable** even with `overwrite=true` — typosquatting defense via `_BUILTIN_SKILL_NAMES` set.
+- License surfacing: non-OSS-marker licenses (e.g. Anthropic's "Complete terms in LICENSE.txt") return HTTP 451 `license_confirm_required` with the license text in `details`. Web UI shows confirm panel; CLI re-POSTs with `accept_license: true`.
+- Caps: SKILL.md ≤100 KB, total fetch ≤1 MB, ≤50 files, binary/image extensions filtered out.
+
+Persistence: `skill_imports` SQLite table (migration `007`) records `name` PK, source URL, source kind, SHA-256 hash, license, imported_at — provenance for audit + future "check for upstream updates".
+
+REST: `POST /api/skills/import` (declared BEFORE `POST /api/skills/{name}` to avoid the catch-all swallowing `import` as a skill name — same FastAPI ordering gotcha as `/api/presets/onboarding`), `GET /api/skills/imports`, `DELETE /api/skills/imports/{name}`.
+
+Tests in `tests/test_skill_import.py` (33 tests) mock HTTP via `monkeypatch.setattr(si, "_fetch_url", ...)`. Full doc at `docs/SKILLS_IMPORT.md`.
+
 ### Canvas skill (`skills/canvas.py`) — sandboxed HTML side panel
 
 **Added v0.18.7.** Lets the agent render rich UI (forms / dashboards / mockups) in a 480px right-side panel. Auto-active (in `_DEFAULT_SKILLS`).

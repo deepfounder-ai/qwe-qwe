@@ -40,5 +40,6 @@ skills/
 !skills/spicy_duck.py
 !skills/serial_port.py
 !skills/canvas.py
+!skills/skill_import.py
 .claude/
 CLAUDE.md
