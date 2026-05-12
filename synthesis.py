@@ -13,7 +13,9 @@ import json
 import re
 import time
 import config
+import db
 import memory
+import pricing
 import providers
 import logger
 
@@ -85,10 +87,11 @@ def _process_group(client, model: str, group_name: str, chunks: list[dict]) -> s
         full_text = full_text[:4000]  # limit for LLM context
 
     source = chunks[0].get("source", group_name)
+    src_thread = chunks[0].get("thread_id") or group_name or "__synthesis__"
     _log.info(f"synthesis: processing group '{group_name}' ({len(chunks)} chunks, {len(full_text)} chars)")
 
     # 2. LLM: extract entities + relations + summary
-    extraction = _extract_entities(client, model, full_text)
+    extraction = _extract_entities(client, model, full_text, thread_id=src_thread)
     if not extraction:
         _log.warning(f"synthesis: extraction failed for {group_name}, skipping")
         return f"SKIP: {group_name} — extraction failed"
@@ -121,8 +124,16 @@ def _process_group(client, model: str, group_name: str, chunks: list[dict]) -> s
     return f"OK: {group_name} — {len(entities)} entities, {len(relations)} relations"
 
 
-def _extract_entities(client, model: str, text: str) -> dict | None:
+def _extract_entities(client, model: str, text: str, thread_id: str = "__synthesis__") -> dict | None:
     """Call LLM to extract entities + relations + summary from text."""
+    _started = time.time()
+    _rid = db.insert_agent_run(
+        thread_id=thread_id, source="synthesis",
+        started_at=_started, status="running",
+        model=model, provider=providers.get_active_name(),
+    )
+    _status = "ok"; _err: str | None = None; in_tok = out_tok = 0
+    content = ""
     try:
         # Use high max_tokens — model may spend tokens on thinking before JSON
         resp = client.chat.completions.create(
@@ -135,6 +146,9 @@ def _extract_entities(client, model: str, text: str) -> dict | None:
             max_tokens=4096,
             stream=False,
         )
+        if getattr(resp, "usage", None):
+            in_tok = int(getattr(resp.usage, "prompt_tokens", 0) or 0)
+            out_tok = int(getattr(resp.usage, "completion_tokens", 0) or 0)
         msg = resp.choices[0].message
         content = msg.content or ""
         # Some models put everything in reasoning_content (Qwen 3.5 with thinking enabled)
@@ -169,8 +183,23 @@ def _extract_entities(client, model: str, text: str) -> dict | None:
                 pass
         return None
     except Exception as e:
+        _status = "err"; _err = str(e)[:500]
         _log.error(f"synthesis: LLM extraction failed: {e}")
         return None
+    finally:
+        _finished = time.time()
+        _cost = None
+        try:
+            _cost = pricing.compute_cost(model, in_tok, out_tok)
+        except Exception:
+            pass
+        db.finalize_agent_run(
+            _rid, finished_at=_finished,
+            duration_ms=int((_finished - _started) * 1000),
+            status=_status, error=_err,
+            input_tokens=in_tok, output_tokens=out_tok,
+            cost_usd=_cost,
+        )
 
 
 def _upsert_entity(entity: dict, all_relations: list[dict]):

@@ -496,3 +496,31 @@ def test_agent_run_writes_agent_runs_row(monkeypatch, qwe_temp_data_dir):
     # tokens are non-negative; mock returns 0 for no-usage path or 2 via _FakeUsage
     assert r["input_tokens"] >= 0
     assert r["output_tokens"] >= 0
+
+
+def test_synthesis_call_writes_agent_runs_row(qwe_temp_data_dir, monkeypatch):
+    """15. synthesis._extract_entities() writes an agent_runs row with source='synthesis'."""
+    import synthesis
+    import db
+    import memory
+    import providers
+
+    fake = FakeStreamingClient(reply='{"entities": [], "relations": [], "summary": "test summary"}')
+    monkeypatch.setattr(providers, "get_client", lambda: fake, raising=False)
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model", raising=False)
+    monkeypatch.setattr(providers, "get_active_name", lambda: "fake", raising=False)
+
+    # Seed a single pending chunk so synthesis has work to do
+    monkeypatch.setattr(memory, "get_pending_synthesis",
+                        lambda limit: {"grp1": [{"id": "c1", "text": "hello world",
+                                                 "thread_id": "t-syn", "source": "test"}]})
+    monkeypatch.setattr(memory, "mark_synthesized", lambda ids: None)
+    # Avoid downstream side effects
+    monkeypatch.setattr(synthesis, "_upsert_entity", lambda e, r: None)
+    monkeypatch.setattr(synthesis, "_save_wiki", lambda *a, **kw: None)
+    monkeypatch.setattr(synthesis, "_update_chunk_entities", lambda ids, names: None)
+
+    synthesis.run_synthesis()
+
+    rows = [r for r in db.get_runs_for_thread("t-syn") if r["source"] == "synthesis"]
+    assert len(rows) >= 1, "expected at least one agent_runs row with source='synthesis'"
