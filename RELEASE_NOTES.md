@@ -1,3 +1,11 @@
+## v0.22.1 — Migration reliability fix
+
+- **fix(db)**: SQLite migration runner now executes statements one-by-one instead of via `executescript()`. This makes `ALTER TABLE ADD COLUMN` migrations idempotent: if `scheduler._ensure_table()` or any other helper pre-creates a column before a migration runs, the "duplicate column name" error is silently skipped rather than aborting the entire migration. Eliminates a test-ordering flakiness introduced after the v0.20 / v0.21 merge.
+- Internal: `_iter_sql_statements()` strips `--` line comments *before* splitting on `;`, so in-comment semicolons (e.g. `-- doesn't rewrite rows; each …`) no longer produce spurious SQL fragments.
+- No schema changes, no API changes, no migration files modified.
+
+---
+
 ## v0.22.0 — Auto-resume after interrupt
 
 - Every abort (WS disconnect, Stop button, server crash) is now recoverable.
