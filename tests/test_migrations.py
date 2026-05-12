@@ -222,3 +222,12 @@ def test_migration_008_copies_legacy_routine_runs(qwe_temp_data_dir):
     conn = db._get_conn()
     rows = conn.execute("SELECT cron_id, thread_id, status, source FROM agent_runs").fetchall()
     assert (1, 't1', 'ok', 'routine') in rows
+
+
+def test_migration_010_adds_budget_columns(qwe_temp_data_dir):
+    import db
+    db._migrated = False
+    conn = db._get_conn()
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(scheduled_tasks)").fetchall()}
+    assert "budget_usd_cap" in cols
+    assert "budget_period_sec" in cols
