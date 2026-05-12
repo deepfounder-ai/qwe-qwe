@@ -5,6 +5,11 @@
 -- truth for per-run history; the old data is copied across with
 -- source='routine' so existing UI continues to work.
 --
+-- Migration order: 005 created routine_runs (v0.17.32). Migrations are
+-- applied in numeric order, so by the time 008 runs the table is always
+-- present (possibly empty). The DROP at the end is guarded with IF EXISTS
+-- to keep re-applies safe under the schema_version gate.
+--
 -- status values:
 --   running  — row inserted at run start, not yet finalized
 --   ok       — agent.run finished, no error marker
@@ -38,15 +43,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_cron_id    ON agent_runs(cron_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_source     ON agent_runs(source);
 
--- Copy existing routine_runs into agent_runs (best-effort; legacy installs
--- that never created the table get a no-op via the EXISTS clause).
+-- Copy existing routine_runs into agent_runs.
 INSERT INTO agent_runs
     (cron_id, thread_id, scheduled_at, started_at, finished_at,
      duration_ms, status, error, result_preview, source)
 SELECT cron_id, COALESCE(thread_id, ''), scheduled_at, started_at, finished_at,
        duration_ms, status, error, result_preview, 'routine'
-FROM routine_runs
-WHERE EXISTS (SELECT name FROM sqlite_master WHERE type='table' AND name='routine_runs');
+FROM routine_runs;
 
 DROP TABLE IF EXISTS routine_runs;
 
