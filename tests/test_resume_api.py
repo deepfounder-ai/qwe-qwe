@@ -50,3 +50,65 @@ def test_ws_no_event_for_clean_thread(qwe_temp_data_dir, client):
                 pass  # timeout = no event, that's fine
     except Exception as e:
         pytest.skip(f"WS test setup needs adaptation: {e}")
+
+
+# ── Task 10: HTTP resume/dismiss endpoints ──
+
+def test_resume_endpoint_happy(qwe_temp_data_dir, client, mock_llm):
+    import db
+    rid = db.insert_agent_run(thread_id="t-r", source="web",
+                               started_at=time.time(), status="running")
+    db.finalize_agent_run(rid, finished_at=None, duration_ms=None, status="aborted")
+    r = client.post(f"/api/resume/{rid}")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True
+
+
+def test_resume_endpoint_unknown_run_404(client, qwe_temp_data_dir):
+    r = client.post("/api/resume/999999")
+    assert r.status_code == 404
+
+
+def test_resume_endpoint_dismissed_run_400(qwe_temp_data_dir, client):
+    import db
+    rid = db.insert_agent_run(thread_id="t1", source="web",
+                               started_at=time.time(), status="running")
+    db.finalize_agent_run(rid, finished_at=None, duration_ms=None, status="aborted")
+    db.dismiss_run(rid)
+    r = client.post(f"/api/resume/{rid}")
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_resume_endpoint_non_aborted_400(qwe_temp_data_dir, client):
+    import db
+    rid = db.insert_agent_run(thread_id="t1", source="web",
+                               started_at=time.time(), status="running")
+    db.finalize_agent_run(rid, finished_at=time.time(), duration_ms=100,
+                           status="ok")  # ok, not aborted
+    r = client.post(f"/api/resume/{rid}")
+    assert r.status_code == 400
+
+
+def test_dismiss_endpoint_sets_dismissed_at(qwe_temp_data_dir, client):
+    import db
+    rid = db.insert_agent_run(thread_id="t1", source="web",
+                               started_at=time.time(), status="running")
+    db.finalize_agent_run(rid, finished_at=None, duration_ms=None, status="aborted")
+    r = client.post(f"/api/resume/{rid}/dismiss")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    row = db._get_conn().execute(
+        "SELECT dismissed_at FROM agent_runs WHERE id=?", (rid,)
+    ).fetchone()
+    assert row[0] is not None
+
+
+def test_dismiss_endpoint_idempotent(qwe_temp_data_dir, client):
+    import db
+    rid = db.insert_agent_run(thread_id="t1", source="web",
+                               started_at=time.time(), status="running")
+    db.finalize_agent_run(rid, finished_at=None, duration_ms=None, status="aborted")
+    r1 = client.post(f"/api/resume/{rid}/dismiss")
+    r2 = client.post(f"/api/resume/{rid}/dismiss")
+    assert r1.status_code == 200 and r2.status_code == 200

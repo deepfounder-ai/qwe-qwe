@@ -126,7 +126,7 @@ _pending_canvas_prompts: dict = {}  # request_id → asyncio.Event + result
 _pending_canvas_renders: dict[str, list[dict]] = {}  # thread_id → list of renders
 _CANVAS_META_HTML_CAP = 64 * 1024  # per-render cap when persisting to message meta
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -3174,6 +3174,59 @@ async def get_thread_runs(thread_id: str, limit: int = 50, offset: int = 0):
         except Exception:
             pass
     return db.get_runs_for_thread(thread_id, limit=limit, offset=offset)
+
+
+@app.post("/api/resume/{run_id}")
+async def resume_run_endpoint(run_id: int, background_tasks: BackgroundTasks):
+    """Trigger resume of an aborted agent run. Returns immediately;
+    streaming output flows via WS."""
+    row = db._get_conn().execute(
+        "SELECT status, dismissed_at, resumed_from_run_id FROM agent_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    status, dismissed_at, already_resume = row
+    if status != "aborted":
+        return JSONResponse(
+            {"ok": False, "error": f"not aborted (status={status})"},
+            status_code=400,
+        )
+    if dismissed_at is not None:
+        return JSONResponse(
+            {"ok": False, "error": "was dismissed"},
+            status_code=400,
+        )
+    if already_resume is not None:
+        return JSONResponse(
+            {"ok": False, "error": "is itself a resume run"},
+            status_code=400,
+        )
+    # Forward-resume check: has another run already resumed this one?
+    fwd = db._get_conn().execute(
+        "SELECT id FROM agent_runs WHERE resumed_from_run_id=?", (run_id,)
+    ).fetchone()
+    if fwd:
+        return JSONResponse(
+            {"ok": False, "error": f"already resumed by run #{fwd[0]}"},
+            status_code=400,
+        )
+    # Fire in background so HTTP returns immediately; streaming goes via WS
+    import agent as _agent_mod
+    background_tasks.add_task(_agent_mod.resume_interrupted_run, run_id)
+    return {"ok": True}
+
+
+@app.post("/api/resume/{run_id}/dismiss")
+async def dismiss_run_endpoint(run_id: int):
+    """Mark an aborted run as dismissed so it is no longer offered for resume."""
+    row = db._get_conn().execute(
+        "SELECT id FROM agent_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    db.dismiss_run(run_id)
+    return {"ok": True}
 
 
 @app.post("/api/threads/{thread_id}/model")
