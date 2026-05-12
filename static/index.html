@@ -6031,7 +6031,7 @@ function renderTabSoul() {
       '<div><div class="key">' + esc(name) + '</div>' +
         (isCustom
           ? '<div class="desc">' + esc(customMeta.low || 'low') + ' ↔ ' + esc(customMeta.high || 'high') + (customMeta.description ? ' · ' + esc(customMeta.description) : '') + '</div>'
-          : '<div class="desc">' + esc(descriptions[name] || 'built-in trait') + '</div>') +
+          : '<div class="desc">' + (descriptions[name] ? esc(descriptions[name].low || '') + ' ↔ ' + esc(descriptions[name].high || '') : 'built-in trait') + '</div>') +
       '</div>' +
       '<div style="display:flex;gap:6px;align-items:center">' +
         '<select class="setting-input mono" style="width:140px" data-trait="' + esc(name) + '" data-trait-custom="' + (isCustom ? '1' : '0') + '">' +
