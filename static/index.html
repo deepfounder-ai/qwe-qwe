@@ -279,6 +279,12 @@ main.canvas { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tl-cost-chip { font-family: var(--font-mono); font-size: 10px; color: var(--fg-4); background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 4px; padding: 1px 5px; }
 .tl-cost-usd { cursor: pointer; }
 .tl-cost-usd:hover { color: var(--accent); border-color: var(--accent); }
+.tl-topline { padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.tl-topline-summary { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3); margin-bottom: 6px; line-height: 1.4; }
+.tl-topline-controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tl-topline-sel { font-size: 11px; font-family: var(--font-mono); background: var(--bg-inspector); border: 1px solid var(--line-2); color: var(--fg-2); border-radius: 4px; padding: 2px 6px; }
+.tl-topline-refresh { font-size: 10.5px; font-family: var(--font-mono); background: var(--surface); border: 1px solid var(--line-2); color: var(--fg-3); border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+.tl-topline-refresh:hover { border-color: var(--accent); color: var(--accent); }
 .tl-foot {
   padding: 10px 14px; border-top: 1px solid var(--line);
   display: flex; align-items: center; gap: 8px;
@@ -3791,6 +3797,43 @@ function openNewCronModal() {
   }, 40);
 }
 
+async function loadTopline() {
+  const src = state.toplineSource || 'all';
+  const q = src === 'all' ? '' : '&source=' + encodeURIComponent(src);
+  try {
+    const resp = await fetch('/api/analytics/period?days=30' + q);
+    const j = await resp.json();
+    state.toplineSummary =
+      'Past 30d: ' + fmtTokens(j.total_input_tokens) + ' in · ' +
+      fmtTokens(j.total_output_tokens) + ' out · ' +
+      fmtCost(j.total_cost_usd) + ' · ' + (j.run_count || 0) + ' runs';
+  } catch (e) {
+    state.toplineSummary = 'Stats unavailable';
+    console.error('topline load failed', e);
+  }
+  render();
+}
+
+function wireToplineWidget() {
+  const sel = document.getElementById('topline-source');
+  if (sel) sel.onchange = function() { state.toplineSource = sel.value; loadTopline(); };
+  const btn = document.getElementById('refresh-pricing-btn');
+  if (btn) {
+    btn.onclick = async function() {
+      btn.disabled = true;
+      btn.textContent = 'Refreshing…';
+      try {
+        const r = await fetch('/api/pricing/refresh', { method: 'POST' });
+        const j = await r.json();
+        btn.textContent = j.ok ? ('Updated (' + j.model_count + ' models)') : 'Failed';
+      } catch (e) {
+        btn.textContent = 'Failed';
+      }
+      setTimeout(function() { btn.disabled = false; btn.textContent = 'Refresh pricing'; }, 2000);
+    };
+  }
+}
+
 async function loadPresets() {
   try {
     const r = await api('/api/presets');
@@ -3985,13 +4028,33 @@ function renderThreadList() {
       (isCollapsed ? '' : items.map(row).join(''));
   };
 
+  const toplineOpen = !!state.toplineOpen;
+  const toplineHtml = toplineOpen
+    ? '<div class="tl-topline">' +
+        '<div class="tl-topline-summary" id="topline-summary">' + esc(state.toplineSummary || 'Loading…') + '</div>' +
+        '<div class="tl-topline-controls">' +
+          '<select class="tl-topline-sel" id="topline-source">' +
+            '<option value="all"' + (state.toplineSource === 'all' || !state.toplineSource ? ' selected' : '') + '>All sources</option>' +
+            '<option value="web"' + (state.toplineSource === 'web' ? ' selected' : '') + '>Web</option>' +
+            '<option value="cli"' + (state.toplineSource === 'cli' ? ' selected' : '') + '>CLI</option>' +
+            '<option value="telegram"' + (state.toplineSource === 'telegram' ? ' selected' : '') + '>Telegram</option>' +
+            '<option value="routine"' + (state.toplineSource === 'routine' ? ' selected' : '') + '>Routines</option>' +
+            '<option value="synthesis"' + (state.toplineSource === 'synthesis' ? ' selected' : '') + '>Synthesis</option>' +
+            '<option value="skill_creator"' + (state.toplineSource === 'skill_creator' ? ' selected' : '') + '>Skill creator</option>' +
+          '</select>' +
+          '<button class="tl-topline-refresh" id="refresh-pricing-btn" title="Refresh pricing data">Refresh pricing</button>' +
+        '</div>' +
+      '</div>'
+    : '';
   return '<aside class="threadlist ' + (state.threadlistOpen ? 'open' : '') + '">' +
     '<div class="tl-head">' +
       '<div class="tl-head-row"><h2>Threads</h2><span class="tl-count">'+state.threads.length+'</span>' +
+        '<button class="icon-btn" data-act="toggle-topline" title="Toggle 30-day stats">' + ico('graph', 12) + '</button>' +
         '<button class="icon-btn" data-act="new-thread" aria-label="New thread">'+ico('plusSmall',13)+'</button></div>' +
       '<div class="tl-search">' + ico('search', 11, 'style="color:var(--fg-4)"') +
         '<input data-search="thread" placeholder="Search threads…" value="' + esc(state.threadSearch) + '"></div>' +
     '</div>' +
+    toplineHtml +
     '<div class="tl-list">' +
       (pinned.length ? '<div class="tl-group-label">PINNED · '+pinned.length+'</div>' + pinned.map(row).join('') : '') +
       folderNames.map(n => folderSection(n, groups[n])).join('') +
@@ -6958,6 +7021,14 @@ function wireEvents() {
     };
   });
   document.querySelectorAll('[data-act="new-thread"]').forEach(b => { b.onclick = newThread; });
+  document.querySelectorAll('[data-act="toggle-topline"]').forEach(b => {
+    b.onclick = function() {
+      state.toplineOpen = !state.toplineOpen;
+      render();
+      if (state.toplineOpen) loadTopline();
+    };
+  });
+  wireToplineWidget();
   const search = document.querySelector('[data-search="thread"]');
   if (search) search.addEventListener('input', (e) => { state.threadSearch = e.target.value; render(); });
 
