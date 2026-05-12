@@ -118,7 +118,8 @@ def test_dismiss_endpoint_idempotent(qwe_temp_data_dir, client):
 
 def test_threads_endpoint_includes_interrupted_count(qwe_temp_data_dir, client):
     """GET /api/threads includes interrupted_count for threads with aborted runs."""
-    import db, threads as thr
+    import db
+    import threads as thr
     t = thr.create("Interrupted test thread", source="web")
     tid = t["id"]
     rid = db.insert_agent_run(thread_id=tid, source="web",
