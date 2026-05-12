@@ -4328,7 +4328,19 @@ function renderMessage(m) {
   // summary is the first thing visible, then reasoning, then the prose
   // reply. Previous order (thinking → body → tools) buried the concrete
   // actions under a wall of reasoning text.
-  return '<section class="msg' + (isUser ? ' user' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + images + files + actions + '</section>';
+  // Interrupted marker — shown when meta.interrupted is set on the row.
+  // meta may arrive as a JSON string from the server wire format; parse defensively.
+  let msgMeta = {};
+  try { msgMeta = typeof m.meta === 'string' ? JSON.parse(m.meta) : (m.meta || {}); } catch {}
+  const isInterrupted = !isUser && !!msgMeta.interrupted;
+  const interruptedMarker = isInterrupted
+    ? '<div class="interrupted-marker">' +
+        '<span class="im-icon">&#9208;</span>' +
+        '<span class="im-text">interrupted</span>' +
+        (msgMeta.run_id ? '<span class="im-runid">run #' + esc(msgMeta.run_id) + '</span>' : '') +
+      '</div>'
+    : '';
+  return '<section class="msg' + (isUser ? ' user' : '') + (isInterrupted ? ' msg-interrupted' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + interruptedMarker + images + files + actions + '</section>';
 }
 
 function renderChatView() {
