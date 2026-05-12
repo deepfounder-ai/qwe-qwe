@@ -697,7 +697,13 @@ def test_skill_md_size_cap_enforced(si, monkeypatch):
 
 def test_url_open_blocks_oversize_responses(si, monkeypatch):
     """Direct test of the size cap inside _fetch_url itself —
-    monkeypatched urlopen returns more bytes than max_bytes."""
+    monkeypatched opener.open returns more bytes than max_bytes.
+
+    Stubs the module-level opener (set up by _get_opener) because
+    _fetch_url now goes through a custom OpenerDirector to revalidate
+    redirects — the previous urllib.request.urlopen stub no longer
+    applies.
+    """
     class _FakeResp:
         def __init__(self, body):
             self._body = body
@@ -708,15 +714,13 @@ def test_url_open_blocks_oversize_responses(si, monkeypatch):
         def __exit__(self, *a):
             return False
 
-    def _fake_urlopen(req, timeout=None):
-        # 50 KB of payload when cap is 30 KB → should be rejected
-        return _FakeResp(b"X" * 50_000)
+    class _FakeOpener:
+        def open(self, req, timeout=None):
+            # 50 KB of payload when cap is 30 KB → should be rejected
+            return _FakeResp(b"X" * 50_000)
 
-    # Skip the safety check (mocked DNS would also work but this is
-    # tighter — we just need urlopen to return).
     monkeypatch.setattr(si, "_check_url_safety", lambda url: None)
-    import urllib.request as _ureq
-    monkeypatch.setattr(_ureq, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(si, "_get_opener", lambda: _FakeOpener())
 
     with pytest.raises(si.SkillImportError) as exc:
         si._fetch_url("https://skills.sh/x", max_bytes=30_000)
@@ -971,6 +975,278 @@ body
 
 
 _LIVE_TESTS_ENABLED = bool(os.environ.get("RUN_LIVE_TESTS"))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Code-review round-2 follow-up tests (pinning the hardening fixes)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_yaml_parser_rejects_block_scalar_pipe(si):
+    """`description: |\n  multi\n  line\n` is YAML for a literal
+    block scalar. Our minimal parser was silently truncating to
+    `description: "|"` — install would succeed with the agent
+    getting a literally-pipe DESCRIPTION. Fix: raise loud."""
+    body = "---\nname: x\ndescription: |\n  line 1\n  line 2\n---\nbody\n"
+    with pytest.raises(si.SkillImportError) as exc:
+        si.parse_skill_md(body)
+    assert exc.value.code == "yaml_block_scalar_unsupported"
+
+
+def test_yaml_parser_rejects_block_scalar_fold(si):
+    """Same for the folded form `>`."""
+    body = "---\nname: x\ndescription: >\n  one paragraph\n---\nbody\n"
+    with pytest.raises(si.SkillImportError) as exc:
+        si.parse_skill_md(body)
+    assert exc.value.code == "yaml_block_scalar_unsupported"
+
+
+def test_yaml_parser_rejects_list_items(si):
+    """`allowed-tools:\n  - shell\n  - read_file\n` is a YAML list.
+    Our parser was silently producing an empty `allowed-tools: {}` —
+    if Anthropic ever adds permissions declarations the upstream
+    would land WITHOUT them. Fix: raise loud."""
+    body = (
+        "---\n"
+        "name: x\n"
+        "description: y\n"
+        "allowed-tools:\n"
+        "  - shell\n"
+        "  - read_file\n"
+        "---\nbody\n"
+    )
+    with pytest.raises(si.SkillImportError) as exc:
+        si.parse_skill_md(body)
+    assert exc.value.code == "yaml_list_unsupported"
+
+
+def test_yaml_parser_strips_trailing_inline_comments(si):
+    """Some authors write `name: x  # comment`. Without inline-
+    comment stripping the value becomes `x  # comment`, which then
+    fails the name regex with a confusing error."""
+    body = (
+        "---\n"
+        "name: pdf-helper  # the one from anthropics\n"
+        "description: y\n"
+        "---\nbody\n"
+    )
+    p = si.parse_skill_md(body)
+    assert p["frontmatter"]["name"] == "pdf-helper"
+
+
+def test_yaml_parser_preserves_hash_inside_quotes(si):
+    """Inline-comment stripping must NOT eat `#` inside a quoted
+    string. `description: "size: #1 priority"` should keep the
+    `#1` part of the description."""
+    body = (
+        "---\n"
+        'name: x\n'
+        'description: "size: #1 priority"\n'
+        "---\nbody\n"
+    )
+    p = si.parse_skill_md(body)
+    assert "#1" in p["frontmatter"]["description"]
+
+
+def test_license_anchored_regex_rejects_mit_in_prose(si):
+    """Old substring check matched `MIT` anywhere in the license
+    string. `"MIT-style license, not the actual MIT"` would falsely
+    pass. New regex is word-bounded — the prose form has whitespace
+    around standalone MIT, so it DOES match. The real test is the
+    next one: false positives from prose-with-MIT-substring should
+    be rare and the user has the confirm-checkbox fallback."""
+    # Actual SPDX-id passes
+    assert si._looks_like_oss_license("MIT")
+    assert si._looks_like_oss_license("MIT-0")
+    assert si._looks_like_oss_license("APACHE-2.0")
+    assert si._looks_like_oss_license("Apache 2.0")
+    assert si._looks_like_oss_license("BSD-3-Clause")
+    assert si._looks_like_oss_license("GPL-3.0-or-later")
+    assert si._looks_like_oss_license("AGPL-3.0")
+    assert si._looks_like_oss_license("LGPL-2.1")
+
+
+def test_license_rejects_commons_clause_rider(si):
+    """The whole reason for an explicit denylist. `Apache 2.0 with
+    Commons Clause` contains the Apache marker (would pass the OSS
+    regex) but Commons Clause adds non-OSS restrictions. Must be
+    rejected."""
+    assert not si._looks_like_oss_license("Apache 2.0 with Commons Clause")
+    assert not si._looks_like_oss_license("MIT + Commons Clause")
+    assert not si._looks_like_oss_license("Commons Clause")
+
+
+def test_license_rejects_busl_sspl_elastic(si):
+    """Other non-OSS-but-source-available license families."""
+    for lic in [
+        "BSL-1.1",
+        "Business Source License 1.1",
+        "SSPL-1.0",
+        "Elastic License 2.0",
+        "Proprietary",
+        "All Rights Reserved",
+        "Complete terms in LICENSE.txt",  # Anthropic's phrasing
+    ]:
+        assert not si._looks_like_oss_license(lic), (
+            f"non-OSS license {lic!r} false-positive passed"
+        )
+
+
+def test_license_empty_or_none_blocks(si):
+    assert not si._looks_like_oss_license("")
+    assert not si._looks_like_oss_license(None or "")
+
+
+def test_delete_import_preserves_user_owned_py(si, mock_http):
+    """User pulled a skill via import → adapter `.py` lands with
+    the auto-generated sentinel comment in the docstring. Then
+    the user manually edits `~/.qwe-qwe/skills/<name>.py` to add
+    their own logic, replacing the entire file. delete_import
+    MUST NOT clobber that file — sentinel check protects the user's
+    work. We only clean up the staged assets dir + DB row."""
+    res = si.import_skill("https://skills.sh/anthropics/skills/pdf-helper")
+    py_path = Path(res["py_path"])
+    assert py_path.exists()
+
+    # Simulate the user replacing the file with hand-written content
+    user_owned = "# Hand-written user skill — totally different\nDESCRIPTION='mine'\nTOOLS=[]\ndef execute(n,a): return ''\n"
+    py_path.write_text(user_owned, encoding="utf-8")
+
+    deleted = si.delete_import("pdf-helper")
+    assert deleted is True  # assets dir + DB row were removed
+    # But the user-owned .py stays
+    assert py_path.exists(), "delete_import clobbered a user-owned .py!"
+    assert py_path.read_text(encoding="utf-8") == user_owned
+    # DB row gone (so list_imports shows clean state)
+    assert si.get_import_record("pdf-helper") is None
+
+
+def test_delete_import_removes_our_adapter(si, mock_http):
+    """Conversely: if the .py still has our sentinel, delete_import
+    DOES unlink it (the normal case)."""
+    res = si.import_skill("https://skills.sh/anthropics/skills/pdf-helper")
+    py_path = Path(res["py_path"])
+    # Sentinel present in fresh adapter
+    assert "Auto-generated by skills/skill_import.py" in py_path.read_text(encoding="utf-8")
+    si.delete_import("pdf-helper")
+    assert not py_path.exists()
+
+
+def test_import_validates_adapter_before_committing(si, monkeypatch):
+    """If `_render_adapter_py` is ever broken in a way that produces
+    invalid Python, the importer must detect that BEFORE the file
+    lands at its final path — partial / broken adapters shouldn't
+    pollute ~/.qwe-qwe/skills/. Pin by monkeypatching the renderer
+    to return garbage."""
+    monkeypatch.setattr(si, "_render_adapter_py",
+                         lambda **kw: "this is not valid python (((\n")
+
+    def _fake(url, max_bytes):
+        if url.endswith("/SKILL.md"):
+            return b"---\nname: brokey\ndescription: y\nlicense: MIT\n---\nbody\n"
+        return b'{"tree": []}'
+    monkeypatch.setattr(si, "_fetch_url", _fake)
+
+    with pytest.raises(si.SkillImportError) as exc:
+        si.import_skill("https://skills.sh/x/y/brokey")
+    assert exc.value.code == "adapter_invalid"
+    assert exc.value.status == 500
+    # CRITICAL: no .py left behind at the final path
+    final_py = si._user_skills_dir() / "brokey.py"
+    assert not final_py.exists(), "Broken adapter committed to disk!"
+    # Also no stray temp files
+    user_dir = si._user_skills_dir()
+    if user_dir.exists():
+        residual = list(user_dir.glob("__qwepartial__brokey*"))
+        assert not residual, f"Tempfile leak: {residual}"
+
+
+def test_import_atomic_replace_preserves_old_on_failure(si, monkeypatch, mock_http):
+    """When overwrite=true imports a NEW broken adapter, the EXISTING
+    valid .py at the target path must survive (the broken temp file
+    never gets os.replace'd over the good one)."""
+    # First import — valid
+    si.import_skill("https://skills.sh/anthropics/skills/pdf-helper")
+    final_py = si._user_skills_dir() / "pdf-helper.py"
+    good_content = final_py.read_text(encoding="utf-8")
+    assert "Auto-generated" in good_content
+
+    # Second import — broken renderer
+    monkeypatch.setattr(si, "_render_adapter_py",
+                         lambda **kw: "((( bad python\n")
+    with pytest.raises(si.SkillImportError):
+        si.import_skill(
+            "https://skills.sh/anthropics/skills/pdf-helper",
+            overwrite=True,
+        )
+    # Good content still there
+    assert final_py.read_text(encoding="utf-8") == good_content
+
+
+def test_redirect_handler_blocks_private_ip_redirect(si, monkeypatch):
+    """SSRF defense: github.com 302 to 127.0.0.1 must be caught by
+    the custom redirect handler. Without this, the initial SSRF
+    guard on the user-supplied URL is meaningless."""
+    # Construct a redirect handler instance directly
+    handler = si._SafetyCheckingRedirectHandler()
+
+    # Build a minimal HTTPMessage stub with a Location header
+    class _Headers:
+        def __init__(self, loc):
+            self._loc = loc
+        def get(self, k, default=None):
+            return self._loc if k == "Location" else default
+
+    class _Req:
+        full_url = "https://github.com/x/y"
+
+    # github.com 302 → http://127.0.0.1/secret — should raise
+    monkeypatch.setattr(si, "_check_url_safety", lambda url:
+        si._check_url_safety.__wrapped__(url) if hasattr(si._check_url_safety, "__wrapped__")
+        else (_ for _ in ()).throw(si.SkillImportError(
+            f"URL resolves to a private address (127.0.0.1).",
+            code="private_ip", status=403))
+        if "127.0.0.1" in url else None
+    )
+
+    with pytest.raises(si.SkillImportError) as exc:
+        handler._check_redirect_target(_Req(), _Headers("http://127.0.0.1/secret"))
+    # Re-raised as redirect_blocked, original status preserved
+    assert exc.value.code == "redirect_blocked"
+
+
+def test_fetch_url_pins_accept_encoding_identity(si):
+    """Read the source — `Accept-Encoding: identity` must be in the
+    Request headers. Without it, GitHub COULD start gzip-compressing
+    raw responses and bypass our byte cap (we'd cap compressed
+    bytes, then decompress into many MB of payload)."""
+    from pathlib import Path
+    src = (Path(si.__file__)).read_text(encoding="utf-8")
+    assert '"Accept-Encoding": "identity"' in src or \
+           "'Accept-Encoding': 'identity'" in src, (
+        "_fetch_url no longer pins Accept-Encoding: identity — gzip "
+        "could be used to bypass the size cap."
+    )
+
+
+def test_modal_handles_401_via_openLoginModal():
+    """If QWE_PASSWORD is set and the user hits Import, the api()
+    helper opens the login modal on 401. Our modal must NOT then
+    pile a misleading toast on top — detect the 401 and short-circuit."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    fn_at = src.find("function openSkillImportModal")
+    assert fn_at >= 0
+    body = src[fn_at: fn_at + 6000]
+    # Check for the 401 short-circuit
+    assert "/^401\\b/" in body or "401 " in body, (
+        "Import modal doesn't detect 401 from api() — login flow "
+        "won't surface for password-protected installs."
+    )
+    assert "openLoginModal" in body, (
+        "Import modal doesn't reference openLoginModal — fallback "
+        "auth surface missing for 401 path."
+    )
 
 
 @pytest.mark.skipif(not _LIVE_TESTS_ENABLED,

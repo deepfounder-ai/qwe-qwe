@@ -8437,8 +8437,17 @@ async function openSkillImportModal(opts) {
             // Returning undefined (≠ false) closes the modal
           } catch (e) {
             _busy = false;
-            // Parse the error payload — it's "STATUS PATH" then the
-            // response body is lost by api(). Re-fetch to inspect.
+            // 401 case — api() helper already opened the login modal
+            // (it does this internally for every endpoint, including
+            // skills/import). Don't pile our own toast on top of it.
+            // Detect by checking the error message shape `api()` uses:
+            // `new Error('401 ' + path)`.
+            if (e && /^401\b/.test(String(e.message || ''))) {
+              return false;
+            }
+            // Parse the error payload — it's "STATUS PATH" from api();
+            // the response body is lost. Re-fetch to inspect status +
+            // code, so we can route license-confirm 451 + collision 409.
             try {
               const resp = await fetch('/api/skills/import', {
                 method: 'POST',
@@ -8446,6 +8455,15 @@ async function openSkillImportModal(opts) {
                 cache: 'no-store',
                 body: JSON.stringify({ url, overwrite: ov, accept_license: ac }),
               });
+              if (resp.status === 401) {
+                // Auth required — open login modal (api() helper's
+                // path is already wired). Defensive in case the
+                // first call somehow didn't trigger it.
+                if (typeof openLoginModal === 'function' && !state._loginOpen) {
+                  openLoginModal();
+                }
+                return false;
+              }
               const j = await resp.json().catch(() => ({}));
               if (resp.status === 451 && j.code === 'license_confirm_required') {
                 // Re-open with license panel + the prefilled url
