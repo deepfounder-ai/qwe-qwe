@@ -592,3 +592,34 @@ def get_runs_for_routine(cron_id: int, limit: int = 50) -> list[dict]:
             "duration_ms", "status", "error", "result_preview",
             "input_tokens", "output_tokens", "cost_usd", "model", "provider")
     return [dict(zip(cols, r, strict=True)) for r in rows]
+
+
+def get_routine_period_spend(cron_id: int, period_sec: float) -> float:
+    """Sum agent_runs.cost_usd for this cron_id over the last period_sec.
+
+    NULL cost_usd values (pricing unknown) are treated as 0 — they don't
+    contribute to budget burn. This is intentional: a user running a local
+    LLM (cost=0) should never hit a cap; an unknown-price model should not
+    block fires either, but should be obvious in analytics.
+    """
+    import time as _t
+    cutoff = _t.time() - float(period_sec)
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM agent_runs "
+        "WHERE cron_id = ? AND started_at >= ?",
+        (int(cron_id), cutoff),
+    ).fetchone()
+    return float(row[0] or 0.0)
+
+
+def get_routine_budget(cron_id: int) -> dict | None:
+    """Return {"cap": float, "period_sec": int} or None if no cap set."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT budget_usd_cap, budget_period_sec FROM scheduled_tasks WHERE id=?",
+        (int(cron_id),),
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    return {"cap": float(row[0]), "period_sec": int(row[1] or 86400)}
