@@ -1729,6 +1729,22 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
   .stats-row .stat .v { font-size: 26px; }
 }
 
+/* ── Interrupted-turn banner ─────────────────────────────────────────── */
+.interrupt-banner { display:flex;align-items:center;gap:12px;padding:10px 14px;margin-bottom:8px;background:var(--warning-bg,#fff3cd);border-left:3px solid var(--warning,#f39c12);border-radius:6px; }
+.interrupt-banner.hidden { display: none; }
+.ib-body { flex: 1; }
+.ib-title { font-weight: 600; }
+.ib-time { font-weight:400;opacity:.7;font-size:.9em; }
+.ib-preview { font-size:.9em;opacity:.8;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%; }
+.ib-actions { display:flex;gap:6px; }
+
+/* ── Interrupted-message inline marker ──────────────────────────────── */
+.msg-interrupted { opacity: 0.85; }
+.interrupted-marker { display:inline-flex;align-items:center;gap:6px;margin-top:6px;padding:2px 8px;background:var(--bg-subtle,rgba(255,255,255,0.05));border-radius:4px;font-size:.85em;color:var(--text-muted,#888); }
+
+/* ── Interrupted-count chip in thread list ───────────────────────────── */
+.chip-interrupted { display:inline-flex;align-items:center;gap:4px;padding:2px 6px;margin-left:4px;background:var(--warning-bg,#fff3cd);border-radius:8px;font-size:.8em;color:var(--warning,#b8860b);cursor:pointer; }
+
 </style>
 </head>
 <body>
@@ -1855,6 +1871,37 @@ const toast = (text, kind) => {
     if (idx >= 0) state._toasts.splice(idx, 1);
   }, 2900);
 };
+
+function formatTimeAgo(secs) {
+  if (secs < 60) return Math.floor(secs) + 's ago';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
+function showInterruptBanner(data) {
+  const banner = document.getElementById('interruptBanner');
+  if (!banner) return;
+  document.getElementById('ib-preview').textContent =
+    (data.preview || '').slice(0, 200) || '(no output captured)';
+  banner.querySelector('.ib-time').textContent =
+    formatTimeAgo((Date.now() / 1000) - data.started_at);
+  banner.classList.remove('hidden');
+  state.interruptedRunId = data.run_id;
+  document.getElementById('ib-resume').onclick = async () => {
+    banner.classList.add('hidden');
+    try {
+      const r = await fetch('/api/resume/' + data.run_id, { method: 'POST' });
+      if (!r.ok) { banner.classList.remove('hidden'); }
+    } catch { banner.classList.remove('hidden'); }
+  };
+  document.getElementById('ib-dismiss').onclick = async () => {
+    banner.classList.add('hidden');
+    try { await fetch('/api/resume/' + data.run_id + '/dismiss', { method: 'POST' }); } catch {}
+    state.interruptedRunId = null;
+  };
+}
+
 const api = async (path, opts) => {
   opts = opts || {};
   const hasJsonBody = opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData);
@@ -2199,6 +2246,13 @@ function wireMessageSection(root) {
 
 const handleWsMessage = (msg) => {
   const t = msg.type;
+
+  // Interrupted-turn banner — must short-circuit BEFORE the streaming-message
+  // creation gate below so we don't create a ghost assistant bubble.
+  if (msg.event === 'interrupted_turn') {
+    showInterruptBanner(msg);
+    return;
+  }
 
   // Background task progress (skill_creator, sync, etc.) — these are
   // NOT chat turns and must NOT trigger the "create pending streaming
@@ -4452,7 +4506,20 @@ function renderChatView() {
       ' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
       '<polyline points="6 9 12 15 18 9"></polyline></svg>' +
     '</button>';
+  const interruptBanner =
+    '<div id="interruptBanner" class="interrupt-banner hidden">' +
+      '<div class="ib-icon">&#9888;</div>' +
+      '<div class="ib-body">' +
+        '<div class="ib-title">Previous turn was interrupted <span class="ib-time"></span></div>' +
+        '<div class="ib-preview" id="ib-preview"></div>' +
+      '</div>' +
+      '<div class="ib-actions">' +
+        '<button id="ib-resume" class="btn-primary">&#9654; Resume</button>' +
+        '<button id="ib-dismiss" class="btn-secondary">&#10005; Dismiss</button>' +
+      '</div>' +
+    '</div>';
   return '<div class="scroll-col" id="chat-scroll"><div class="inner">' + header +
+    interruptBanner +
     '<div style="flex:1;display:flex;flex-direction:column">' + (state.messages.map(renderMessage).join('') || empty) + '</div>' +
     scrollBtn + composer + '</div></div>';
 }
