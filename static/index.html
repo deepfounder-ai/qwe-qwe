@@ -4069,10 +4069,15 @@ function renderThreadList() {
         '<span class="tl-time">' + esc(fmtTime(t.updated_at || t.created_at)) + '</span>' +
       '</div>' +
       '<div class="tl-preview">' + esc(t.preview || t.last_message || '') + '</div>' +
-      ((t.input_tokens || t.output_tokens || t.cost_usd != null)
+      ((t.input_tokens || t.output_tokens || t.cost_usd != null || t.interrupted_count > 0)
         ? '<div class="tl-cost-row">' +
-            '<span class="tl-cost-chip" title="Tokens in/out">' + fmtTokens(t.input_tokens) + ' / ' + fmtTokens(t.output_tokens) + '</span>' +
-            '<span class="tl-cost-chip tl-cost-usd" title="Estimated cost" data-open-runs="' + esc(t.id) + '" data-open-runs-title="' + esc(t.name || '(untitled)') + '">' + fmtCost(t.cost_usd) + '</span>' +
+            ((t.input_tokens || t.output_tokens || t.cost_usd != null)
+              ? '<span class="tl-cost-chip" title="Tokens in/out">' + fmtTokens(t.input_tokens) + ' / ' + fmtTokens(t.output_tokens) + '</span>' +
+                '<span class="tl-cost-chip tl-cost-usd" title="Estimated cost" data-open-runs="' + esc(t.id) + '" data-open-runs-title="' + esc(t.name || '(untitled)') + '">' + fmtCost(t.cost_usd) + '</span>'
+              : '') +
+            (t.interrupted_count > 0
+              ? '<span class="chip-interrupted" data-open-runs="' + esc(t.id) + '" data-open-runs-title="' + esc(t.name || '(untitled)') + '" title="Interrupted runs">&#9208; ' + t.interrupted_count + '</span>'
+              : '') +
           '</div>'
         : '') +
       '<div class="tl-actions">' +

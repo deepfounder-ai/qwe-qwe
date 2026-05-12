@@ -3107,6 +3107,23 @@ async def list_threads(include_archived: bool = False):
     """)
     stats = {r[0]: {"est_tokens": r[1], "user_messages": r[2],
                      "assistant_messages": r[3], "tool_calls": r[4]} for r in stats_rows}
+    # Bulk-fetch interrupted (aborted, not dismissed, not yet resumed) counts per thread
+    try:
+        interrupted_rows = db.fetchall("""
+            SELECT thread_id, COUNT(*) AS cnt
+            FROM agent_runs
+            WHERE status='aborted'
+              AND dismissed_at IS NULL
+              AND resumed_from_run_id IS NULL
+              AND id NOT IN (
+                  SELECT resumed_from_run_id FROM agent_runs
+                  WHERE resumed_from_run_id IS NOT NULL
+              )
+            GROUP BY thread_id
+        """)
+        interrupted_counts = {r[0]: r[1] for r in interrupted_rows}
+    except Exception:
+        interrupted_counts = {}
     for t in all_threads:
         s = stats.get(t["id"], {})
         t["est_tokens"] = s.get("est_tokens", 0)
@@ -3118,6 +3135,7 @@ async def list_threads(include_archived: bool = False):
         t["output_tokens"] = totals["output_tokens"] if totals["run_count"] else None
         t["cost_usd"] = totals["cost_usd"] if totals["run_count"] else None
         t["run_count"] = totals["run_count"]
+        t["interrupted_count"] = int(interrupted_counts.get(t["id"], 0))
     return all_threads
 
 

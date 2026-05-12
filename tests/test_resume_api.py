@@ -114,3 +114,18 @@ def test_dismiss_endpoint_idempotent(qwe_temp_data_dir, client):
     r1 = client.post(f"/api/resume/{rid}/dismiss")
     r2 = client.post(f"/api/resume/{rid}/dismiss")
     assert r1.status_code == 200 and r2.status_code == 200
+
+
+def test_threads_endpoint_includes_interrupted_count(qwe_temp_data_dir, client):
+    """GET /api/threads includes interrupted_count for threads with aborted runs."""
+    import db, threads as thr
+    t = thr.create("Interrupted test thread", source="web")
+    tid = t["id"]
+    rid = db.insert_agent_run(thread_id=tid, source="web",
+                               started_at=time.time(), status="running")
+    db.finalize_agent_run(rid, finished_at=None, duration_ms=None, status="aborted")
+    r = client.get("/api/threads")
+    assert r.status_code == 200
+    sess = [s for s in r.json() if s.get("id") == tid]
+    assert sess, f"thread {tid} not found in /api/threads response"
+    assert sess[0].get("interrupted_count") == 1
