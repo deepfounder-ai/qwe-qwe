@@ -529,6 +529,7 @@ register_command("doctor", "Run diagnostics on all components")
 register_command("profile", "View/edit user profile")
 register_command("heartbeat", "Manage periodic tasks checklist")
 register_command("voice", "Toggle voice mode (TTS) for this chat")
+register_command("resume", "Resume the last interrupted task")
 register_command("help", "Show available commands")
 
 
@@ -783,6 +784,36 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
             send_message(chat_id, results, token, topic_id=topic_id)
 
         threading.Thread(target=_run_doctor, daemon=True).start()
+        return True
+
+    if cmd == "resume":
+        tgt_thread = thread_id or (
+            _get_or_create_dm_thread(chat_id) if not topic_id
+            else _get_or_create_thread_for_topic(chat_id, topic_id)
+        )
+        try:
+            ttl = float(config.get("resume_ttl_telegram_sec") or 86400)
+        except Exception:
+            ttl = 86400
+        row = db.get_resumable_run_for_thread(
+            tgt_thread, source_filter="telegram", ttl_sec=ttl
+        )
+        if not row:
+            send_message(chat_id, "No interrupted task to resume.", token,
+                         topic_id=topic_id)
+            return True
+        send_message(chat_id, "Resuming previous task...", token, topic_id=topic_id)
+
+        def _do_resume():
+            import agent as _agent_mod
+            try:
+                _agent_mod.resume_interrupted_run(row["id"])
+            except Exception as exc:
+                _log.warning(f"telegram /resume failed for run #{row['id']}: {exc}")
+                send_message(chat_id, f"Resume failed: {str(exc)[:200]}", token,
+                             topic_id=topic_id)
+
+        threading.Thread(target=_do_resume, daemon=True).start()
         return True
 
     if cmd == "help":

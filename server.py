@@ -65,6 +65,10 @@ _abort_event = threading.Event()
 # Signals that the user has discovered the cost-tracking feature.
 _cost_tracking_first_use_seen = False
 
+# Fired once per process when the resume endpoint is first called.
+# Signals that the user has discovered the auto-resume feature.
+_auto_resume_first_use_seen = False
+
 # Connected WebSocket clients for broadcast (thread-safe via copy-on-iterate)
 import threading as _threading
 _ws_clients: set = set()
@@ -126,7 +130,7 @@ _pending_canvas_prompts: dict = {}  # request_id → asyncio.Event + result
 _pending_canvas_renders: dict[str, list[dict]] = {}  # thread_id → list of renders
 _CANVAS_META_HTML_CAP = 64 * 1024  # per-render cap when persisting to message meta
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -139,6 +143,43 @@ import providers
 import threads
 
 _log = logger.get("server")
+
+
+def _recover_interrupted_runs_on_startup() -> None:
+    """Mark orphaned 'running' agent_runs as 'aborted' at server start.
+
+    Synthesizes an abort marker in messages so the run appears interrupted
+    in the UI. Does NOT auto-resume — Web banner / Telegram /resume /
+    scheduler auto-fire handle user-facing recovery. Must run BEFORE
+    scheduler.start() so scheduler.detect_missed_runs sees the up-to-date
+    'aborted' rows for its 5-min auto-fire window.
+    """
+    try:
+        rows = db._get_conn().execute(
+            "SELECT id, thread_id FROM agent_runs WHERE status='running'"
+        ).fetchall()
+    except Exception as e:
+        _log.warning(f"crash-recovery query failed: {e}")
+        return
+    for (rid, thread_id) in rows:
+        try:
+            db.save_message(
+                role="assistant", content="",
+                thread_id=thread_id,
+                meta={"interrupted": True, "run_id": rid,
+                      "crash_recovery": True},
+            )
+        except Exception as e:
+            _log.debug(f"crash-recovery save_message failed for #{rid}: {e}")
+        try:
+            db.finalize_agent_run(
+                rid, finished_at=None, duration_ms=None,
+                status="aborted", error="server restart",
+            )
+        except Exception as e:
+            _log.debug(f"crash-recovery finalize failed for #{rid}: {e}")
+    if rows:
+        _log.info(f"recovered {len(rows)} interrupted runs from previous session")
 
 
 def _validate_home_path(raw: str) -> Path:
@@ -355,6 +396,12 @@ async def lifespan(app: FastAPI):
             presets.ensure_preset_workspace(active_preset)
     except Exception:
         pass
+    # Recover orphaned 'running' runs from a previous crash — must run before
+    # scheduler.start() so detect_missed_runs sees up-to-date 'aborted' rows.
+    try:
+        _recover_interrupted_runs_on_startup()
+    except Exception as e:
+        _log.warning(f"crash-recovery startup: {e}")
     scheduler.start()
     # Start pricing background refresher
     try:
@@ -3116,6 +3163,23 @@ async def list_threads(include_archived: bool = False):
     """)
     stats = {r[0]: {"est_tokens": r[1], "user_messages": r[2],
                      "assistant_messages": r[3], "tool_calls": r[4]} for r in stats_rows}
+    # Bulk-fetch interrupted (aborted, not dismissed, not yet resumed) counts per thread
+    try:
+        interrupted_rows = db.fetchall("""
+            SELECT thread_id, COUNT(*) AS cnt
+            FROM agent_runs
+            WHERE status='aborted'
+              AND dismissed_at IS NULL
+              AND resumed_from_run_id IS NULL
+              AND id NOT IN (
+                  SELECT resumed_from_run_id FROM agent_runs
+                  WHERE resumed_from_run_id IS NOT NULL
+              )
+            GROUP BY thread_id
+        """)
+        interrupted_counts = {r[0]: r[1] for r in interrupted_rows}
+    except Exception:
+        interrupted_counts = {}
     for t in all_threads:
         s = stats.get(t["id"], {})
         t["est_tokens"] = s.get("est_tokens", 0)
@@ -3127,6 +3191,7 @@ async def list_threads(include_archived: bool = False):
         t["output_tokens"] = totals["output_tokens"] if totals["run_count"] else None
         t["cost_usd"] = totals["cost_usd"] if totals["run_count"] else None
         t["run_count"] = totals["run_count"]
+        t["interrupted_count"] = int(interrupted_counts.get(t["id"], 0))
     return all_threads
 
 
@@ -3183,6 +3248,67 @@ async def get_thread_runs(thread_id: str, limit: int = 50, offset: int = 0):
         except Exception:
             pass
     return db.get_runs_for_thread(thread_id, limit=limit, offset=offset)
+
+
+@app.post("/api/resume/{run_id}")
+async def resume_run_endpoint(run_id: int, background_tasks: BackgroundTasks):
+    """Trigger resume of an aborted agent run. Returns immediately;
+    streaming output flows via WS."""
+    global _auto_resume_first_use_seen
+    if not _auto_resume_first_use_seen:
+        _auto_resume_first_use_seen = True
+        try:
+            import telemetry
+            telemetry.track_event("feature_first_use", {"feature": "auto_resume"})
+        except Exception:
+            pass
+    row = db._get_conn().execute(
+        "SELECT status, dismissed_at, resumed_from_run_id FROM agent_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    status, dismissed_at, already_resume = row
+    if status != "aborted":
+        return JSONResponse(
+            {"ok": False, "error": f"not aborted (status={status})"},
+            status_code=400,
+        )
+    if dismissed_at is not None:
+        return JSONResponse(
+            {"ok": False, "error": "was dismissed"},
+            status_code=400,
+        )
+    if already_resume is not None:
+        return JSONResponse(
+            {"ok": False, "error": "is itself a resume run"},
+            status_code=400,
+        )
+    # Forward-resume check: has another run already resumed this one?
+    fwd = db._get_conn().execute(
+        "SELECT id FROM agent_runs WHERE resumed_from_run_id=?", (run_id,)
+    ).fetchone()
+    if fwd:
+        return JSONResponse(
+            {"ok": False, "error": f"already resumed by run #{fwd[0]}"},
+            status_code=400,
+        )
+    # Fire in background so HTTP returns immediately; streaming goes via WS
+    import agent as _agent_mod
+    background_tasks.add_task(_agent_mod.resume_interrupted_run, run_id)
+    return {"ok": True}
+
+
+@app.post("/api/resume/{run_id}/dismiss")
+async def dismiss_run_endpoint(run_id: int):
+    """Mark an aborted run as dismissed so it is no longer offered for resume."""
+    row = db._get_conn().execute(
+        "SELECT id FROM agent_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    db.dismiss_run(run_id)
+    return {"ok": True}
 
 
 @app.post("/api/threads/{thread_id}/model")
@@ -3296,6 +3422,29 @@ async def regenerate_turn(thread_id: str):
 
 # ── WebSocket chat ──
 
+async def _check_for_resumable_interrupt(ws: WebSocket, thread_id: str) -> None:
+    """Probe for one resumable aborted run in this thread; emit event on hit."""
+    try:
+        ttl = float(config.get("resume_ttl_web_sec") or 604800)
+    except Exception:
+        ttl = 604800
+    row = db.get_resumable_run_for_thread(thread_id, source_filter=None, ttl_sec=ttl)
+    if not row or row.get("source") == "cli":
+        return
+    try:
+        await ws.send_json({
+            "event": "interrupted_turn",
+            "run_id": row["id"],
+            "started_at": row["started_at"],
+            "preview": row.get("result_preview") or "",
+            "model": row.get("model"),
+            "source": row.get("source"),
+            "thread_id": thread_id,
+        })
+    except Exception as e:
+        _log.debug(f"interrupted_turn send failed: {e}")
+
+
 async def _ws_send_safe(ws: WebSocket, data: dict) -> bool:
     """Send JSON to a WebSocket, returning False if the connection is dead."""
     try:
@@ -3330,6 +3479,9 @@ async def websocket_chat(ws: WebSocket):
         _ws_abort_events.add(my_abort_event)
     _ws_loop = asyncio.get_event_loop()
     _log.info(f"websocket client connected ({len(_ws_clients)} total)")
+
+    # Emit interrupted_turn event if the active thread has an eligible aborted run.
+    await _check_for_resumable_interrupt(ws, threads.get_active_id() or "default")
 
     try:
         while True:

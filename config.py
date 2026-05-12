@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.21.0"
+VERSION = "0.22.0"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -219,6 +219,11 @@ EDITABLE_SETTINGS = {
     # ── Cost Tracking ──
     "pricing_url":          ("setting:pricing_url",           str, "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "URL for online pricing JSON (LiteLLM format). Override for air-gapped mirrors.", "", ""),
     "pricing_auto_update":  ("setting:pricing_auto_update",   bool, True, "Refresh pricing every 24h in background.", None, None),
+    # ── Auto-Resume ──
+    "resume_ttl_web_sec":       ("setting:resume_ttl_web_sec",       int, 604800, "How long (sec) a Web abort stays resumable. Default 7 days.", 60, 31536000),
+    "resume_ttl_telegram_sec":  ("setting:resume_ttl_telegram_sec",  int, 86400,  "How long (sec) a Telegram abort stays resumable. Default 24h.", 60, 31536000),
+    "resume_ttl_routine_sec":   ("setting:resume_ttl_routine_sec",   int, 300,    "Window (sec) for auto-firing aborted routines on server start. Default 5 min.", 0, 86400),
+    "resume_routine_auto":      ("setting:resume_routine_auto",      bool, True,   "Enable/disable routine auto-resume entirely.", None, None),
 }
 
 

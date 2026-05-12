@@ -92,47 +92,52 @@ def mock_llm(monkeypatch):
     """Patch providers.get_client() to return a deterministic fake client.
 
     The fake client exposes ``chat.completions.create(**kw)`` which returns a
-    single non-streaming response with text ``"ok"`` and no tool calls. Tests
+    streaming-compatible response with text ``"ok"`` and no tool calls.  Tests
     that need a specific reply can override via ``mock_llm.reply = "..."``.
     """
-
-    class _FakeMessage:
-        def __init__(self, content: str):
-            self.content = content
-            self.tool_calls = None
-            self.role = "assistant"
-
-    class _FakeChoice:
-        def __init__(self, content: str):
-            self.message = _FakeMessage(content)
-            self.finish_reason = "stop"
-            self.delta = _FakeMessage(content)
-
-    class _FakeResp:
-        def __init__(self, content: str):
-            self.choices = [_FakeChoice(content)]
-            self.id = "fake"
-            self.model = "fake"
-
-    class _FakeCompletions:
-        def __init__(self, holder):
-            self._holder = holder
-
-        def create(self, **_):
-            return _FakeResp(self._holder.reply)
-
-    class _FakeChat:
-        def __init__(self, holder):
-            self.completions = _FakeCompletions(holder)
-
-    class _FakeClient:
-        def __init__(self, holder):
-            self.chat = _FakeChat(holder)
 
     class _Holder:
         reply = "ok"
 
     holder = _Holder()
+
+    class _FakeDelta:
+        def __init__(self, content="", finish=None):
+            self.content = content
+            self.tool_calls = None
+            self.role = "assistant"
+            self.reasoning_content = None
+            self.reasoning = None
+
+    class _FakeChunk:
+        def __init__(self, content="", finish=None):
+            self.choices = [
+                types.SimpleNamespace(
+                    delta=_FakeDelta(content),
+                    finish_reason=finish,
+                    message=_FakeDelta(content),
+                )
+            ]
+            self.usage = None
+            self.id = "fake"
+            self.model = "fake-model"
+
+    class _FakeCompletions:
+        def __init__(self, holder):
+            self._holder = holder
+
+        def create(self, **kw):
+            # Always return a streaming generator (run_loop always passes stream=True)
+            def _gen():
+                yield _FakeChunk(content=self._holder.reply, finish=None)
+                yield _FakeChunk(content="", finish="stop")
+
+            return _gen()
+
+    class _FakeClient:
+        def __init__(self, holder):
+            self.chat = types.SimpleNamespace(completions=_FakeCompletions(holder))
+
     client = _FakeClient(holder)
 
     import providers

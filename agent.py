@@ -1303,14 +1303,18 @@ def _get_thread_model(tid: str | None) -> str | None:
     return None
 
 
-def run(user_input: str, thread_id: str | None = None,
+def run(user_input: "str | None", thread_id: str | None = None,
         source: str = "cli", image_b64: str | None = None,
         abort_event: "threading.Event | None" = None,
         ctx: TurnContext | None = None,
-        save_user_msg: bool = True) -> TurnResult:
+        save_user_msg: bool = True,
+        system_note: str | None = None) -> TurnResult:
     """Run one agent turn: user input → (tool loops) → final response.
 
     Args:
+        user_input: text from the user. May be None only when *system_note* is
+            provided — in that case no user message is saved to the thread and
+            the LLM is nudged via the system_note system message instead.
         source: "cli", "web", or "telegram" — tells the agent where it's running.
             If *ctx* is provided, its ``source`` takes precedence.
         image_b64: optional base64-encoded image for vision
@@ -1325,7 +1329,17 @@ def run(user_input: str, thread_id: str | None = None,
             turn in the messages array, but the database keeps only the
             assistant reply. Used by routine fires so each scheduled run
             doesn't insert a fake user-typed-this row that bloats the chat.
+        system_note: optional one-shot system message prepended to the next
+            LLM call only. NOT persisted to the messages table, NOT carried
+            into subsequent turns. Used by resume_interrupted_run to nudge
+            the model into "continue" mode without injecting a [system]
+            user-role message (CLAUDE.md OpenCode lesson: never inject
+            [system] messages as user-role messages).
     """
+    # Validation: at least one of user_input or system_note must be set.
+    if user_input is None and system_note is None:
+        raise ValueError("agent.run requires user_input or system_note")
+
     # Build or reuse the ctx.
     if ctx is None:
         ctx = TurnContext(source=source)
@@ -1341,15 +1355,87 @@ def run(user_input: str, thread_id: str | None = None,
     # Thread-specific model override (local variable, not global state mutation)
     model_override = _get_thread_model(thread_id)
     return _run_inner(user_input, thread_id, ctx.source or source, image_b64,
-                      model_override, ctx=ctx, save_user_msg=save_user_msg)
+                      model_override, ctx=ctx, save_user_msg=save_user_msg,
+                      system_note=system_note)
 
 
-def _run_inner(user_input: str, thread_id: str | None,
+def resume_interrupted_run(
+    run_id: int, ctx: "TurnContext | None" = None
+) -> "TurnResult":
+    """Resume a previously interrupted agent run.
+
+    Loads run metadata, validates the run is resumable, builds (or reuses)
+    a TurnContext carrying the original source / cron_id, and fires a
+    normal agent.run() with a one-shot system_note nudging the model to
+    continue. The conversation history (loaded inside agent.run via
+    db.list_messages) already contains the partial assistant message
+    flushed at abort time, so the model sees its own incomplete output
+    plus the system_note instruction.
+
+    Raises:
+        ValueError: if the run is unknown, dismissed, itself a resume run,
+                    or has already been resumed from.
+    """
+    import db as _db
+    import turn_context as _tc
+
+    conn = _db._get_conn()
+    row = conn.execute(
+        "SELECT thread_id, source, cron_id, dismissed_at, resumed_from_run_id "
+        "FROM agent_runs WHERE id=?",
+        (int(run_id),),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"run #{run_id} not found")
+    thread_id, source, cron_id, dismissed_at, already_resume = row
+    if dismissed_at is not None:
+        raise ValueError(f"run #{run_id} was dismissed")
+    if already_resume is not None:
+        raise ValueError(f"run #{run_id} is itself a resume run")
+
+    # Reverse-lookup: was this run already resumed from by something later?
+    referenced_by = conn.execute(
+        "SELECT id FROM agent_runs WHERE resumed_from_run_id = ?",
+        (int(run_id),),
+    ).fetchone()
+    if referenced_by:
+        raise ValueError(
+            f"run #{run_id} already resumed by run #{referenced_by[0]}"
+        )
+
+    # NOTE: do NOT block CLI source here. Trigger layer (Web banner / Telegram
+    # /resume) filters by source; direct executor calls (tests, tooling)
+    # accept any source.
+
+    if ctx is None:
+        ctx = _tc.TurnContext(
+            source=source,
+            cron_id=cron_id,
+            session_id=f"resume-{run_id}",
+        )
+    ctx.resumed_from_run_id = int(run_id)
+
+    return run(
+        user_input=None,
+        system_note=(
+            "The previous turn was interrupted before completing. "
+            "Continue from where you left off — do not restart, do not "
+            "repeat tool calls that already ran. If your prior partial "
+            "reply was on the right track, pick up the thread."
+        ),
+        thread_id=thread_id,
+        ctx=ctx,
+        source=source,
+    )
+
+
+def _run_inner(user_input: "str | None", thread_id: str | None,
                source: str, image_b64: str | None,
                model_override: str | None = None,
                abort_event: "threading.Event | None" = None,
                ctx: TurnContext | None = None,
-               save_user_msg: bool = True) -> TurnResult:
+               save_user_msg: bool = True,
+               system_note: str | None = None) -> TurnResult:
     """Inner agent loop."""
     # Normalise ctx + abort_event. Callers going through ``run()`` always
     # provide *ctx*; the legacy ``abort_event=`` path is kept so existing
@@ -1365,17 +1451,19 @@ def _run_inner(user_input: str, thread_id: str | None,
     try:
         return _run_inner_body(user_input, thread_id, source, image_b64,
                                model_override, abort_event, ctx,
-                               save_user_msg=save_user_msg)
+                               save_user_msg=save_user_msg,
+                               system_note=system_note)
     finally:
         _reset_ctx(_ctx_token)
 
 
-def _run_inner_body(user_input: str, thread_id: str | None,
+def _run_inner_body(user_input: "str | None", thread_id: str | None,
                     source: str, image_b64: str | None,
                     model_override: str | None,
                     abort_event: threading.Event,
                     ctx: TurnContext,
-                    save_user_msg: bool = True) -> TurnResult:
+                    save_user_msg: bool = True,
+                    system_note: str | None = None) -> TurnResult:
     """Body of the inner agent loop. Split out so _run_inner can install the
     :class:`TurnContext` on the ContextVar before and tear it down after."""
     client = providers.get_client()
@@ -1384,7 +1472,7 @@ def _run_inner_body(user_input: str, thread_id: str | None,
     turn_start = time.time()
     tid = thread_id  # None = uses active thread via db._tid()
 
-    _log.info(f"turn started | thread={tid or 'active'} | input: {user_input[:100]}")
+    _log.info(f"turn started | thread={tid or 'active'} | input: {(user_input or '')[:100]}")
 
     # Reset tool_search activations for new turn
     tools._reset_active_tools()
@@ -1403,7 +1491,7 @@ def _run_inner_body(user_input: str, thread_id: str | None,
         pass
 
     # Check if this is a fallback confirmation ("да", "yes")
-    if user_input.lower().strip() in ("да", "yes", "y", "давай", "go"):
+    if user_input and user_input.lower().strip() in ("да", "yes", "y", "давай", "go"):
         recent = db.get_recent_messages(limit=2, thread_id=tid)
         if recent and "Отправить на" in (recent[-1].get("content") or ""):
             fb_client = providers.get_fallback_client()
@@ -1434,7 +1522,8 @@ def _run_inner_body(user_input: str, thread_id: str | None,
                         _log.warning(f"fallback failed: {e}")
 
     # Sanitize surrogates (WSL terminal issue)
-    user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
+    if user_input is not None:
+        user_input = user_input.encode("utf-8", errors="replace").decode("utf-8")
 
     # Auto-compact if history is too long
     _maybe_compact(thread_id=tid)
@@ -1444,31 +1533,34 @@ def _run_inner_body(user_input: str, thread_id: str | None,
     # so each scheduled run doesn't add a fake user-typed-this row to
     # the routine thread — the user_input still goes into the LLM
     # messages array via _build_messages, just not into the database.
+    # When user_input is None (system_note-only turn), there is no user
+    # message to persist.
     user_meta = None
     if image_b64 and ctx.image_path:
         user_meta = {"image_path": ctx.image_path}
     if ctx.file_meta:
         user_meta = {**(user_meta or {}), "file": ctx.file_meta}
-    if save_user_msg:
+    if save_user_msg and user_input is not None:
         db.save_message("user", user_input, thread_id=tid, meta=user_meta)
 
-    messages = _build_messages(user_input, thread_id=tid, source=source, image_b64=image_b64)
+    messages = _build_messages(user_input or "", thread_id=tid, source=source, image_b64=image_b64)
 
     # Touch thread timestamp
     threads.touch(tid)
 
     # Task decomposition: detect complex requests and inject a step-by-step plan
-    complexity = _estimate_complexity(user_input)
-    if complexity >= 3:
-        steps = _decompose_task(client, _model, user_input)
-        if steps and len(steps) > 1:
-            plan = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
-            # Enhance the existing user message with the plan (avoid injecting a system message)
-            for m in messages:
-                if m["role"] == "user" and m["content"] == user_input:
-                    m["content"] = f"{user_input}\n\n[Recommended approach]\n{plan}\nStart with step 1."
-                    break
-            _log.info(f"task decomposed into {len(steps)} steps (complexity={complexity})")
+    if user_input:
+        complexity = _estimate_complexity(user_input)
+        if complexity >= 3:
+            steps = _decompose_task(client, _model, user_input)
+            if steps and len(steps) > 1:
+                plan = "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
+                # Enhance the existing user message with the plan (avoid injecting a system message)
+                for m in messages:
+                    if m["role"] == "user" and m["content"] == user_input:
+                        m["content"] = f"{user_input}\n\n[Recommended approach]\n{plan}\nStart with step 1."
+                        break
+                _log.info(f"task decomposed into {len(steps)} steps (complexity={complexity})")
 
     # Count auto-context hits (memories injected into system prompt)
     system_content = messages[0]["content"]
@@ -1522,6 +1614,7 @@ def _run_inner_body(user_input: str, thread_id: str | None,
             abort_event=abort_event,
             ctx=ctx,
             thread_id=tid,
+            system_note=system_note,
         )
 
         result.reply = _clean_response(loop_result["reply"])
@@ -1566,10 +1659,16 @@ def _run_inner_body(user_input: str, thread_id: str | None,
         except Exception as e:
             _log.debug(f"telemetry turn_complete (v2): {e}")
 
-        if result.tool_calls_made:
+        if result.tool_calls_made and user_input:
             _save_experience(user_input, result, stats.turns, stats.total_errors)
 
         return result
+
+    # Inject system_note as an additional system message at the top of the
+    # message list (after the soul system prompt). Applied once per turn —
+    # _build_messages() already added the soul prompt as messages[0].
+    if system_note:
+        messages.insert(1, {"role": "system", "content": system_note})
 
     # ── Legacy agent loop (v1) ──
     rounds = 0
@@ -2021,7 +2120,7 @@ def _run_inner_body(user_input: str, thread_id: str | None,
         if (not tool_calls_data
                 and (_reply_is_empty
                      or (len(raw_reply) > 20 and len(raw_reply) < 3000
-                         and (rounds == 0 and len(user_input.strip()) > 40 or _reply_looks_like_hedge)))):
+                         and (rounds == 0 and len((user_input or "").strip()) > 40 or _reply_looks_like_hedge)))):
             # Add temporary nudge (will be removed after this round)
             nudge_text = raw_reply if raw_reply.strip() else "I need to think about this..."
             messages.append({"role": "assistant", "content": nudge_text})
@@ -2096,7 +2195,7 @@ def _run_inner_body(user_input: str, thread_id: str | None,
         except Exception as e:
             _log.debug(f"telemetry turn_complete (v1): {e}")
 
-        if result.tool_calls_made:
+        if result.tool_calls_made and user_input:
             _save_experience(user_input, result, rounds, total_tool_errors)
 
         return result

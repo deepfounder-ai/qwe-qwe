@@ -183,6 +183,20 @@ Full data inventory + privacy contract: `docs/PRIVACY.md`.
 
 User-facing doc: `docs/COST_TRACKING.md`.
 
+### Auto-resume after interrupt
+
+Every abort (WS disconnect, Stop button, server crash) is recoverable. Migration 009 added `resumed_from_run_id` + `dismissed_at` to `agent_runs`. The existing agent_loop `finally:` block was extended to flush partial assistant content into `messages` with `meta.interrupted=true` (and `run_id` linking back to the aborted `agent_runs` row). A startup hook in `server.py` promotes any orphaned `running` rows to `aborted` so crashes don't leave zombies.
+
+`agent.resume_interrupted_run(run_id)` is the universal executor. It validates the run is resumable (not dismissed, not itself a resume, not already resumed), builds a TurnContext carrying the original source/cron_id, and fires a normal `agent.run` with a one-shot `system_note=` — a real `{role: "system"}` message that prepends the next LLM call only. **Do NOT inject `[system]` prefixes as user-role messages** (CLAUDE.md OpenCode lesson) — the `system_note` parameter is the clean alternative.
+
+Trigger paths per source:
+- **Web**: WS connect emits `interrupted_turn` event; UI banner shows Resume/Dismiss
+- **Telegram**: `/resume` command, scoped by `source='telegram'`
+- **Routine**: `scheduler.detect_missed_runs` auto-fires aborted routine runs within `resume_ttl_routine_sec` (default 5 min)
+- **CLI**: no resume (Ctrl+C is intentional)
+
+TTLs live in `EDITABLE_SETTINGS` — see `docs/AUTO_RESUME.md` for the user-facing guide.
+
 ### Routine budget caps (v0.21.0)
 
 Per-routine USD spending caps over a configurable rolling window. Migration `010_routine_budget.sql` adds `budget_usd_cap` (NULL = no cap) and `budget_period_sec` (default 86400) to `scheduled_tasks`.

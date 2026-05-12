@@ -834,6 +834,42 @@ def count_recent_runs_by_status(cron_id: int, limit: int = 20) -> dict:
     return {"counts": counts, "series": list(reversed(series))}
 
 
+def _auto_resume_aborted_routines(now: float) -> None:
+    """Auto-resume routine agent_runs that were aborted within the configured
+    short-window TTL (default 5 min). Called at every detect_missed_runs()
+    invocation so crash-aborted routines are picked up promptly on next boot.
+
+    Gated on ``resume_routine_auto`` config flag (default True).
+    """
+    try:
+        if not config.get("resume_routine_auto"):
+            return
+        ttl = float(config.get("resume_ttl_routine_sec") or 300)
+    except Exception:
+        return
+    cutoff = now - ttl
+    try:
+        rows = db._get_conn().execute(
+            "SELECT id, cron_id FROM agent_runs "
+            "WHERE status='aborted' AND cron_id IS NOT NULL "
+            "  AND started_at >= ? AND dismissed_at IS NULL "
+            "  AND resumed_from_run_id IS NULL "
+            "  AND id NOT IN (SELECT resumed_from_run_id FROM agent_runs "
+            "                 WHERE resumed_from_run_id IS NOT NULL)",
+            (cutoff,),
+        ).fetchall()
+    except Exception as e:
+        _log.warning(f"routine auto-resume scan failed: {e}")
+        return
+    for (rid, cron_id) in rows:
+        _log.info(f"auto-resuming routine run #{rid} (cron {cron_id})")
+        try:
+            import agent as _agent_mod
+            _agent_mod.resume_interrupted_run(rid)
+        except Exception as e:
+            _log.warning(f"routine auto-resume failed for #{rid}: {e}")
+
+
 def detect_missed_runs() -> int:
     """Scan for routines whose scheduled slot(s) lapsed while the server
     was offline; insert agent_runs rows with status=missed so the
@@ -855,6 +891,7 @@ def detect_missed_runs() -> int:
         # First boot after this feature shipped — stamp now without
         # inventing historical misses.
         db.kv_set("scheduler:last_check", str(now))
+        _auto_resume_aborted_routines(now)
         return 0
 
     # Gap threshold: only treat as "missed" if we were offline for at
@@ -862,6 +899,7 @@ def detect_missed_runs() -> int:
     # normal tick jitter, not downtime.
     if now - last_check < 60:
         db.kv_set("scheduler:last_check", str(now))
+        _auto_resume_aborted_routines(now)
         return 0
 
     _ensure_table()
@@ -902,6 +940,7 @@ def detect_missed_runs() -> int:
             _log.info(f"routine #{cron_id} '{name}': {missed} missed fires logged")
             total_missed += missed
     db.kv_set("scheduler:last_check", str(now))
+    _auto_resume_aborted_routines(now)
     return total_missed
 
 

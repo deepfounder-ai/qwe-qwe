@@ -1734,6 +1734,22 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
   .stats-row .stat .v { font-size: 26px; }
 }
 
+/* ── Interrupted-turn banner ─────────────────────────────────────────── */
+.interrupt-banner { display:flex;align-items:center;gap:12px;padding:10px 14px;margin-bottom:8px;background:var(--warning-bg,#fff3cd);border-left:3px solid var(--warning,#f39c12);border-radius:6px; }
+.interrupt-banner.hidden { display: none; }
+.ib-body { flex: 1; }
+.ib-title { font-weight: 600; }
+.ib-time { font-weight:400;opacity:.7;font-size:.9em; }
+.ib-preview { font-size:.9em;opacity:.8;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%; }
+.ib-actions { display:flex;gap:6px; }
+
+/* ── Interrupted-message inline marker ──────────────────────────────── */
+.msg-interrupted { opacity: 0.85; }
+.interrupted-marker { display:inline-flex;align-items:center;gap:6px;margin-top:6px;padding:2px 8px;background:var(--bg-subtle,rgba(255,255,255,0.05));border-radius:4px;font-size:.85em;color:var(--text-muted,#888); }
+
+/* ── Interrupted-count chip in thread list ───────────────────────────── */
+.chip-interrupted { display:inline-flex;align-items:center;gap:4px;padding:2px 6px;margin-left:4px;background:var(--warning-bg,#fff3cd);border-radius:8px;font-size:.8em;color:var(--warning,#b8860b);cursor:pointer; }
+
 </style>
 </head>
 <body>
@@ -1860,6 +1876,37 @@ const toast = (text, kind) => {
     if (idx >= 0) state._toasts.splice(idx, 1);
   }, 2900);
 };
+
+function formatTimeAgo(secs) {
+  if (secs < 60) return Math.floor(secs) + 's ago';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
+function showInterruptBanner(data) {
+  const banner = document.getElementById('interruptBanner');
+  if (!banner) return;
+  document.getElementById('ib-preview').textContent =
+    (data.preview || '').slice(0, 200) || '(no output captured)';
+  banner.querySelector('.ib-time').textContent =
+    formatTimeAgo((Date.now() / 1000) - data.started_at);
+  banner.classList.remove('hidden');
+  state.interruptedRunId = data.run_id;
+  document.getElementById('ib-resume').onclick = async () => {
+    banner.classList.add('hidden');
+    try {
+      const r = await fetch('/api/resume/' + data.run_id, { method: 'POST' });
+      if (!r.ok) { banner.classList.remove('hidden'); }
+    } catch { banner.classList.remove('hidden'); }
+  };
+  document.getElementById('ib-dismiss').onclick = async () => {
+    banner.classList.add('hidden');
+    try { await fetch('/api/resume/' + data.run_id + '/dismiss', { method: 'POST' }); } catch {}
+    state.interruptedRunId = null;
+  };
+}
+
 const api = async (path, opts) => {
   opts = opts || {};
   const hasJsonBody = opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData);
@@ -2204,6 +2251,13 @@ function wireMessageSection(root) {
 
 const handleWsMessage = (msg) => {
   const t = msg.type;
+
+  // Interrupted-turn banner — must short-circuit BEFORE the streaming-message
+  // creation gate below so we don't create a ghost assistant bubble.
+  if (msg.event === 'interrupted_turn') {
+    showInterruptBanner(msg);
+    return;
+  }
 
   // Background task progress (skill_creator, sync, etc.) — these are
   // NOT chat turns and must NOT trigger the "create pending streaming
@@ -4083,10 +4137,15 @@ function renderThreadList() {
         '<span class="tl-time">' + esc(fmtTime(t.updated_at || t.created_at)) + '</span>' +
       '</div>' +
       '<div class="tl-preview">' + esc(t.preview || t.last_message || '') + '</div>' +
-      ((t.input_tokens || t.output_tokens || t.cost_usd != null)
+      ((t.input_tokens || t.output_tokens || t.cost_usd != null || t.interrupted_count > 0)
         ? '<div class="tl-cost-row">' +
-            '<span class="tl-cost-chip" title="Tokens in/out">' + fmtTokens(t.input_tokens) + ' / ' + fmtTokens(t.output_tokens) + '</span>' +
-            '<span class="tl-cost-chip tl-cost-usd" title="Estimated cost" data-open-runs="' + esc(t.id) + '" data-open-runs-title="' + esc(t.name || '(untitled)') + '">' + fmtCost(t.cost_usd) + '</span>' +
+            ((t.input_tokens || t.output_tokens || t.cost_usd != null)
+              ? '<span class="tl-cost-chip" title="Tokens in/out">' + fmtTokens(t.input_tokens) + ' / ' + fmtTokens(t.output_tokens) + '</span>' +
+                '<span class="tl-cost-chip tl-cost-usd" title="Estimated cost" data-open-runs="' + esc(t.id) + '" data-open-runs-title="' + esc(t.name || '(untitled)') + '">' + fmtCost(t.cost_usd) + '</span>'
+              : '') +
+            (t.interrupted_count > 0
+              ? '<span class="chip-interrupted" data-open-runs="' + esc(t.id) + '" data-open-runs-title="' + esc(t.name || '(untitled)') + '" title="Interrupted runs">&#9208; ' + t.interrupted_count + '</span>'
+              : '') +
           '</div>'
         : '') +
       '<div class="tl-actions">' +
@@ -4342,7 +4401,19 @@ function renderMessage(m) {
   // summary is the first thing visible, then reasoning, then the prose
   // reply. Previous order (thinking → body → tools) buried the concrete
   // actions under a wall of reasoning text.
-  return '<section class="msg' + (isUser ? ' user' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + images + files + actions + '</section>';
+  // Interrupted marker — shown when meta.interrupted is set on the row.
+  // meta may arrive as a JSON string from the server wire format; parse defensively.
+  let msgMeta = {};
+  try { msgMeta = typeof m.meta === 'string' ? JSON.parse(m.meta) : (m.meta || {}); } catch {}
+  const isInterrupted = !isUser && !!msgMeta.interrupted;
+  const interruptedMarker = isInterrupted
+    ? '<div class="interrupted-marker">' +
+        '<span class="im-icon">&#9208;</span>' +
+        '<span class="im-text">interrupted</span>' +
+        (msgMeta.run_id ? '<span class="im-runid">run #' + esc(msgMeta.run_id) + '</span>' : '') +
+      '</div>'
+    : '';
+  return '<section class="msg' + (isUser ? ' user' : '') + (isInterrupted ? ' msg-interrupted' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + interruptedMarker + images + files + actions + '</section>';
 }
 
 function renderChatView() {
@@ -4520,7 +4591,20 @@ function renderChatView() {
       ' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
       '<polyline points="6 9 12 15 18 9"></polyline></svg>' +
     '</button>';
+  const interruptBanner =
+    '<div id="interruptBanner" class="interrupt-banner hidden">' +
+      '<div class="ib-icon">&#9888;</div>' +
+      '<div class="ib-body">' +
+        '<div class="ib-title">Previous turn was interrupted <span class="ib-time"></span></div>' +
+        '<div class="ib-preview" id="ib-preview"></div>' +
+      '</div>' +
+      '<div class="ib-actions">' +
+        '<button id="ib-resume" class="btn-primary">&#9654; Resume</button>' +
+        '<button id="ib-dismiss" class="btn-secondary">&#10005; Dismiss</button>' +
+      '</div>' +
+    '</div>';
   return '<div class="scroll-col" id="chat-scroll"><div class="inner">' + header +
+    interruptBanner +
     '<div style="flex:1;display:flex;flex-direction:column">' + (state.messages.map(renderMessage).join('') || empty) + '</div>' +
     scrollBtn + composer + '</div></div>';
 }
@@ -6727,11 +6811,80 @@ async function loadPricingStatus() {
   render();
 }
 
+function renderAutoResumeCard(settings) {
+  const s = settings || {};
+  const webDays  = Math.round(((s.resume_ttl_web_sec      && s.resume_ttl_web_sec.value      != null ? s.resume_ttl_web_sec.value      : 604800)) / 86400);
+  const tgHours  = Math.round(((s.resume_ttl_telegram_sec && s.resume_ttl_telegram_sec.value != null ? s.resume_ttl_telegram_sec.value : 86400))  / 3600);
+  const routMin  = Math.round(((s.resume_ttl_routine_sec  && s.resume_ttl_routine_sec.value  != null ? s.resume_ttl_routine_sec.value  : 300))    / 60);
+  const autoRout = s.resume_routine_auto && s.resume_routine_auto.value != null ? !!s.resume_routine_auto.value : true;
+  return settingsSection('Auto-resume',
+    settingRow('Resume window — Web (days)',
+      'How long an interrupted Web turn stays resumable.',
+      '<input type="number" class="setting-input mono" id="setting-resume_ttl_web_sec_days" min="1" max="365" value="' + webDays + '" style="width:80px">'
+    ) +
+    settingRow('Resume window — Telegram (hours)',
+      'How long an interrupted Telegram turn stays resumable.',
+      '<input type="number" class="setting-input mono" id="setting-resume_ttl_telegram_sec_hours" min="1" max="720" value="' + tgHours + '" style="width:80px">'
+    ) +
+    settingRow('Resume window — Routines (minutes)',
+      'How long aborted routine runs are eligible for auto-resume on server start.',
+      '<input type="number" class="setting-input mono" id="setting-resume_ttl_routine_sec_min" min="0" max="1440" value="' + routMin + '" style="width:80px">'
+    ) +
+    settingRow('Auto-resume routines',
+      'Automatically resume aborted routine runs when the server starts.',
+      '<button class="toggle ' + (autoRout ? 'on' : '') + '" id="setting-resume_routine_auto-btn"><span class="knob"></span></button>'
+    ) +
+    '<div style="margin-top:10px"><button class="btn-primary" id="save-auto-resume-settings">Save</button></div>'
+  );
+}
+
+function wireAutoResumeCard() {
+  const btn = document.getElementById('save-auto-resume-settings');
+  if (!btn) return;
+  btn.onclick = async () => {
+    const webDaysEl   = document.getElementById('setting-resume_ttl_web_sec_days');
+    const tgHoursEl   = document.getElementById('setting-resume_ttl_telegram_sec_hours');
+    const routMinEl   = document.getElementById('setting-resume_ttl_routine_sec_min');
+    const autoRoutBtn = document.getElementById('setting-resume_routine_auto-btn');
+    const updates = {
+      resume_ttl_web_sec:      parseInt(webDaysEl   ? webDaysEl.value   : '7')  * 86400,
+      resume_ttl_telegram_sec: parseInt(tgHoursEl   ? tgHoursEl.value   : '24') * 3600,
+      resume_ttl_routine_sec:  parseInt(routMinEl   ? routMinEl.value   : '5')  * 60,
+      resume_routine_auto:     autoRoutBtn ? autoRoutBtn.classList.contains('on') : true,
+    };
+    btn.disabled = true; btn.textContent = 'Saving…';
+    let ok = true;
+    for (const [k, v] of Object.entries(updates)) {
+      try {
+        const r = await fetch('/api/settings/' + k, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: v }),
+        });
+        if (!r.ok) ok = false;
+        else if (state.allSettings && state.allSettings[k]) state.allSettings[k].value = v;
+      } catch { ok = false; }
+    }
+    toast(ok ? 'auto-resume settings saved' : 'some settings failed to save', ok ? 'ok' : 'err');
+    btn.disabled = false; btn.textContent = 'Save';
+  };
+  // Toggle button for resume_routine_auto
+  const autoRoutBtn = document.getElementById('setting-resume_routine_auto-btn');
+  if (autoRoutBtn) {
+    autoRoutBtn.onclick = function() { autoRoutBtn.classList.toggle('on'); };
+  }
+}
+
 function renderTabCost() {
   const ps = state.pricingStatus || {};
   if (!ps.last_updated && !ps.source_url) {
     // kick off the load if not already done
     if (!state._pricingStatusLoading) { state._pricingStatusLoading = true; loadPricingStatus(); }
+  }
+  // Load allSettings if not already available (needed for auto-resume card)
+  if (!state.allSettings && !state._allSettingsLoading) {
+    state._allSettingsLoading = true;
+    api('/api/settings').then(s => { state.allSettings = s; state._allSettingsLoading = false; render(); }).catch(() => { state._allSettingsLoading = false; });
   }
   const DEFAULT_PRICING_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
   const lastUpdated = ps.last_updated
@@ -6752,7 +6905,8 @@ function renderTabCost() {
       settingRow('Last updated', ps.model_count ? (lastUpdated + ' · ' + ps.model_count + ' models') : lastUpdated,
         '<button class="btn-secondary" id="pricing-refresh-now">Refresh now</button>'
       )
-    );
+    ) +
+    renderAutoResumeCard(state.allSettings);
 }
 
 function wireTabCost() {
@@ -6806,6 +6960,7 @@ function wireTabCost() {
       refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh now';
     };
   }
+  wireAutoResumeCard();
 }
 
 function renderSettingsView() {

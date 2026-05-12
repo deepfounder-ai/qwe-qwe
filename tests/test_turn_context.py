@@ -178,3 +178,15 @@ def test_turn_context_accepts_cron_id():
     """TurnContext accepts cron_id as a kwarg."""
     ctx = TurnContext(cron_id=42)
     assert ctx.cron_id == 42
+
+
+def test_turn_context_has_resumed_from_run_id_default_none():
+    """TurnContext resumed_from_run_id field defaults to None."""
+    ctx = TurnContext()
+    assert ctx.resumed_from_run_id is None
+
+
+def test_turn_context_accepts_resumed_from_run_id():
+    """TurnContext accepts resumed_from_run_id as a kwarg."""
+    ctx = TurnContext(resumed_from_run_id=42)
+    assert ctx.resumed_from_run_id == 42

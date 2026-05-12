@@ -1211,3 +1211,13 @@ def test_consent_version_bumped_for_cost_tracking():
     # Whatever it was before, the bump should leave it >= 2
     assert telemetry._CURRENT_CONSENT_VERSION >= 2
 
+
+
+def test_auto_resume_feature_in_enum():
+    import telemetry
+    assert "auto_resume" in telemetry.FEATURES
+
+
+def test_consent_version_bumped_for_auto_resume():
+    import telemetry
+    assert telemetry._CURRENT_CONSENT_VERSION >= 4
