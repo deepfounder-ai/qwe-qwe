@@ -70,6 +70,9 @@ class TurnContext:
     # WS connection id, telegram chat id, etc — whatever helps correlate logs.
     session_id: Optional[str] = None
 
+    # ── Scheduler binding (set by scheduler._check_and_run; None otherwise) ──
+    cron_id: Optional[int] = None
+
     # Convenience emitters. Callers inside agent.py use these instead of
     # guarding "if cb is None" everywhere.
     def emit_content(self, text: str) -> None:

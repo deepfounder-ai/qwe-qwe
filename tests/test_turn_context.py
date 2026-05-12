@@ -166,3 +166,15 @@ def test_ctx_reset_restores_previous():
         reset(tok_outer)
     assert get_current() is not outer
     assert get_current() is not inner
+
+
+def test_turn_context_has_cron_id_default_none():
+    """TurnContext cron_id field defaults to None."""
+    ctx = TurnContext()
+    assert ctx.cron_id is None
+
+
+def test_turn_context_accepts_cron_id():
+    """TurnContext accepts cron_id as a kwarg."""
+    ctx = TurnContext(cron_id=42)
+    assert ctx.cron_id == 42
