@@ -57,11 +57,14 @@ import json
 import os
 import re
 import socket
+import tempfile
 import time
-import urllib.error    # explicit — urllib.request transitively imports it
-import urllib.parse    # but relying on the transitive import is fragile
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
+
+import yaml
 
 import config
 import db
@@ -153,89 +156,41 @@ def _check_url_safety(url: str) -> None:
 class _SafetyCheckingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-validate each redirect target through `_check_url_safety`.
 
-    The default `urllib.request` follows 3xx silently. A compromised
-    or evil upstream could 302 the SKILL.md fetch to `http://169.254.
-    169.254/...` (cloud metadata service) or any other private/
-    loopback IP. The initial SSRF check on the user-supplied URL
-    is meaningless if redirects aren't checked.
+    Without this, an upstream 302 could redirect a public-host fetch
+    to a private IP (169.254.169.254 metadata service, 127.0.0.1, ...)
+    and bypass the initial SSRF guard.
 
-    Spec: HTTPRedirectHandler.redirect_request returns a new Request
-    or None. We can't easily raise in there (urllib's flow eats some
-    exceptions), so we set an attr on the handler and check after
-    the fetch. The fetch itself is short-circuited by raising a
-    SkillImportError inside http_error_30X.
+    `redirect_request` is the single canonical hook — all five
+    `http_error_30X` methods in the stdlib call it with `newurl`
+    already absolutised.
     """
 
-    def http_error_301(self, req, fp, code, msg, headers):
-        self._check_redirect_target(req, headers)
-        return super().http_error_301(req, fp, code, msg, headers)
-
-    def http_error_302(self, req, fp, code, msg, headers):
-        self._check_redirect_target(req, headers)
-        return super().http_error_302(req, fp, code, msg, headers)
-
-    def http_error_303(self, req, fp, code, msg, headers):
-        self._check_redirect_target(req, headers)
-        return super().http_error_303(req, fp, code, msg, headers)
-
-    def http_error_307(self, req, fp, code, msg, headers):
-        self._check_redirect_target(req, headers)
-        return super().http_error_307(req, fp, code, msg, headers)
-
-    def http_error_308(self, req, fp, code, msg, headers):
-        self._check_redirect_target(req, headers)
-        return super().http_error_308(req, fp, code, msg, headers)
-
-    def _check_redirect_target(self, req, headers):
-        new_url = headers.get("Location") or headers.get("URI") or ""
-        if not new_url:
-            return
-        # Absolutise — relative Location headers are legal per RFC.
-        new_url = urllib.parse.urljoin(req.full_url, new_url)
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         try:
-            _check_url_safety(new_url)
+            _check_url_safety(newurl)
         except SkillImportError as e:
-            # Re-raise with a more specific message so the user sees
-            # this came from a redirect, not the initial URL.
             raise SkillImportError(
-                f"Redirect to {new_url!r} blocked: {e}",
+                f"Redirect to {newurl!r} blocked: {e}",
                 code="redirect_blocked",
                 status=e.status,
             ) from None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-# Module-level opener with our safety-checking redirect handler.
-# Built lazily on first use so test monkeypatches of urllib still
-# work (some tests stub urllib.request.urlopen directly).
-_opener = None
-
-
-def _get_opener():
-    global _opener
-    if _opener is None:
-        _opener = urllib.request.build_opener(_SafetyCheckingRedirectHandler())
-    return _opener
+_opener = urllib.request.build_opener(_SafetyCheckingRedirectHandler())
 
 
 def _fetch_url(url: str, max_bytes: int) -> bytes:
-    """Fetch a URL with size cap. Validates safety first AND
-    re-validates each redirect target (in case of 30X to a private
-    IP)."""
+    """Fetch a URL with size cap. Safety-checks the start URL and
+    each redirect hop (via `_SafetyCheckingRedirectHandler`)."""
     _check_url_safety(url)
     req = urllib.request.Request(url, headers={
         "User-Agent": _FETCH_USER_AGENT,
-        # Pin uncompressed transfer so our size cap can't be bypassed
-        # by gzip-compressed responses (we'd cap bytes-on-wire, then
-        # decompress to many MB of content). GitHub serves raw files
-        # uncompressed by default but this locks the contract.
+        # Pinned so gzip-compressed responses can't bypass the byte
+        # cap (we'd cap bytes-on-wire and decompress to many MB).
         "Accept-Encoding": "identity",
     })
-    # Use our custom opener so redirects get the safety check.
-    # Note: tests that stub `urllib.request.urlopen` directly still
-    # work — they bypass the opener — that's the intended monkeypatch
-    # surface.
-    opener = _get_opener()
-    with opener.open(req, timeout=_HTTP_TIMEOUT) as r:
+    with _opener.open(req, timeout=_HTTP_TIMEOUT) as r:
         body = r.read(max_bytes + 1)
     if len(body) > max_bytes:
         raise SkillImportError(
@@ -385,103 +340,25 @@ def parse_skill_md(body: str) -> dict:
 
 
 def _parse_yaml_subset(text: str) -> dict:
-    """Parse the YAML subset used by SKILL.md frontmatter.
+    """Parse SKILL.md frontmatter via PyYAML.
 
-    Recognises:
-      key: value
-      key: "quoted value"           — outer quotes stripped
-      key: 'quoted value'
-      key: value  # trailing-comment (stripped)
-      key:
-        sub: nested                 — one level of nested mapping
-
-    LOUDLY REJECTS (raises SkillImportError rather than silently
-    losing data):
-      key: |                        — block scalar (literal newlines)
-      key: >                        — block scalar (folded)
-      key:                          — list scalar
-        - item
-
-    The reject-loud policy is the right call: SKILL.md authors who
-    use these forms in `description:` or `allowed-tools:` would
-    silently get truncated / empty data with a quiet parse. Better
-    to fail the import so they (or we) know to extend the parser.
+    Was a hand-rolled parser; replaced with `yaml.safe_load` so that
+    block scalars, lists, inline comments, and nested mappings all
+    work natively without per-edge-case handling.
     """
-    out: dict = {}
-    current_key: str | None = None
-    current_indent = -1
-    for raw_line in text.split("\n"):
-        line = raw_line.rstrip("\r")
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        stripped = line.strip()
-
-        # Detect YAML list items (`- foo`) — we don't parse them, so
-        # if we see one under a `key:` with empty value, raise loud.
-        if stripped.startswith("- "):
-            if current_key:
-                raise SkillImportError(
-                    f"SKILL.md frontmatter uses a YAML list under "
-                    f"`{current_key}:` — qwe-qwe's minimal parser "
-                    f"doesn't support lists. Either rewrite the "
-                    f"frontmatter as a flat scalar (e.g. space-"
-                    f"separated string), or open an issue to extend "
-                    f"the parser.",
-                    code="yaml_list_unsupported")
-            # Top-level `- ` outside any key — malformed
-            raise SkillImportError(
-                "SKILL.md frontmatter has a `- ` list item at the "
-                "top level. Frontmatter must be a mapping (key: value).",
-                code="bad_frontmatter")
-
-        if ":" not in stripped:
-            continue
-        key, _, value = stripped.partition(":")
-        key = key.strip()
-        value = value.strip()
-
-        # Strip trailing `# comment` BEFORE quote-strip. YAML comments
-        # are space-hash-anything-to-EOL but only outside quoted
-        # strings. We approximate: only strip when there's a space
-        # before the hash AND the line isn't fully quoted.
-        if value and not (len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'")):
-            hash_idx = value.find(" #")
-            if hash_idx >= 0:
-                value = value[:hash_idx].rstrip()
-
-        # Strip matched outer quotes
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-            value = value[1:-1]
-
-        # Detect block-scalar markers AFTER stripping comments + quotes.
-        # `|`, `>`, `|-`, `>-`, `|+`, `>+` are all YAML block-scalar
-        # indicators that say "the value follows on indented lines."
-        # Our parser doesn't handle the indented content, so the
-        # caller would get `value == "|"` / etc. — silently wrong.
-        if value in ("|", ">", "|-", ">-", "|+", ">+"):
-            raise SkillImportError(
-                f"SKILL.md frontmatter uses a YAML block scalar "
-                f"(`{key}: {value}`) — qwe-qwe's minimal parser "
-                f"doesn't support multi-line block scalars. Rewrite "
-                f"the value as a single-line quoted string, or open "
-                f"an issue to extend the parser.",
-                code="yaml_block_scalar_unsupported")
-
-        if not value:
-            # Could be a nested-mapping start (key: \n  sub: ...)
-            current_key = key
-            current_indent = indent
-            out[key] = {}
-            continue
-        if indent > current_indent and current_key and isinstance(out.get(current_key), dict):
-            # Nested under previous "key:" with empty value
-            out[current_key][key] = value
-        else:
-            out[key] = value
-            current_key = None
-            current_indent = -1
-    return out
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise SkillImportError(
+            f"SKILL.md frontmatter is not valid YAML: {e}",
+            code="bad_frontmatter") from None
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise SkillImportError(
+            "SKILL.md frontmatter must be a mapping (key: value).",
+            code="bad_frontmatter")
+    return data
 
 
 # ── Tree listing (for staging assets) ──────────────────────────────
@@ -717,34 +594,22 @@ def import_skill(url: str, overwrite: bool = False,
     user_dir.mkdir(parents=True, exist_ok=True)
     py_path = user_dir / f"{name}.py"
 
-    # Write atomically: temp file with .py suffix (so validate_skill
-    # can importlib.util.spec_from_file_location it) in the SAME
-    # directory (so os.replace is atomic on every OS), then validate,
-    # then os.replace into final position.
-    #
-    # The temp filename uses `__qwepartial__<name>__<uuid>.py` —
-    # picked so it (a) ends in .py for the validator, (b) starts
-    # with `__` so the skill loader's _all_skill_paths() (which
-    # globs `*.py` and treats stem as skill name) ignores it as
-    # "private" if anyone scans before we replace.
-    import tempfile
+    # Atomic write: tempfile in the same dir (so os.replace is atomic
+    # on every OS) → validate via skills.validate_skill → os.replace.
+    # Prefix `__qwepartial__` keeps the partial file out of the skill
+    # loader's glob if anyone scans before we replace. Suffix `.py` so
+    # the validator's importlib loader can pick it up.
+    # validate_skill is a local import to dodge the skills/__init__.py
+    # → skills/skill_import.py circular reference.
+    from . import validate_skill as _validate_skill
     fd, tmp_str = tempfile.mkstemp(
         suffix=".py", prefix=f"__qwepartial__{name}__", dir=str(user_dir))
     tmp_path = Path(tmp_str)
+    os.close(fd)
     try:
-        os.close(fd)
         tmp_path.write_text(py_body, encoding="utf-8")
-        # Validate before the atomic replace — if the generated
-        # adapter doesn't pass skills.validate_skill, the install
-        # would land a broken .py that fails on next skill load.
-        # Better to fail loud here. Avoid circular import via local.
-        from . import validate_skill as _vs
-        ok, errs = _vs(str(tmp_path))
+        ok, errs = _validate_skill(str(tmp_path))
         if not ok:
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
             raise SkillImportError(
                 "Generated adapter failed skills.validate_skill: "
                 + "; ".join(errs)[:400] +
@@ -753,8 +618,8 @@ def import_skill(url: str, overwrite: bool = False,
                 code="adapter_invalid", status=500)
         os.replace(str(tmp_path), str(py_path))
     finally:
-        # Cleanup tempfile if it's still around (success path moved
-        # it via os.replace; failure path tried to unlink already).
+        # Single cleanup site. Success path: os.replace moved it
+        # away. Failure path: still here, unlink it.
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
@@ -786,11 +651,8 @@ def import_skill(url: str, overwrite: bool = False,
 # ── Helpers ────────────────────────────────────────────────────────
 
 
-# OSS-license detection — word-bounded regex over an SPDX-ish set.
-# Anchored at word boundaries so "MIT-style license, not the actual
-# MIT" doesn't match (whereas the old substring match did). Also
-# matches AGPL via the trailing-`GPL-3` substring + AGPL is itself
-# an OSS license so that's still correct.
+# Word-bounded SPDX-ish regex — anchored so "MIT-style license" in
+# prose doesn't false-positive (the old substring match did).
 _OSS_LICENSE_RE = re.compile(
     r"\b("
     r"APACHE[ -]?2(\.\d+)?"
@@ -806,9 +668,8 @@ _OSS_LICENSE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-# Known non-OSS-but-source-available markers. If any of these appear,
-# we OVERRIDE an OSS match (because licenses like "Apache 2.0 with
-# Commons Clause" claim Apache but aren't OSS due to the rider).
+# Markers that override an OSS match — e.g. "Apache 2.0 with Commons
+# Clause" matches the OSS regex but the rider makes it non-OSS.
 _NON_OSS_OVERRIDES = (
     "COMMONS CLAUSE",
     "BSL-1.1", "BSL 1.1", "BUSINESS SOURCE LICENSE", "BUSL",
@@ -821,22 +682,12 @@ _NON_OSS_OVERRIDES = (
 
 
 def _looks_like_oss_license(license_str: str) -> bool:
-    """Best-effort SPDX-id detection. False = caller must confirm.
-
-    Anchored regex over known-OSS markers, with an explicit denylist
-    of additive non-OSS riders (Commons Clause, BUSL, SSPL, Elastic
-    License) that piggyback on permissive language. "Apache 2.0 with
-    Commons Clause" must NOT pass — Commons Clause adds non-OSS
-    restrictions even though the base license is OSS.
-    """
+    """Best-effort SPDX-id detection. False = caller must confirm."""
     if not license_str:
         return False
     upper = license_str.upper()
-    # Hard rejects first — if any non-OSS marker is present, refuse
-    # even if there's an OSS one too.
-    for marker in _NON_OSS_OVERRIDES:
-        if marker in upper:
-            return False
+    if any(marker in upper for marker in _NON_OSS_OVERRIDES):
+        return False
     return bool(_OSS_LICENSE_RE.search(upper))
 
 
@@ -895,62 +746,48 @@ def list_imports() -> list[dict]:
     ]
 
 
-# Sentinel string embedded at the top of every generated adapter
-# `.py`. Used by `delete_import` to verify it's removing a file WE
-# wrote, not a same-named user skill the user wrote by hand. Keep in
-# sync with the actual phrase emitted by `_render_adapter_py`.
-_IMPORTER_SENTINEL = "Auto-generated by skills/skill_import.py"
-
-
 def delete_import(name: str) -> bool:
     """Remove the adapter .py + staged assets + DB record.
 
-    Sentinel-checks the `.py` before unlinking: if the file doesn't
-    contain the importer's auto-generated sentinel string, we assume
-    the user created/replaced it manually and leave it alone (but
-    still delete the staged assets + DB row, since those ARE ours).
-
-    Returns True if anything was actually deleted. The caller treats
-    this as "did we have an entry to remove" — useful for UI feedback.
+    Unlinks the .py only if it still contains `_IMPORTER_SENTINEL` —
+    if the user replaced it with hand-written content, their file
+    survives (DB row + staged assets are still removed).
     """
     py = _user_skills_dir() / f"{name}.py"
     asset_dir = _imported_assets_dir() / name
     deleted_any = False
 
-    # Only unlink the .py if it's still our generated adapter. A user
-    # might have edited the file or replaced it with a different
-    # skill of the same name — preserve their work.
-    if py.exists():
+    try:
+        with open(py, "r", encoding="utf-8", errors="replace") as f:
+            is_ours = _IMPORTER_SENTINEL in f.read(2000)
+    except FileNotFoundError:
         is_ours = False
+    except OSError:
+        is_ours = False
+    if is_ours:
         try:
-            head = py.read_text(encoding="utf-8", errors="replace")[:2000]
-            is_ours = _IMPORTER_SENTINEL in head
-        except Exception:
-            is_ours = False
-        if is_ours:
-            try:
-                py.unlink()
-                deleted_any = True
-            except Exception:
-                pass
-        # else: leave the file — the user owns it now. The DB row
-        # gets removed below so list_imports won't show it.
+            py.unlink()
+            deleted_any = True
+        except OSError:
+            pass
 
-    if asset_dir.exists() and asset_dir.is_dir():
-        # Recursive removal — guard against path-escape (we built the
-        # dir from _imported_assets_dir() / name so it's already
-        # within DATA_DIR, but the rmtree is gated all the same).
+    if asset_dir.is_dir():
         import shutil
         try:
             shutil.rmtree(asset_dir)
             deleted_any = True
-        except Exception:
+        except OSError:
             pass
     db.execute("DELETE FROM skill_imports WHERE name=?", (name,))
     return deleted_any
 
 
 # ── Adapter .py generator ──────────────────────────────────────────
+
+
+# Embedded in every generated adapter and re-read by `delete_import`
+# to distinguish files we wrote from same-named hand-written skills.
+_IMPORTER_SENTINEL = "Auto-generated by skills/skill_import.py"
 
 
 def _render_adapter_py(name: str, description: str, skill_md_body: str,
@@ -999,9 +836,9 @@ def _render_adapter_py(name: str, description: str, skill_md_body: str,
         f"Source: {source_url}",
         f"License: {license_field or '(unspecified — see staged SKILL.md)'}",
         "",
-        "Auto-generated by skills/skill_import.py. Edit this file freely if",
-        "you want to customise the wrapper; re-importing from the same URL",
-        "will overwrite it.",
+        f"{_IMPORTER_SENTINEL}. Edit this file freely if you want to",
+        "customise the wrapper; re-importing from the same URL will",
+        "overwrite it.",
         "",
         f"The full SKILL.md body is exposed via the `{help_tool}` tool. The",
         "upstream skill's scripts / references / assets are staged at the",
