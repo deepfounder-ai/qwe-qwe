@@ -6741,11 +6741,80 @@ async function loadPricingStatus() {
   render();
 }
 
+function renderAutoResumeCard(settings) {
+  const s = settings || {};
+  const webDays  = Math.round(((s.resume_ttl_web_sec      && s.resume_ttl_web_sec.value      != null ? s.resume_ttl_web_sec.value      : 604800)) / 86400);
+  const tgHours  = Math.round(((s.resume_ttl_telegram_sec && s.resume_ttl_telegram_sec.value != null ? s.resume_ttl_telegram_sec.value : 86400))  / 3600);
+  const routMin  = Math.round(((s.resume_ttl_routine_sec  && s.resume_ttl_routine_sec.value  != null ? s.resume_ttl_routine_sec.value  : 300))    / 60);
+  const autoRout = s.resume_routine_auto && s.resume_routine_auto.value != null ? !!s.resume_routine_auto.value : true;
+  return settingsSection('Auto-resume',
+    settingRow('Resume window — Web (days)',
+      'How long an interrupted Web turn stays resumable.',
+      '<input type="number" class="setting-input mono" id="setting-resume_ttl_web_sec_days" min="1" max="365" value="' + webDays + '" style="width:80px">'
+    ) +
+    settingRow('Resume window — Telegram (hours)',
+      'How long an interrupted Telegram turn stays resumable.',
+      '<input type="number" class="setting-input mono" id="setting-resume_ttl_telegram_sec_hours" min="1" max="720" value="' + tgHours + '" style="width:80px">'
+    ) +
+    settingRow('Resume window — Routines (minutes)',
+      'How long aborted routine runs are eligible for auto-resume on server start.',
+      '<input type="number" class="setting-input mono" id="setting-resume_ttl_routine_sec_min" min="0" max="1440" value="' + routMin + '" style="width:80px">'
+    ) +
+    settingRow('Auto-resume routines',
+      'Automatically resume aborted routine runs when the server starts.',
+      '<button class="toggle ' + (autoRout ? 'on' : '') + '" id="setting-resume_routine_auto-btn"><span class="knob"></span></button>'
+    ) +
+    '<div style="margin-top:10px"><button class="btn-primary" id="save-auto-resume-settings">Save</button></div>'
+  );
+}
+
+function wireAutoResumeCard() {
+  const btn = document.getElementById('save-auto-resume-settings');
+  if (!btn) return;
+  btn.onclick = async () => {
+    const webDaysEl   = document.getElementById('setting-resume_ttl_web_sec_days');
+    const tgHoursEl   = document.getElementById('setting-resume_ttl_telegram_sec_hours');
+    const routMinEl   = document.getElementById('setting-resume_ttl_routine_sec_min');
+    const autoRoutBtn = document.getElementById('setting-resume_routine_auto-btn');
+    const updates = {
+      resume_ttl_web_sec:      parseInt(webDaysEl   ? webDaysEl.value   : '7')  * 86400,
+      resume_ttl_telegram_sec: parseInt(tgHoursEl   ? tgHoursEl.value   : '24') * 3600,
+      resume_ttl_routine_sec:  parseInt(routMinEl   ? routMinEl.value   : '5')  * 60,
+      resume_routine_auto:     autoRoutBtn ? autoRoutBtn.classList.contains('on') : true,
+    };
+    btn.disabled = true; btn.textContent = 'Saving…';
+    let ok = true;
+    for (const [k, v] of Object.entries(updates)) {
+      try {
+        const r = await fetch('/api/settings/' + k, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: v }),
+        });
+        if (!r.ok) ok = false;
+        else if (state.allSettings && state.allSettings[k]) state.allSettings[k].value = v;
+      } catch { ok = false; }
+    }
+    toast(ok ? 'auto-resume settings saved' : 'some settings failed to save', ok ? 'ok' : 'err');
+    btn.disabled = false; btn.textContent = 'Save';
+  };
+  // Toggle button for resume_routine_auto
+  const autoRoutBtn = document.getElementById('setting-resume_routine_auto-btn');
+  if (autoRoutBtn) {
+    autoRoutBtn.onclick = function() { autoRoutBtn.classList.toggle('on'); };
+  }
+}
+
 function renderTabCost() {
   const ps = state.pricingStatus || {};
   if (!ps.last_updated && !ps.source_url) {
     // kick off the load if not already done
     if (!state._pricingStatusLoading) { state._pricingStatusLoading = true; loadPricingStatus(); }
+  }
+  // Load allSettings if not already available (needed for auto-resume card)
+  if (!state.allSettings && !state._allSettingsLoading) {
+    state._allSettingsLoading = true;
+    api('/api/settings').then(s => { state.allSettings = s; state._allSettingsLoading = false; render(); }).catch(() => { state._allSettingsLoading = false; });
   }
   const DEFAULT_PRICING_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
   const lastUpdated = ps.last_updated
@@ -6766,7 +6835,8 @@ function renderTabCost() {
       settingRow('Last updated', ps.model_count ? (lastUpdated + ' · ' + ps.model_count + ' models') : lastUpdated,
         '<button class="btn-secondary" id="pricing-refresh-now">Refresh now</button>'
       )
-    );
+    ) +
+    renderAutoResumeCard(state.allSettings);
 }
 
 function wireTabCost() {
@@ -6820,6 +6890,7 @@ function wireTabCost() {
       refreshBtn.disabled = false; refreshBtn.textContent = 'Refresh now';
     };
   }
+  wireAutoResumeCard();
 }
 
 function renderSettingsView() {
