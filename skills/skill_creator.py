@@ -950,8 +950,13 @@ def _create_skill_async(skill_name: str, description: str) -> str:
     )
 
 
-def _llm_call(system: str, user: str, max_tokens: int = 2048) -> str:
-    """Make a single LLM call with generous context."""
+def _llm_call(system: str, user: str) -> str:
+    """Make a single LLM call. No client-side token cap — let the model
+    use whatever the provider's context allows. Earlier flat caps
+    (2048) silently truncated step-3 mid-string on skills with 3+
+    custom tools, leaving unterminated literals the syntax-validator
+    couldn't repair. The provider's own model max is the only ceiling.
+    """
     import providers
     client = providers.get_client()
     model = providers.get_model()
@@ -963,7 +968,6 @@ def _llm_call(system: str, user: str, max_tokens: int = 2048) -> str:
             {"role": "user", "content": user},
         ],
         temperature=0.2,
-        max_tokens=max_tokens,
     )
     raw = resp.choices[0].message.content or ""
     # Strip thinking tags
@@ -1370,7 +1374,6 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
             plan_raw = _llm_call(
                 STEP1_PLAN,
                 f"Create a skill called '{skill_name}'.\nDescription: {description}",
-                max_tokens=1024,
             )
             plan = _extract_json(plan_raw)
             if not plan or not isinstance(plan, dict):
@@ -1382,16 +1385,9 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
             # ── Step 2: Tool definitions ──
             _progress(f"Step 2/5: generating tools (attempt {attempt})")
             _log.info(f"[{skill_name}] step 2: generating tool definitions")
-            # Scale token budget to planned tool count — a single tool
-            # definition with parameters easily takes 400-600 tokens; 3+
-            # tools at the old flat 2048 cap truncated mid-output and the
-            # JSON repair couldn't reconstruct what wasn't streamed.
-            planned_tool_count = max(1, len(plan.get("tools", [])))
-            step2_tokens = max(2048, 800 * planned_tool_count)
             tools_raw = _llm_call(
                 STEP2_TOOLS,
                 f"Skill: {skill_name}\nPlan:\n{json.dumps(plan, indent=2, ensure_ascii=False)}",
-                max_tokens=step2_tokens,
             )
             tools_list = _extract_json(tools_raw)
             if not tools_list or not isinstance(tools_list, list):
@@ -1447,14 +1443,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                     f"returns a string. All code for a tool MUST be indented "
                     f"under its branch — no top-level statements between branches."
                 )
-                # Each custom tool branch with a full implementation
-                # (not stub `pass`) takes 400-1500 tokens. At the old
-                # flat 2048 cap with 3 custom tools, the LLM ran out
-                # mid-function — left an unterminated string literal at
-                # the truncation point and `ast.parse` rejected the
-                # whole file. Scale the budget.
-                step3_tokens = max(2048, 1500 * len(custom_tools))
-                custom_raw = _llm_call(STEP3_CODE, custom_prompt, max_tokens=step3_tokens)
+                custom_raw = _llm_call(STEP3_CODE, custom_prompt)
                 custom_code = _extract_code(custom_raw)
                 custom_code = _fix_indentation(custom_code)
                 custom_code = _fix_empty_blocks(custom_code)
