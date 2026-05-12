@@ -468,3 +468,83 @@ def test_concurrent_agent_runs_no_crosstalk(monkeypatch, qwe_temp_data_dir):
         assert item not in got_b, f"crosstalk: {item!r} leaked A→B"
     for item in got_b:
         assert item not in got_a, f"crosstalk: {item!r} leaked B→A"
+
+
+def test_agent_run_writes_agent_runs_row(monkeypatch, qwe_temp_data_dir):
+    """14. agent.run() instruments agent_runs table via run_loop bracket.
+
+    Verifies that insert_agent_run / finalize_agent_run are called for every
+    turn: the row must exist, have the correct source, a terminal status, and
+    non-negative token counts.
+    """
+    import agent
+    import db
+    import providers
+
+    fake = FakeStreamingClient(reply="hello")
+    monkeypatch.setattr(providers, "get_client", lambda: fake, raising=False)
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model", raising=False)
+    monkeypatch.setattr(providers, "get_active_name", lambda: "fake", raising=False)
+
+    agent.run("hello", thread_id="t-runs-test", source="cli")
+
+    rows = db.get_runs_for_thread("t-runs-test")
+    assert len(rows) >= 1, "expected at least one agent_runs row"
+    r = rows[0]
+    assert r["source"] == "cli"
+    assert r["status"] in ("ok", "err", "aborted")
+    # tokens are non-negative; mock returns 0 for no-usage path or 2 via _FakeUsage
+    assert r["input_tokens"] >= 0
+    assert r["output_tokens"] >= 0
+
+
+def test_synthesis_call_writes_agent_runs_row(qwe_temp_data_dir, monkeypatch):
+    """15. synthesis._extract_entities() writes an agent_runs row with source='synthesis'."""
+    import synthesis
+    import db
+    import memory
+    import providers
+
+    fake = FakeStreamingClient(reply='{"entities": [], "relations": [], "summary": "test summary"}')
+    monkeypatch.setattr(providers, "get_client", lambda: fake, raising=False)
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model", raising=False)
+    monkeypatch.setattr(providers, "get_active_name", lambda: "fake", raising=False)
+
+    # Seed a single pending chunk so synthesis has work to do
+    monkeypatch.setattr(memory, "get_pending_synthesis",
+                        lambda limit: {"grp1": [{"id": "c1", "text": "hello world",
+                                                 "thread_id": "t-syn", "source": "test"}]})
+    monkeypatch.setattr(memory, "mark_synthesized", lambda ids: None)
+    # Avoid downstream side effects
+    monkeypatch.setattr(synthesis, "_upsert_entity", lambda e, r: None)
+    monkeypatch.setattr(synthesis, "_save_wiki", lambda *a, **kw: None)
+    monkeypatch.setattr(synthesis, "_update_chunk_entities", lambda ids, names: None)
+
+    synthesis.run_synthesis()
+
+    rows = [r for r in db.get_runs_for_thread("t-syn") if r["source"] == "synthesis"]
+    assert len(rows) >= 1, "expected at least one agent_runs row with source='synthesis'"
+
+
+def test_compaction_folds_into_parent_run(monkeypatch, qwe_temp_data_dir):
+    """Internal compaction calls inside agent_loop should NOT create separate
+    agent_runs rows — they're folded into the parent turn's totals."""
+    import agent
+    import db
+    import providers
+
+    fake = FakeStreamingClient(reply="ok")
+    monkeypatch.setattr(providers, "get_client", lambda: fake, raising=False)
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model", raising=False)
+    monkeypatch.setattr(providers, "get_active_name", lambda: "fake", raising=False)
+
+    for _ in range(5):
+        agent.run("hi", thread_id="compact-test", source="cli")
+
+    rows = db.get_runs_for_thread("compact-test")
+    # 5 turns → 5 rows. Compaction internal LLM calls should NOT add new rows.
+    assert len(rows) == 5, (
+        f"expected exactly 5 agent_runs rows for 5 turns, got {len(rows)}. "
+        "Compaction calls may be creating extra rows instead of folding into "
+        "the parent run."
+    )

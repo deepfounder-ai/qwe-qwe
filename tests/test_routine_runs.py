@@ -5,6 +5,11 @@ actually fired vs was skipped because the server was offline at the
 scheduled time. Before this, ``last_run`` only reflected the most
 recent attempt — a weekly routine that failed to fire three weeks
 running looked identical to one that had fired yesterday.
+
+v0.19.0 migrated from routine_runs to agent_runs: ok/err rows are now
+written by agent_loop.run_loop when ctx.cron_id is set; scheduler only
+writes missed/skipped rows via db.insert_skipped_run.  The test mocks
+simulate what agent_loop does by writing the row through db directly.
 """
 from __future__ import annotations
 
@@ -32,13 +37,42 @@ def sched(qwe_temp_data_dir):
 
 
 def test_successful_fire_logs_ok_row(sched, monkeypatch):
-    """A successful agent.run records a routine_runs row with status=ok."""
+    """A successful agent.run records an agent_runs row with status=ok.
+
+    The real path: agent_loop.run_loop writes the row when ctx.cron_id is set.
+    The mock simulates that by writing the row through db directly.
+    """
     import agent
+    import db
 
     class _FakeResult:
         def __init__(self, r): self.reply = r
-    monkeypatch.setattr(agent, "run",
-                         lambda u, **kw: _FakeResult("all good"))
+
+    def _fake_run(u, thread_id=None, source="cli", ctx=None, **kw):
+        # Simulate what agent_loop does: write an agent_runs row for this fire.
+        cron_id_val = ctx.cron_id if ctx is not None else None
+        rid = db.insert_agent_run(
+            thread_id=thread_id or "",
+            cron_id=cron_id_val,
+            source="routine",
+            scheduled_at=time.time(),
+            started_at=time.time(),
+            status="running",
+        )
+        db.finalize_agent_run(
+            rid,
+            finished_at=time.time(),
+            duration_ms=10,
+            status="ok",
+            error=None,
+            result_preview="all good",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=None,
+        )
+        return _FakeResult("all good")
+
+    monkeypatch.setattr(agent, "run", _fake_run)
 
     r = sched.add("alpha", "ping", "every 1h", skip_dry_run=True)
     cron_id = [t["id"] for t in sched.list_tasks() if t["name"] == "alpha"][0]
@@ -52,8 +86,41 @@ def test_successful_fire_logs_ok_row(sched, monkeypatch):
 
 
 def test_crashed_fire_logs_err_row(sched, monkeypatch):
+    """A crashing agent.run still results in an agent_runs row with status=err.
+
+    When agent.run raises, the exception propagates back to _execute_routine;
+    the run is considered 'err'. Since we're mocking agent.run (bypassing
+    agent_loop), the mock itself writes the err row to agent_runs to simulate
+    what agent_loop would do in the crash path.
+    """
     import agent
-    monkeypatch.setattr(agent, "run", lambda u, **kw: (_ for _ in ()).throw(RuntimeError("nope")))
+    import db
+
+    def _fake_crash(u, thread_id=None, source="cli", ctx=None, **kw):
+        # Simulate agent_loop writing an err row before propagating the exception.
+        cron_id_val = ctx.cron_id if ctx is not None else None
+        rid = db.insert_agent_run(
+            thread_id=thread_id or "",
+            cron_id=cron_id_val,
+            source="routine",
+            scheduled_at=time.time(),
+            started_at=time.time(),
+            status="running",
+        )
+        db.finalize_agent_run(
+            rid,
+            finished_at=time.time(),
+            duration_ms=5,
+            status="err",
+            error="RuntimeError: nope",
+            result_preview="",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=None,
+        )
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(agent, "run", _fake_crash)
 
     r = sched.add("crashy", "ping", "every 1h", skip_dry_run=True)
     cron_id = [t["id"] for t in sched.list_tasks() if t["name"] == "crashy"][0]
@@ -66,8 +133,13 @@ def test_crashed_fire_logs_err_row(sched, monkeypatch):
 
 
 def test_concurrent_fire_logs_skipped(sched, monkeypatch):
-    """When the per-thread lock is held, the second call logs status=skipped."""
+    """When the per-thread lock is held, the second call logs status=skipped.
+
+    The first fire: mock writes an ok row to agent_runs (simulating agent_loop).
+    The second fire: scheduler writes a skipped row to agent_runs directly.
+    """
     import agent
+    import db
     import threading as _th
 
     # Long-running fake agent.run to keep the lock held while we fire a second
@@ -76,9 +148,30 @@ def test_concurrent_fire_logs_skipped(sched, monkeypatch):
     class _FakeResult:
         def __init__(self, r): self.reply = r
 
-    def _slow(u, **kw):
+    def _slow(u, thread_id=None, source="cli", ctx=None, **kw):
+        cron_id_val = ctx.cron_id if ctx is not None else None
+        rid = db.insert_agent_run(
+            thread_id=thread_id or "",
+            cron_id=cron_id_val,
+            source="routine",
+            scheduled_at=time.time(),
+            started_at=time.time(),
+            status="running",
+        )
         hold.wait(timeout=5)
+        db.finalize_agent_run(
+            rid,
+            finished_at=time.time(),
+            duration_ms=100,
+            status="ok",
+            error=None,
+            result_preview="ok",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=None,
+        )
         return _FakeResult("ok")
+
     monkeypatch.setattr(agent, "run", _slow)
 
     r = sched.add("busy", "ping", "every 1h", skip_dry_run=True)
@@ -280,11 +373,36 @@ def test_routine_fire_lets_user_clarifications_persist(sched, monkeypatch):
 
 def test_list_tasks_includes_recent_counts(sched, monkeypatch):
     import agent
+    import db
 
     class _FakeResult:
         def __init__(self, r): self.reply = r
-    monkeypatch.setattr(agent, "run",
-                         lambda u, **kw: _FakeResult("done"))
+
+    def _fake_run(u, thread_id=None, source="cli", ctx=None, **kw):
+        # Simulate what agent_loop does when ctx.cron_id is set.
+        cron_id_val = ctx.cron_id if ctx is not None else None
+        rid = db.insert_agent_run(
+            thread_id=thread_id or "",
+            cron_id=cron_id_val,
+            source="routine",
+            scheduled_at=time.time(),
+            started_at=time.time(),
+            status="running",
+        )
+        db.finalize_agent_run(
+            rid,
+            finished_at=time.time(),
+            duration_ms=10,
+            status="ok",
+            error=None,
+            result_preview="done",
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=None,
+        )
+        return _FakeResult("done")
+
+    monkeypatch.setattr(agent, "run", _fake_run)
 
     r = sched.add("counted", "ping", "every 1h", skip_dry_run=True)
     cron_id = [t["id"] for t in sched.list_tasks() if t["name"] == "counted"][0]

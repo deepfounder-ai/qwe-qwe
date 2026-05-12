@@ -11,7 +11,7 @@ Embeddings are handled by FastEmbed (ONNX, local, no server needed).
 import os
 from pathlib import Path
 
-VERSION = "0.18.7"
+VERSION = "0.19.0"
 _env = os.environ.get
 
 # ── Data directory (all user data lives here, safe from git) ──
@@ -216,6 +216,9 @@ EDITABLE_SETTINGS = {
     "tts_api_voice":        ("setting:tts_api_voice",         str, "alloy", "TTS API voice (alloy, echo, fable, onyx, nova, shimmer)", "", ""),
     "tts_ref_audio":        ("setting:tts_ref_audio",         str, "",     "Reference audio for voice cloning (5-30s WAV) — local backends only", "", ""),
     "tts_ref_text":         ("setting:tts_ref_text",          str, "",     "Transcript of reference audio", "", ""),
+    # ── Cost Tracking ──
+    "pricing_url":          ("setting:pricing_url",           str, "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "URL for online pricing JSON (LiteLLM format). Override for air-gapped mirrors.", "", ""),
+    "pricing_auto_update":  ("setting:pricing_auto_update",   bool, True, "Refresh pricing every 24h in background.", None, None),
 }
 
 

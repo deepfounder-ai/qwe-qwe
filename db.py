@@ -452,3 +452,159 @@ def rrf_merge(ranked_lists: list[list[tuple[str, float]]],
             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank + 1)
     merged = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     return merged[:limit]
+
+
+# --- Agent runs (cost tracking) -------------------------------------------
+# See migrations/008_agent_runs.sql for the table shape.
+
+def insert_agent_run(
+    thread_id: str,
+    source: str,
+    started_at: float,
+    status: str = "running",
+    cron_id: int | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    scheduled_at: float | None = None,
+) -> int:
+    """Insert a new run row. Returns the new id."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO agent_runs (thread_id, cron_id, source, scheduled_at, "
+        " started_at, status, model, provider) VALUES (?,?,?,?,?,?,?,?)",
+        (thread_id, cron_id, source, scheduled_at, started_at, status, model, provider),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def finalize_agent_run(
+    run_id: int,
+    finished_at: float | None,
+    duration_ms: int | None,
+    status: str,
+    error: str | None = None,
+    result_preview: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost_usd: float | None = None,
+) -> None:
+    """Update a previously-inserted run with final metrics."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE agent_runs SET finished_at=?, duration_ms=?, status=?, "
+        " error=?, result_preview=?, input_tokens=?, output_tokens=?, cost_usd=? "
+        "WHERE id=?",
+        (finished_at, duration_ms, status, error,
+         (result_preview or "")[:200] or None,
+         int(input_tokens or 0), int(output_tokens or 0), cost_usd, run_id),
+    )
+    conn.commit()
+
+
+def insert_skipped_run(
+    cron_id: int, thread_id: str, scheduled_at: float, reason: str = "missed"
+) -> int:
+    """For routine fires that never executed (missed/skipped)."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "INSERT INTO agent_runs (thread_id, cron_id, source, scheduled_at, "
+        " started_at, status, input_tokens, output_tokens, cost_usd) "
+        "VALUES (?,?,?,?,?,?,0,0,0.0)",
+        (thread_id or "", cron_id, "routine", scheduled_at, scheduled_at, reason),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_runs_for_thread(thread_id: str, limit: int = 50, offset: int = 0) -> list[dict]:
+    """Per-thread run history, newest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, thread_id, cron_id, source, scheduled_at, started_at, "
+        "       finished_at, duration_ms, status, error, result_preview, "
+        "       model, provider, input_tokens, output_tokens, cost_usd "
+        "FROM agent_runs WHERE thread_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
+        (thread_id, int(limit), int(offset)),
+    ).fetchall()
+    cols = ("id", "thread_id", "cron_id", "source", "scheduled_at",
+            "started_at", "finished_at", "duration_ms", "status", "error",
+            "result_preview", "model", "provider",
+            "input_tokens", "output_tokens", "cost_usd")
+    return [dict(zip(cols, r, strict=True)) for r in rows]
+
+
+def get_thread_totals(thread_id: str) -> dict:
+    """Returns {input_tokens, output_tokens, cost_usd, run_count}."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+        "       COALESCE(SUM(cost_usd),0.0), COUNT(*) "
+        "FROM agent_runs WHERE thread_id=?",
+        (thread_id,),
+    ).fetchone()
+    return {
+        "input_tokens": int(row[0]),
+        "output_tokens": int(row[1]),
+        "cost_usd": float(row[2]),
+        "run_count": int(row[3]),
+    }
+
+
+def get_period_totals(
+    start_ts: float, end_ts: float, source: str | None = None
+) -> dict:
+    """Aggregated metrics for a time window. by_source breakdown included."""
+    conn = _get_conn()
+    params: list = [start_ts, end_ts]
+    src_clause = ""
+    if source:
+        src_clause = " AND source=?"
+        params.append(source)
+    row = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+        "       COALESCE(SUM(cost_usd),0.0), COUNT(*) "
+        f"FROM agent_runs WHERE started_at>=? AND started_at<?{src_clause}",
+        params,
+    ).fetchone()
+    by_src_rows = conn.execute(
+        "SELECT source, COALESCE(SUM(input_tokens),0), "
+        "       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0.0), "
+        "       COUNT(*) FROM agent_runs WHERE started_at>=? AND started_at<? "
+        "GROUP BY source",
+        (start_ts, end_ts),
+    ).fetchall()
+    by_source = {
+        r[0]: {
+            "input_tokens": int(r[1]),
+            "output_tokens": int(r[2]),
+            "cost_usd": float(r[3]),
+            "run_count": int(r[4]),
+        }
+        for r in by_src_rows
+    }
+    return {
+        "start_ts": float(start_ts),
+        "end_ts": float(end_ts),
+        "total_input_tokens": int(row[0]),
+        "total_output_tokens": int(row[1]),
+        "total_cost_usd": float(row[2]),
+        "run_count": int(row[3]),
+        "by_source": by_source,
+    }
+
+
+def get_runs_for_routine(cron_id: int, limit: int = 50) -> list[dict]:
+    """Per-routine run history (replaces routine_runs query)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, thread_id, scheduled_at, started_at, finished_at, "
+        "       duration_ms, status, error, result_preview, "
+        "       input_tokens, output_tokens, cost_usd, model, provider "
+        "FROM agent_runs WHERE cron_id=? ORDER BY id DESC LIMIT ?",
+        (int(cron_id), int(limit)),
+    ).fetchall()
+    cols = ("id", "thread_id", "scheduled_at", "started_at", "finished_at",
+            "duration_ms", "status", "error", "result_preview",
+            "input_tokens", "output_tokens", "cost_usd", "model", "provider")
+    return [dict(zip(cols, r, strict=True)) for r in rows]

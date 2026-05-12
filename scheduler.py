@@ -575,7 +575,7 @@ def _loop():
     # but telegram isn't ready yet → notifications silently dropped.
     time.sleep(15)
     # One-time startup pass: if the server was offline across scheduled
-    # slots, record them as status=missed in routine_runs so history
+    # slots, record them as status=missed in agent_runs so history
     # reflects reality. Does NOT re-fire missed slots (just logs) —
     # _check_and_run below will fire the single next-due slot as normal.
     try:
@@ -751,7 +751,10 @@ def _log_run(cron_id: int, *, scheduled_at: float, started_at: float | None,
               finished_at: float | None, duration_ms: int | None,
               status: str, error: str | None, result_preview: str,
               thread_id: str) -> int | None:
-    """Append one row to routine_runs. Returns the new id (or None on error).
+    """Write a run row to agent_runs. Returns the new id (or None on error).
+
+    After v0.19.0 this function is only called for 'missed' and 'skipped' rows;
+    ok/err rows are written by agent_loop's instrumentation with full token data.
 
     status values:
       ok / err — agent.run completed; err means exception or error marker
@@ -759,60 +762,71 @@ def _log_run(cron_id: int, *, scheduled_at: float, started_at: float | None,
       skipped  — per-thread fire lock held (concurrent fire in flight)
     """
     try:
-        import db as _db
-        conn = _db._get_conn()
-        cur = conn.execute(
-            "INSERT INTO routine_runs "
-            "(cron_id, scheduled_at, started_at, finished_at, duration_ms, "
-            " status, error, result_preview, thread_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (cron_id, scheduled_at, started_at, finished_at, duration_ms,
-             status, error, (result_preview or "")[:500], thread_id or ""),
+        if status in ("missed", "skipped"):
+            return db.insert_skipped_run(
+                cron_id=cron_id,
+                thread_id=thread_id or "",
+                scheduled_at=scheduled_at,
+                reason=status,
+            )
+        # For any other status (e.g. legacy call paths), insert+finalize through
+        # the universal helpers so behaviour is preserved.
+        rid = db.insert_agent_run(
+            thread_id=thread_id or "",
+            cron_id=cron_id,
+            source="routine",
+            scheduled_at=scheduled_at,
+            started_at=started_at if started_at is not None else scheduled_at,
+            status="running",
         )
-        conn.commit()
-        return cur.lastrowid
+        db.finalize_agent_run(
+            rid,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            status=status,
+            error=error,
+            result_preview=(result_preview or "")[:500],
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=None,
+        )
+        return rid
     except Exception as e:
-        _log.debug(f"routine_runs insert failed for #{cron_id}: {e}")
+        _log.debug(f"agent_runs insert failed for #{cron_id}: {e}")
         return None
 
 
 def list_runs(cron_id: int, limit: int = 20) -> list[dict]:
-    """Recent runs for a routine, newest first."""
-    rows = db.fetchall(
-        "SELECT id, scheduled_at, started_at, finished_at, duration_ms, "
-        "       status, error, result_preview, thread_id "
-        "FROM routine_runs WHERE cron_id=? ORDER BY id DESC LIMIT ?",
-        (cron_id, limit),
-    )
+    """Recent runs for a routine, newest first. Reads from agent_runs."""
     from datetime import datetime as _dt
 
     def _fmt(ts: float | None) -> str:
         return _dt.fromtimestamp(ts, _tz()).strftime("%Y-%m-%d %H:%M") if ts else ""
 
+    raw = db.get_runs_for_routine(cron_id, limit=limit)
     out = []
-    for (rid, sched, started, finished, dur, status, error, result, tid) in rows:
-        fmt = _fmt  # keep the short name for the dict comprehension below
+    for row in raw:
         out.append({
-            "id": rid,
-            "scheduled_at": fmt(sched),
-            "started_at": fmt(started),
-            "finished_at": fmt(finished),
-            "duration_ms": int(dur or 0),
-            "status": status,
-            "error": error or "",
-            "result_preview": result or "",
-            "thread_id": tid or "",
+            "id": row["id"],
+            "scheduled_at": _fmt(row.get("scheduled_at")),
+            "started_at": _fmt(row.get("started_at")),
+            "finished_at": _fmt(row.get("finished_at")),
+            "duration_ms": int(row.get("duration_ms") or 0),
+            "status": row.get("status") or "",
+            "error": row.get("error") or "",
+            "result_preview": row.get("result_preview") or "",
+            "thread_id": row.get("thread_id") or "",
         })
     return out
 
 
 def count_recent_runs_by_status(cron_id: int, limit: int = 20) -> dict:
     """Breakdown of the last ``limit`` runs by status — drives the UI dots."""
-    rows = db.fetchall(
-        "SELECT status FROM routine_runs WHERE cron_id=? ORDER BY id DESC LIMIT ?",
+    rows = db._get_conn().execute(
+        "SELECT status FROM agent_runs WHERE cron_id=? ORDER BY id DESC LIMIT ?",
         (cron_id, limit),
-    )
-    counts = {"ok": 0, "err": 0, "missed": 0, "skipped": 0}
+    ).fetchall()
+    counts = {"ok": 0, "err": 0, "missed": 0, "skipped": 0, "running": 0, "aborted": 0}
     series = []
     for (status,) in rows:
         counts[status] = counts.get(status, 0) + 1
@@ -822,7 +836,7 @@ def count_recent_runs_by_status(cron_id: int, limit: int = 20) -> dict:
 
 def detect_missed_runs() -> int:
     """Scan for routines whose scheduled slot(s) lapsed while the server
-    was offline; insert routine_runs rows with status=missed so the
+    was offline; insert agent_runs rows with status=missed so the
     history reflects reality honestly.
 
     Called once from the scheduler loop at startup. Uses a kv stamp
@@ -901,8 +915,9 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     Held behind a per-thread lock — two concurrent fires would race over
     the user/assistant writes. Second caller no-ops cleanly instead.
 
-    Writes BOTH:
-      - routine_runs row (per-fire history, status=ok/err/skipped)
+    Writes:
+      - agent_runs row for 'skipped' (via _log_run); ok/err rows are written
+        by agent_loop.run_loop when ctx.cron_id is set
       - scheduled_tasks metrics (last_run, run_count, last_status, ...)
 
     ``scheduled_at`` lets the caller record when the run was *supposed*
@@ -941,7 +956,9 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
         # adds only the assistant turn, no fake "user-typed-the-task"
         # row that would inflate the chat. The LLM still sees the task
         # as the latest user turn in its in-memory messages array.
-        ctx = TurnContext(source="routine")
+        # cron_id on ctx lets agent_loop.run_loop bracket the run with an
+        # agent_runs row (ok/err) — scheduler no longer writes those rows.
+        ctx = TurnContext(source="routine", cron_id=cron_id)
         result = agent.run(task_desc, thread_id=thread_id, source="routine",
                             ctx=ctx, save_user_msg=False)
         reply = getattr(result, "reply", "") or ""
@@ -957,17 +974,11 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
     status = "err" if (error_msg or _looks_like_error(reply)) else "ok"
     last_result_preview = (error_msg or reply or "")[:500]
 
-    # Per-fire run history — one row per attempt
-    if cron_id:
-        _log_run(
-            cron_id, scheduled_at=sched_at, started_at=t0,
-            finished_at=finished_at, duration_ms=duration_ms,
-            status=status, error=error_msg,
-            result_preview=last_result_preview, thread_id=thread_id,
-        )
+    # ok/err rows are now written by agent_loop's instrumentation (with full
+    # token + cost data) — scheduler must NOT write a second row here.
 
     # Metrics update — aggregate "last run" fields on scheduled_tasks,
-    # used by card stats without needing to scan routine_runs.
+    # used by card stats without needing to scan agent_runs.
     if cron_id:
         try:
             db.execute(

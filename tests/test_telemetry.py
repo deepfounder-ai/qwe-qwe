@@ -1200,3 +1200,14 @@ def test_api_helper_disables_http_cache():
         "Restore the directive in static/index.html."
     )
 
+
+def test_cost_tracking_feature_in_enum():
+    import telemetry
+    assert "cost_tracking" in telemetry.FEATURES
+
+
+def test_consent_version_bumped_for_cost_tracking():
+    import telemetry
+    # Whatever it was before, the bump should leave it >= 2
+    assert telemetry._CURRENT_CONSENT_VERSION >= 2
+

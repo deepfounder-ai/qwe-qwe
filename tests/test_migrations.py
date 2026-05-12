@@ -167,3 +167,58 @@ def test_migrations_dir_present_and_parseable():
     assert nums == sorted(nums)
     assert len(set(nums)) == len(nums), "duplicate migration numbers"
     assert nums[0] == 1, "first migration should be 001"
+
+
+# ---------------------------------------------------------------------------
+# Migration 008 — agent_runs table
+# ---------------------------------------------------------------------------
+
+def test_migration_008_creates_agent_runs(qwe_temp_data_dir):
+    import db
+    db._migrated = False  # force re-run
+    conn = db._get_conn()
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_runs'"
+    ).fetchone()
+    assert row is not None, "agent_runs table not created"
+    cols = {c[1] for c in conn.execute("PRAGMA table_info(agent_runs)").fetchall()}
+    expected = {"id", "thread_id", "cron_id", "source", "scheduled_at",
+                "started_at", "finished_at", "duration_ms", "status",
+                "error", "result_preview", "model", "provider",
+                "input_tokens", "output_tokens", "cost_usd"}
+    assert expected.issubset(cols), f"missing cols: {expected - cols}"
+
+
+def test_migration_008_drops_routine_runs(qwe_temp_data_dir):
+    import db
+    db._migrated = False
+    conn = db._get_conn()
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='routine_runs'"
+    ).fetchone()
+    assert row is None, "routine_runs should be gone"
+
+
+def test_migration_008_copies_legacy_routine_runs(qwe_temp_data_dir):
+    import db
+    import sqlite3
+    import time
+    import glob
+    # Build a DB at schema_version=7 with routine_runs populated, then
+    # let the migration runner fast-forward to 8.
+    db_path = qwe_temp_data_dir / "qwe_qwe.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(open("migrations/001_initial.sql").read())
+    for n in range(2, 8):
+        path = f"migrations/00{n}_"
+        f = glob.glob(path + "*.sql")[0]
+        conn.executescript(open(f).read())
+    conn.execute("INSERT OR REPLACE INTO kv (key,value,ts) VALUES ('schema_version','7',?)", (time.time(),))
+    conn.execute("INSERT INTO routine_runs (cron_id, scheduled_at, started_at, status, thread_id) "
+                 "VALUES (1, 1000.0, 1001.0, 'ok', 't1')")
+    conn.commit()
+    conn.close()
+    db._migrated = False
+    conn = db._get_conn()
+    rows = conn.execute("SELECT cron_id, thread_id, status, source FROM agent_runs").fetchall()
+    assert (1, 't1', 'ok', 'routine') in rows

@@ -61,6 +61,10 @@ from turn_context import TurnContext
 # WebSocket sessions create their own events to avoid cross-source abort.
 _abort_event = threading.Event()
 
+# Fired once per process when a client first opens the per-thread runs endpoint.
+# Signals that the user has discovered the cost-tracking feature.
+_cost_tracking_first_use_seen = False
+
 # Connected WebSocket clients for broadcast (thread-safe via copy-on-iterate)
 import threading as _threading
 _ws_clients: set = set()
@@ -352,6 +356,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     scheduler.start()
+    # Start pricing background refresher
+    try:
+        import pricing
+        pricing.start_background_refresher()
+    except Exception as e:
+        _log.warning(f"pricing startup: {e}")
     # Start MCP servers
     try:
         mcp_client.start_all()
@@ -1957,6 +1967,45 @@ async def add_provider(data: dict):
     return {"result": providers.add(name, url, key, models)}
 
 
+# ── Analytics endpoints ──
+
+@app.get("/api/analytics/period")
+async def get_analytics_period(days: int = 30, source: str | None = None):
+    """Aggregated token/cost metrics for a rolling time window."""
+    import time as _time
+    end_ts = _time.time()
+    start_ts = end_ts - max(1, int(days)) * 86400
+    src = None if not source or source == "all" else source
+    return db.get_period_totals(start_ts, end_ts, source=src)
+
+
+@app.get("/api/pricing/status")
+async def pricing_status():
+    """Return pricing cache metadata: model count, source URL, cache age."""
+    import pricing
+    import config
+    import time as _time
+    fetched = pricing.last_updated()
+    return {
+        "last_updated": fetched,
+        "model_count": len(pricing.all_known_models()),
+        "source_url": config.get("pricing_url"),
+        "auto_update": config.get("pricing_auto_update"),
+        "cache_age_sec": (_time.time() - fetched) if fetched else None,
+    }
+
+
+@app.post("/api/pricing/refresh")
+async def pricing_refresh():
+    """Force-refresh the pricing table from the configured source URL."""
+    import pricing
+    ok = pricing.refresh_pricing(force=True)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "refresh failed"}, status_code=502)
+    return {"ok": True, "model_count": len(pricing.all_known_models()),
+            "fetched_at": pricing.last_updated()}
+
+
 # ── Cron/Tasks endpoints ──
 
 @app.get("/api/cron")
@@ -2032,6 +2081,12 @@ async def get_cron_runs(task_id: int, limit: int = 20):
     offline. UI uses this to render a sparkline + detail list.
     """
     return {"runs": scheduler.list_runs(task_id, limit=limit)}
+
+
+@app.get("/api/routines/{cron_id}/runs")
+async def get_routine_runs(cron_id: int, limit: int = 50):
+    """Recent run history for a routine (reads agent_runs), newest first."""
+    return db.get_runs_for_routine(cron_id, limit=limit)
 
 
 @app.post("/api/cron/{task_id}/toggle")
@@ -3035,6 +3090,11 @@ async def list_threads(include_archived: bool = False):
         t["user_messages"] = s.get("user_messages", 0)
         t["assistant_messages"] = s.get("assistant_messages", 0)
         t["tool_calls"] = s.get("tool_calls", 0)
+        totals = db.get_thread_totals(t["id"])
+        t["input_tokens"] = totals["input_tokens"] if totals["run_count"] else None
+        t["output_tokens"] = totals["output_tokens"] if totals["run_count"] else None
+        t["cost_usd"] = totals["cost_usd"] if totals["run_count"] else None
+        t["run_count"] = totals["run_count"]
     return all_threads
 
 
@@ -3077,6 +3137,20 @@ async def thread_stats(thread_id: str):
         "last_message": last[0] if last else None,
         "model": t.get("meta", {}).get("model"),
     }
+
+
+@app.get("/api/threads/{thread_id}/runs")
+async def get_thread_runs(thread_id: str, limit: int = 50, offset: int = 0):
+    """Per-thread agent run history, newest first."""
+    global _cost_tracking_first_use_seen
+    if not _cost_tracking_first_use_seen:
+        _cost_tracking_first_use_seen = True
+        try:
+            import telemetry
+            telemetry.track_event("feature_first_use", {"feature": "cost_tracking"})
+        except Exception:
+            pass
+    return db.get_runs_for_thread(thread_id, limit=limit, offset=offset)
 
 
 @app.post("/api/threads/{thread_id}/model")

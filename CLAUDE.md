@@ -162,6 +162,27 @@ Adding a new event: edit `ALLOWED_EVENTS` schema + bump `_CURRENT_CONSENT_VERSIO
 
 Full data inventory + privacy contract: `docs/PRIVACY.md`.
 
+### Cost tracking (`pricing.py`, `agent_runs` table)
+
+**Added v0.19.0.** Every LLM call site records one row in `agent_runs` (migration `008_agent_runs.sql`, which atomically replaces the legacy `routine_runs` table). Columns: `thread_id`, `source`, `started_at`, `finished_at`, `model`, `provider`, `input_tokens`, `output_tokens`, `cost_usd`, `status`.
+
+**Instrumentation points** (each wraps its LLM call in `db.insert_agent_run` / `db.finalize_agent_run`):
+- `agent_loop.run_loop()` — main user turns (source = `web` / `cli` / `telegram` / `scheduler`)
+- `synthesis.run_synthesis()` — night entity/wiki extraction (source = `synthesis`)
+- `skills/skill_creator.py::_run_pipeline()` — each pipeline attempt (source = `skill_creator`)
+- `scheduler` routine firings — same `run_loop` bracket, source = `scheduler`
+
+**Pricing** (`pricing.py`):
+- Primary: LiteLLM community JSON (`https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`), fetched and cached locally at `~/.qwe-qwe/pricing_cache.json`.
+- Fallback: bundled top-10 model table used when cache is absent or stale.
+- Override: `db.kv_set("pricing_override_<model>", json.dumps({"input": X, "output": Y}))` pins exact per-token USD rates. Configurable via Settings UI or `pricing_url` setting for air-gapped mirrors.
+
+**Web UI surfaces**: Sessions list token/cost chips, per-thread run drilldown modal, topline 30-day widget, Routines page Cost (30d) column, Settings → Cost tracking section.
+
+**API additions**: `GET /api/threads` extended with aggregate token/cost fields; `GET /api/threads/{id}/runs`; `GET /api/analytics/period`; `GET /api/pricing/status`; `POST /api/pricing/refresh`.
+
+User-facing doc: `docs/COST_TRACKING.md`.
+
 ### Skill import from skills.sh / GitHub (`skills/skill_import.py`)
 
 **Added v0.18.x.** Imports community skills following the agentskills.io SKILL.md spec (YAML frontmatter + markdown body + optional `scripts/` `references/` `assets/`). Two layers:
