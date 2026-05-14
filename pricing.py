@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -26,6 +27,14 @@ import urllib.request
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal, Optional
+
+# Use certifi's CA bundle when available (needed on macOS python.org builds
+# where the stdlib ssl module doesn't load system certificates by default).
+try:
+    import certifi as _certifi
+    _SSL_CTX = ssl.create_default_context(cafile=_certifi.where())
+except ImportError:
+    _SSL_CTX = ssl.create_default_context()
 
 import config
 import db
@@ -192,7 +201,7 @@ def refresh_pricing(force: bool = False) -> bool:
         return False
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "castor-pricing/1.0"})
-        with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT_SEC) as resp:
+        with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT_SEC, context=_SSL_CTX) as resp:
             body = resp.read(MAX_BODY_BYTES + 1)
         if len(body) > MAX_BODY_BYTES:
             _log.warning(f"pricing response > {MAX_BODY_BYTES} bytes, refusing")

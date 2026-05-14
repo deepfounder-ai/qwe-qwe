@@ -176,7 +176,7 @@ def mock_urlopen(monkeypatch, fresh_server):
             self.exc = None
             self.calls = 0
 
-        def urlopen(self, req, timeout=None):
+        def urlopen(self, req, timeout=None, **_kw):
             self.calls += 1
             if self.exc is not None:
                 raise self.exc

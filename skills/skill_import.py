@@ -57,12 +57,20 @@ import json
 import os
 import re
 import socket
+import ssl
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+# Use certifi's CA bundle when available (needed on macOS python.org builds).
+try:
+    import certifi as _certifi
+    _SSL_CTX = ssl.create_default_context(cafile=_certifi.where())
+except ImportError:
+    _SSL_CTX = ssl.create_default_context()
 
 import yaml
 
@@ -177,7 +185,10 @@ class _SafetyCheckingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_SafetyCheckingRedirectHandler())
+_opener = urllib.request.build_opener(
+    _SafetyCheckingRedirectHandler(),
+    urllib.request.HTTPSHandler(context=_SSL_CTX),
+)
 
 
 def _fetch_url(url: str, max_bytes: int) -> bytes:

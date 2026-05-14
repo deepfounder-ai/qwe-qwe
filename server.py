@@ -29,8 +29,15 @@ import subprocess
 import time
 import os
 import threading
+import ssl
 import urllib.request
 import uuid
+
+try:
+    import certifi as _certifi
+    _SSL_CTX = ssl.create_default_context(cafile=_certifi.where())
+except ImportError:
+    _SSL_CTX = ssl.create_default_context()
 from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
@@ -1038,7 +1045,7 @@ def _check_version_sync() -> dict:
                 "https://api.github.com/repos/deepfounder-ai/castor/releases/latest",
                 headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "castor"}
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5, context=_SSL_CTX) as resp:
                 data = json.loads(resp.read().decode())
                 latest = data.get("tag_name", "").lstrip("v")
                 if latest:
@@ -2488,7 +2495,7 @@ async def blog_feed():
     try:
         ua = f"castor/{config.VERSION}"
         req = urllib.request.Request(_FEED_URL, headers={"User-Agent": ua})
-        with urllib.request.urlopen(req, timeout=_FEED_TIMEOUT_S) as r:
+        with urllib.request.urlopen(req, timeout=_FEED_TIMEOUT_S, context=_SSL_CTX) as r:
             body = r.read()
         items = _parse_blog_feed_xml(body)
         with _feed_cache_lock:
