@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import os
+import threading
 import time
 
 DESCRIPTION = "Control a web browser — navigate, click, fill forms, take screenshots"
@@ -364,6 +365,10 @@ _pages: list = []          # all open pages (tabs)
 _network_log = []          # list of {url, method, status, resource_type}
 _console_log: list = []    # list of {level, text, location}
 
+# Serialize browser launch/close to prevent multiple Chrome windows when
+# concurrent spawn_task workers all try to open the browser at the same time.
+_browser_lock = threading.Lock()
+
 
 def _attach_page_listeners(page):
     """Attach network + console listeners to a page."""
@@ -396,36 +401,41 @@ def _attach_page_listeners(page):
     page.on("console", _on_console)
 
 
-_headless_mode = False  # False = visible browser window user can see
+_headless_mode = True  # True = headless (default); False = visible window
 
 
 def _ensure_browser():
-    """Launch Playwright browser if not running."""
+    """Launch Playwright browser if not running. Thread-safe: double-checked lock."""
     global _playwright, _browser, _page, _pages, _network_log, _console_log
+    # Fast path — browser already running (no lock needed)
     if _browser and _browser.is_connected():
         return
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        raise RuntimeError(
-            "Playwright is not installed. Run: pip install playwright && python -m playwright install chromium"
+    with _browser_lock:
+        # Re-check inside lock: another thread may have launched while we waited
+        if _browser and _browser.is_connected():
+            return
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise RuntimeError(
+                "Playwright is not installed. Run: pip install playwright && python -m playwright install chromium"
+            )
+        _playwright = sync_playwright().start()
+        _browser = _playwright.chromium.launch(
+            headless=_headless_mode,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
-    _playwright = sync_playwright().start()
-    _browser = _playwright.chromium.launch(
-        headless=_headless_mode,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
-    )
-    context = _browser.new_context(
-        viewport={"width": 1280, "height": 800},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ignore_https_errors=True,  # accept self-signed certs (e.g. localhost HTTPS dev servers)
-    )
-    _page = context.new_page()
-    _pages = [_page]
-    _network_log = []
-    _console_log = []
+        context = _browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ignore_https_errors=True,  # accept self-signed certs (e.g. localhost HTTPS dev servers)
+        )
+        _page = context.new_page()
+        _pages = [_page]
+        _network_log = []
+        _console_log = []
 
-    _attach_page_listeners(_page)
+        _attach_page_listeners(_page)
 
 
 def _close_browser():
@@ -501,9 +511,16 @@ def _execute_impl(name: str, args: dict) -> str:
             global _headless_mode
             visible = args.get("visible", True)
             new_mode = not visible  # headless is the opposite of visible
-            if new_mode != _headless_mode:
-                _headless_mode = new_mode
-                _close_browser()  # restart with new mode on next call
+            with _browser_lock:
+                if new_mode == _headless_mode and _browser and _browser.is_connected():
+                    # Already in the requested mode with a running browser — no-op.
+                    # This is the common case when multiple spawn_task workers all
+                    # call browser_set_visible(True) on an already-visible browser:
+                    # only the first one opens Chrome; the rest reuse it.
+                    return f"Browser already in {'visible' if visible else 'headless'} mode (reusing existing window)."
+                if new_mode != _headless_mode:
+                    _headless_mode = new_mode
+                    _close_browser()  # restart with new mode on next call
             # Telemetry: track first time the user enables visible mode in
             # this session. We only emit on visible=True — toggling back to
             # headless is the default state and not a "feature use".
