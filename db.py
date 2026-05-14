@@ -43,8 +43,7 @@ def take_backup(tag: str = "") -> "Path | None":
         backup_path = backup_dir / f"castor_{ts}{suffix}.db"
         src = sqlite3.connect(str(config.DB_PATH))
         dst = sqlite3.connect(str(backup_path))
-        with dst:
-            src.backup(dst, pages=-1)  # pages=-1 = copy everything atomically
+        src.backup(dst, pages=-1)  # pages=-1 = copy everything atomically
         dst.close()
         src.close()
         _prune_backups(backup_dir)
@@ -91,11 +90,14 @@ def check_and_restore() -> bool:
     Returns False if malformed AND no backup was available — caller lets
     sqlite3.connect() create a fresh database.
 
-    Integrated into _get_conn() so it runs exactly once per process before
-    the first sqlite3.connect() call, catching corruption before it raises.
+    Safe to call from both server.py lifespan and _get_conn(). Sets
+    _integrity_checked=True so that a direct call from lifespan prevents
+    _get_conn() from running the check a second time.
     """
+    global _integrity_checked
     db_path = Path(config.DB_PATH)
     if not db_path.exists():
+        _integrity_checked = True
         return True  # fresh install — nothing to check
 
     try:
@@ -103,11 +105,13 @@ def check_and_restore() -> bool:
         result = probe.execute("PRAGMA integrity_check(1)").fetchone()
         probe.close()
         if result and result[0] == "ok":
+            _integrity_checked = True
             return True
     except sqlite3.DatabaseError as e:
         _log.error(f"database integrity check failed: {e}")
     except Exception as e:
         _log.warning(f"database probe error: {e}")
+        _integrity_checked = True
         return True  # non-corruption error (permissions etc.) — don't wipe DB
 
     # Database is malformed — attempt restore from latest backup
@@ -115,13 +119,19 @@ def check_and_restore() -> bool:
     if backup:
         _log.warning(f"corrupt database — restoring from backup: {backup.name}")
         try:
-            corrupted = db_path.with_name(f"castor.db.corrupted.{int(time.time())}")
+            ts = int(time.time())
+            corrupted = db_path.with_name(f"castor.db.corrupted.{ts}")
             shutil.copy2(str(db_path), str(corrupted))
             shutil.copy2(str(backup), str(db_path))
+            # Note: any existing castor.db-wal is intentionally left in place.
+            # SQLite's WAL page checksums and salt validation mean stale/corrupt
+            # frames are safely skipped on recovery. Valid frames after the
+            # backup point will be replayed, giving MORE data than the backup alone.
             _log.info(
                 f"database restored from {backup.name} "
                 f"(corrupted copy saved as {corrupted.name})"
             )
+            _integrity_checked = True
             return True
         except Exception as e:
             _log.error(f"restore from backup failed: {e}")
@@ -134,6 +144,7 @@ def check_and_restore() -> bool:
         _log.warning(f"corrupted file saved as {corrupted.name}")
     except OSError:
         pass
+    _integrity_checked = True
     return False
 
 

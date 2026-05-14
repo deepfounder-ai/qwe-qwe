@@ -48,6 +48,8 @@ def qwe_temp_data_dir(monkeypatch):
             if _local is not None:
                 _local.conn = None
             sys.modules["db"]._migrated = False
+            sys.modules["db"]._integrity_checked = False
+            sys.modules["db"]._backup_thread_started = False
         except Exception:
             pass
 
@@ -72,6 +74,8 @@ def qwe_temp_data_dir(monkeypatch):
                 if _local is not None:
                     _local.conn = None
                 db_mod._migrated = False
+                db_mod._integrity_checked = False
+                db_mod._backup_thread_started = False
         except Exception:
             pass
         shutil.rmtree(tmp_root, ignore_errors=True)

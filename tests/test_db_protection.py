@@ -130,10 +130,15 @@ def test_start_backup_scheduler_is_idempotent(qwe_temp_data_dir, monkeypatch):
     import threading
     monkeypatch.setattr(db, "_backup_thread_started", False)
     db._get_conn()
+    before = [t for t in threading.enumerate() if t.name == "db-backup"]
     db.start_backup_scheduler()
+    after_first = [t for t in threading.enumerate() if t.name == "db-backup"]
     db.start_backup_scheduler()  # second call must not raise or spawn extra threads
-    backup_threads = [t for t in threading.enumerate() if t.name == "db-backup"]
-    assert len(backup_threads) == 1
+    after_second = [t for t in threading.enumerate() if t.name == "db-backup"]
+    # exactly one new thread was spawned by the first call
+    assert len(after_first) == len(before) + 1
+    # second call is a no-op — no additional thread
+    assert len(after_second) == len(after_first)
 
 
 # ── server.py wiring ──────────────────────────────────────────────────────────

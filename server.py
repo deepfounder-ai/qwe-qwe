@@ -396,7 +396,11 @@ def _sweep_uploads(max_age_days: int = 14, max_files: int = 10000) -> tuple[int,
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup — kick off DB backup scheduler + integrity check
+    # Startup — integrity check before any other DB access, then backup scheduler
+    try:
+        db.check_and_restore()
+    except Exception as e:
+        _log.warning(f"db integrity check startup: {e}")
     try:
         db.start_backup_scheduler()
     except Exception as e:

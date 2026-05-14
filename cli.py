@@ -994,7 +994,11 @@ def main():
     scheduler.on_complete(_on_cron_complete)
     scheduler.start()
     console.print(f"  [dim]⏰ Scheduler running (UTC{config.TZ_OFFSET:+d})[/]")
-    # Start DB backup scheduler
+    # Integrity check before any other DB access, then backup scheduler
+    try:
+        db.check_and_restore()
+    except Exception as e:
+        _log.warning(f"db integrity check startup: {e}")
     try:
         db.start_backup_scheduler()
     except Exception as e:
