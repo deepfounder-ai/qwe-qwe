@@ -779,6 +779,12 @@ def run_loop(
                     messages.append({"role": "user", "content":
                         "[system] STOP. You are in a loop. Give your final answer NOW based on what you already have. Do NOT call any more tools."})
 
+                # Reset nudge counter after a productive tool-call turn so a later
+                # empty-stop can be nudged again (without this, nudge fires at most
+                # once per entire loop even if the agent does 20 more turns of work
+                # between two separate silent-stop events).
+                _nudge_count = 0
+
                 continue  # Next turn
 
             # ── No tool calls — check finish reason ──
