@@ -66,6 +66,9 @@ _BUNDLED_FALLBACK: dict[str, dict[str, float]] = {
 
 _LOCAL_PREFIXES = ("lmstudio:", "ollama:", "local:")
 
+# Warn once per process per unknown model so repeated turns don't flood the log.
+_warned_unknown: set[str] = set()
+
 SKIP_MODES = {"embedding", "image_generation", "audio_transcription", "audio_speech"}
 
 _lock = threading.Lock()
@@ -94,13 +97,26 @@ def get_price(model: str, kind: Literal["input", "output"]) -> float | None:
     if model.startswith(_LOCAL_PREFIXES):
         return 0.0
     # 3. Memory / disk cache → 4. Bundled fallback
+    # Try exact name first, then common provider-prefix variants so that a model
+    # stored as "deepseek/deepseek-v4-flash" is also found under
+    # "openrouter/deepseek/deepseek-v4-flash" (and vice-versa).
     pricing = _ensure_loaded()
-    entry = pricing.get(model)
-    if entry and kind in entry:
-        return entry[kind]
-    fb = _BUNDLED_FALLBACK.get(model)
-    if fb and kind in fb:
-        return fb[kind]
+    _candidates = [model]
+    if not model.startswith("openrouter/"):
+        _candidates.append("openrouter/" + model)
+    else:
+        _candidates.append(model[len("openrouter/"):])
+    for _cand in _candidates:
+        entry = pricing.get(_cand)
+        if entry and kind in entry:
+            return entry[kind]
+        fb = _BUNDLED_FALLBACK.get(_cand)
+        if fb and kind in fb:
+            return fb[kind]
+    if model not in _warned_unknown:
+        _warned_unknown.add(model)
+        _log.warning(f"no pricing data for model '{model}' — cost_usd will be NULL. "
+                     f"Set KV pricing_override_{model} or wait for next pricing refresh.")
     return None
 
 
