@@ -692,6 +692,7 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
 }
 .codeblock code { font-family: inherit; }
 .action-bar { display: flex; gap: 2px; margin-top: 12px; opacity: 0.6; }
+.msg-stats { font-family: var(--font-mono); font-size: 10px; color: var(--fg-4); margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* Composer */
 .composer { padding: 14px 0 20px; background: var(--bg); position: sticky; bottom: 0; }
@@ -4406,6 +4407,20 @@ function renderMessage(m) {
   // summary is the first thing visible, then reasoning, then the prose
   // reply. Previous order (thinking → body → tools) buried the concrete
   // actions under a wall of reasoning text.
+  // Per-message token / speed stats — shown for completed assistant turns.
+  // Data lives in m._meta (loaded from DB) or m._replyMeta (set live on streaming msg).
+  const _sm = (!isUser && !m.streaming) ? (m._meta || m._replyMeta || {}) : null;
+  const _smIn  = _sm && (_sm.prompt_tokens || 0);
+  const _smOut = _sm && (_sm.tokens || 0);
+  const _smMs  = _sm && (_sm.duration_ms || 0);
+  const _smTps = _sm && (_sm.tok_per_sec || 0);
+  const msgStats = (_sm && (_smIn || _smOut))
+    ? '<div class="msg-stats">' +
+        '<span title="Input / output tokens">↑ ' + fmtTokens(_smIn) + ' → ↓ ' + fmtTokens(_smOut) + '</span>' +
+        (_smTps ? '<span title="Generation speed">' + Math.round(_smTps) + ' tok/s</span>' : '') +
+        (_smMs  ? '<span title="Turn duration">' + (_smMs >= 1000 ? (_smMs/1000).toFixed(1) + 's' : _smMs + 'ms') + '</span>' : '') +
+      '</div>'
+    : '';
   // Interrupted marker — shown when meta.interrupted is set on the row.
   // meta may arrive as a JSON string from the server wire format; parse defensively.
   let msgMeta = {};
@@ -4418,7 +4433,7 @@ function renderMessage(m) {
         (msgMeta.run_id ? '<span class="im-runid">run #' + esc(msgMeta.run_id) + '</span>' : '') +
       '</div>'
     : '';
-  return '<section class="msg' + (isUser ? ' user' : '') + (isInterrupted ? ' msg-interrupted' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + interruptedMarker + images + files + actions + '</section>';
+  return '<section class="msg' + (isUser ? ' user' : '') + (isInterrupted ? ' msg-interrupted' : '') + '" data-msg-id="' + esc(m.id) + '">' + head + tools + thinking + body + interruptedMarker + images + files + msgStats + actions + '</section>';
 }
 
 function renderChatView() {

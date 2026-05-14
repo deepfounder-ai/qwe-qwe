@@ -792,18 +792,22 @@ def get_runs_for_thread(thread_id: str, limit: int = 50, offset: int = 0) -> lis
 
 
 def get_thread_totals(thread_id: str) -> dict:
-    """Returns {input_tokens, output_tokens, cost_usd, run_count}."""
+    """Returns {input_tokens, output_tokens, cost_usd, run_count}.
+
+    cost_usd is None (not 0.0) when all runs have NULL cost — callers can
+    distinguish "genuinely zero cost" from "pricing data unavailable".
+    """
     conn = _get_conn()
     row = conn.execute(
         "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
-        "       COALESCE(SUM(cost_usd),0.0), COUNT(*) "
+        "       SUM(cost_usd), COUNT(*) "
         "FROM agent_runs WHERE thread_id=?",
         (thread_id,),
     ).fetchone()
     return {
         "input_tokens": int(row[0]),
         "output_tokens": int(row[1]),
-        "cost_usd": float(row[2]),
+        "cost_usd": float(row[2]) if row[2] is not None else None,
         "run_count": int(row[3]),
     }
 
@@ -820,13 +824,13 @@ def get_period_totals(
         params.append(source)
     row = conn.execute(
         "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
-        "       COALESCE(SUM(cost_usd),0.0), COUNT(*) "
+        "       SUM(cost_usd), COUNT(*) "
         f"FROM agent_runs WHERE started_at>=? AND started_at<?{src_clause}",
         params,
     ).fetchone()
     by_src_rows = conn.execute(
         "SELECT source, COALESCE(SUM(input_tokens),0), "
-        "       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0.0), "
+        "       COALESCE(SUM(output_tokens),0), SUM(cost_usd), "
         f"      COUNT(*) FROM agent_runs WHERE started_at>=? AND started_at<?{src_clause} "
         "GROUP BY source",
         params,  # reuse same params (already includes source filter if set)
@@ -835,7 +839,7 @@ def get_period_totals(
         r[0]: {
             "input_tokens": int(r[1]),
             "output_tokens": int(r[2]),
-            "cost_usd": float(r[3]),
+            "cost_usd": float(r[3]) if r[3] is not None else None,
             "run_count": int(r[4]),
         }
         for r in by_src_rows
@@ -845,7 +849,7 @@ def get_period_totals(
         "end_ts": float(end_ts),
         "total_input_tokens": int(row[0]),
         "total_output_tokens": int(row[1]),
-        "total_cost_usd": float(row[2]),
+        "total_cost_usd": float(row[2]) if row[2] is not None else None,
         "run_count": int(row[3]),
         "by_source": by_source,
     }
