@@ -516,6 +516,9 @@ def import_skill(url: str, overwrite: bool = False,
     skill_md_md = parsed["body"]
 
     name = str(fm.get("name", "")).strip().lower()
+    # Normalise: any run of non-alphanumeric chars → single hyphen, trim edges.
+    # Allows importing skills whose SKILL.md uses spaces or underscores in name.
+    name = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
     _check_name(name)
     _check_collision(name, overwrite=overwrite)
 
