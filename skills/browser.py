@@ -1,5 +1,7 @@
 """Browser control skill — navigate, read, click, fill, screenshot via Playwright."""
 
+import asyncio
+import concurrent.futures
 import os
 import time
 
@@ -394,7 +396,7 @@ def _attach_page_listeners(page):
     page.on("console", _on_console)
 
 
-_headless_mode = True  # False = visible browser window user can see
+_headless_mode = False  # False = visible browser window user can see
 
 
 def _ensure_browser():
@@ -422,6 +424,7 @@ def _ensure_browser():
     _pages = [_page]
     _network_log = []
     _console_log = []
+
     _attach_page_listeners(_page)
 
 
@@ -445,14 +448,40 @@ def _close_browser():
         pass
     _pages = []
     _console_log = []
+
     _playwright = None
     _browser = None
     _page = None
     _network_log = []
 
 
+_browser_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
 def execute(name: str, args: dict) -> str:
-    """Execute a browser tool."""
+    """Execute a browser tool - runs in a dedicated thread to avoid asyncio conflicts."""
+    global _page, _pages
+    
+    # Check if we're inside an asyncio event loop
+    try:
+        loop = asyncio.get_running_loop()
+        in_async = loop.is_running()
+    except RuntimeError:
+        in_async = False
+    
+    if not in_async:
+        return _execute_impl(name, args)
+    
+    # Run in a separate thread to avoid sync_playwright inside async loop
+    future = _browser_executor.submit(_execute_impl, name, args)
+    try:
+        return future.result(timeout=30)
+    except concurrent.futures.TimeoutError:
+        return "Error: browser operation timed out after 30s"
+
+
+def _execute_impl(name: str, args: dict) -> str:
+    """Actual implementation of browser tool execution."""
     global _page, _pages
     try:
         # Handle common hallucinated tool names — redirect to real tools
