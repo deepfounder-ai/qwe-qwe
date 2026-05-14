@@ -816,12 +816,19 @@ def run_loop(
 
             # Layer 5: Anti-hedge — ONLY for truly empty replies (thinking but no output)
             # Minimal intervention — don't inject [system] user messages that break model flow.
+            # Also fires after _force_finish: model sometimes responds to the "STOP" nudge with
+            # pure reasoning tokens and no text — without this second chance the user sees nothing.
             _reply_is_empty = len(raw_reply.strip()) == 0 and (len(full_content) > 0 or len(reasoning_content) > 0)
 
-            if not _force_finish and _nudge_count < 1 and _reply_is_empty:
+            if _nudge_count < 1 and _reply_is_empty:
                 _log.info(f"empty reply after thinking — retrying (nudge #{_nudge_count+1})")
-                # Don't inject user message — just let the model try again with context intact
-                messages.append({"role": "assistant", "content": "I need to continue working on this."})
+                # After force_finish the model already received a "STOP" instruction; use a
+                # different nudge that asks for text rather than continuing tool use.
+                if _force_finish:
+                    nudge_text = "Please write your final answer as a text message to the user."
+                else:
+                    nudge_text = "I need to continue working on this."
+                messages.append({"role": "assistant", "content": nudge_text})
                 _nudge_count += 1
                 _nudge_cleanup = True
                 continue
