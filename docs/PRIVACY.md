@@ -127,7 +127,7 @@ These are not subject to the opt-in toggle because no user data is sent — but 
 
 Telemetry is **off by default** — you must explicitly opt in via the first-run prompt or Settings → Privacy → Telemetry.
 
-If you opt in, events go to the project-operated Countly instance at **`https://qwelytics.deepfounder.ai/i`**, run by deepfounder.ai (the qwe-qwe project maintainer). It's a self-hosted Countly Community Edition — same code you could run yourself, same privacy guarantees on the wire, same data inventory documented in this file.
+If you opt in, events go to the project-operated Countly instance at **`https://qwelytics.deepfounder.ai/i`**, run by deepfounder.ai (the Castor project maintainer). It's a self-hosted Countly Community Edition — same code you could run yourself, same privacy guarantees on the wire, same data inventory documented in this file.
 
 The end-user UI offers exactly **two choices**: enable or disable. The destination is fixed — the project decides where its own telemetry lands, you decide whether to participate. This is by design: a buffet of "alternative endpoints" surfaces in the UI would dilute the privacy signal and complicate the trust model.
 
@@ -145,7 +145,7 @@ These are project-level decisions, not user-level — there's no UI surface to o
 
 #### What Countly receives on the wire
 
-[Countly](https://count.ly) Community Edition is open-source, self-hostable product analytics. The qwe-qwe project runs an instance at `qwelytics.deepfounder.ai` for opt-in telemetry. End-users don't configure anything — the project's defaults are baked in.
+[Countly](https://count.ly) Community Edition is open-source, self-hostable product analytics. The Castor project runs an instance at `qwelytics.deepfounder.ai` for opt-in telemetry. End-users don't configure anything — the project's defaults are baked in.
 
 Per opted-in user, Countly receives:
 - App key (the project's public Countly app key — not a secret, equivalent to a Sentry/PostHog public DSN)
