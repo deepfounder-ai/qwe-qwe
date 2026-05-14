@@ -981,6 +981,11 @@ def _emit_cli_session_start() -> None:
 
 
 def main():
+    # Integrity check before any other DB access
+    try:
+        db.check_and_restore()
+    except Exception as e:
+        _log.warning(f"db integrity check startup: {e}")
     # Check first run
     if not db.kv_get("setup_complete"):
         _first_run_setup()
@@ -994,11 +999,7 @@ def main():
     scheduler.on_complete(_on_cron_complete)
     scheduler.start()
     console.print(f"  [dim]⏰ Scheduler running (UTC{config.TZ_OFFSET:+d})[/]")
-    # Integrity check before any other DB access, then backup scheduler
-    try:
-        db.check_and_restore()
-    except Exception as e:
-        _log.warning(f"db integrity check startup: {e}")
+    # Start DB backup scheduler
     try:
         db.start_backup_scheduler()
     except Exception as e:
