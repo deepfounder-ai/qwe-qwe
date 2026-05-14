@@ -150,6 +150,15 @@ def _init_fastembed(cls, model_name: str):
     terminal with raw onnxruntime noise.
     """
     import warnings
+    # Suppress fastembed's loguru "Local file sizes do not match the metadata"
+    # spam that appears when the HuggingFace cache metadata is stale.
+    # These are harmless — fastembed re-downloads as needed; we don't want
+    # the noise in the user's terminal on every startup.
+    try:
+        from loguru import logger as _lu
+        _lu.disable("fastembed")
+    except Exception:
+        pass
     providers = _fastembed_providers()
     # First attempt — honor user preference (or auto)
     init_kwargs = {"model_name": model_name}
