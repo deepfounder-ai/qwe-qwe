@@ -30,8 +30,10 @@ def _get_conn() -> sqlite3.Connection:
     if conn is None:
         conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")   # safe with WAL, faster than FULL
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")  # clean up any leftover WAL on startup
         _local.conn = conn
         # Migrate once across all threads
         with _migrate_lock:
