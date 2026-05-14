@@ -122,8 +122,133 @@ try:
     _migrate_data()
 except Exception as e:
     import sys
-    print(f"⚠️ Data migration failed: {e}", file=sys.stderr)
+    print(f"Warning: data migration failed: {e}", file=sys.stderr)
     # Don't block startup — user can still use the app
+
+
+def _migrate_from_qwe_qwe():
+    """One-time migration from ~/.qwe-qwe/ (old project name) to ~/.castor/.
+
+    Handles the project rename: copies the database, Qdrant vector collections,
+    and user data directories, then updates Qdrant's meta.json so the renamed
+    collections are recognised on first startup.
+    """
+    import shutil, json
+
+    marker = DATA_DIR / ".migrated_from_qwe_qwe"
+    if marker.exists():
+        return
+
+    old_dir = Path.home() / ".qwe-qwe"
+    if not (old_dir / "qwe_qwe.db").exists():
+        # Nothing to migrate — write marker so we don't check every boot
+        marker.write_text("no source\n")
+        return
+
+    moved: list[str] = []
+
+    # 1. SQLite database -------------------------------------------------
+    old_db = old_dir / "qwe_qwe.db"
+    new_db = DATA_DIR / "castor.db"
+    if not new_db.exists() or new_db.stat().st_size < old_db.stat().st_size:
+        shutil.copy2(str(old_db), str(new_db))
+        for ext in ("-shm", "-wal"):
+            src = old_dir / f"qwe_qwe.db{ext}"
+            if src.exists():
+                shutil.copy2(str(src), str(DATA_DIR / f"castor.db{ext}"))
+        moved.append("castor.db")
+
+    # 2. Qdrant vector collections ---------------------------------------
+    old_mem = old_dir / "memory"
+    new_mem = DATA_DIR / "memory"
+    new_mem.mkdir(exist_ok=True)
+    coll_dir = new_mem / "collection"
+    coll_dir.mkdir(exist_ok=True)
+
+    for old_name, new_name in [("qwe_qwe", "castor"), ("qwe_rag", "castor_rag")]:
+        old_storage = old_mem / "collection" / old_name / "storage.sqlite"
+        new_coll = coll_dir / new_name
+        new_storage = new_coll / "storage.sqlite"
+        if old_storage.exists():
+            new_coll.mkdir(exist_ok=True)
+            if not new_storage.exists() or new_storage.stat().st_size < old_storage.stat().st_size:
+                shutil.copy2(str(old_storage), str(new_storage))
+                moved.append(f"qdrant/{new_name}")
+
+    # 3. Qdrant meta.json — register both collections -------------------
+    _COLL_SCHEMA: dict = {
+        "vectors": {"dense": {"size": 384, "distance": "Cosine", "hnsw_config": None,
+                               "quantization_config": None, "on_disk": None,
+                               "datatype": "float16", "multivector_config": None}},
+        "shard_number": None, "sharding_method": None, "replication_factor": None,
+        "write_consistency_factor": None, "on_disk_payload": None,
+        "hnsw_config": None, "wal_config": None, "optimizers_config": None,
+        "quantization_config": None,
+        "sparse_vectors": {"sparse": {"index": None, "modifier": "idf"}},
+        "strict_mode_config": None, "metadata": None,
+    }
+    meta_path = new_mem / "meta.json"
+    try:
+        meta: dict = json.loads(meta_path.read_text()) if meta_path.exists() else {"collections": {}, "aliases": {}}
+        changed = False
+        for name in ("castor", "castor_rag"):
+            if name not in meta.get("collections", {}):
+                meta.setdefault("collections", {})[name] = _COLL_SCHEMA.copy()
+                changed = True
+        if changed:
+            meta_path.write_text(json.dumps(meta))
+            moved.append("memory/meta.json")
+    except Exception:
+        pass
+
+    # 4. User data directories ------------------------------------------
+    # Windows reserved device names cannot be created as files — skip them.
+    _WIN_RESERVED = {"con", "prn", "aux", "nul",
+                     *{f"com{i}" for i in range(1, 10)},
+                     *{f"lpt{i}" for i in range(1, 10)}}
+
+    def _ignore_reserved(dir_, names):
+        return {n for n in names if n.lower().rstrip(".") in _WIN_RESERVED}
+
+    for src_name, dst_path in [
+        ("uploads", DATA_DIR / "uploads"),
+        ("wiki", DATA_DIR / "wiki"),
+        ("presets", DATA_DIR / "presets"),
+        ("workspace", DATA_DIR / "workspace"),
+    ]:
+        src = old_dir / src_name
+        if src.is_dir():
+            try:
+                shutil.copytree(str(src), str(dst_path),
+                                dirs_exist_ok=True, ignore=_ignore_reserved)
+                moved.append(f"{src_name}/")
+            except Exception:
+                moved.append(f"{src_name}/ (partial)")
+
+    # 5. User-created skills (skip builtins) ----------------------------
+    _BUILTIN_SKILLS = {"__init__.py", "skill_creator.py", "canvas.py",
+                       "skill_import.py", "serial_port.py"}
+    old_skills = old_dir / "skills"
+    if old_skills.is_dir():
+        for f in old_skills.glob("*.py"):
+            if f.name not in _BUILTIN_SKILLS and not f.name.startswith("_"):
+                dst = USER_SKILLS_DIR / f.name
+                if not dst.exists():
+                    shutil.copy2(str(f), str(dst))
+                    moved.append(f"skills/{f.name}")
+
+    marker.write_text(f"migrated: {', '.join(moved) or 'nothing'}\n")
+
+
+try:
+    _migrate_from_qwe_qwe()
+except Exception as e:
+    import sys
+    # Always write marker so we don't retry on every boot
+    _marker = Path.home() / ".castor" / ".migrated_from_qwe_qwe"
+    if not _marker.exists():
+        _marker.write_text(f"error: {e}\n")
+    print(f"Warning: qwe-qwe migration failed: {e}", file=sys.stderr)
 
 
 # Timezone offset from UTC (hours). Stored in DB, set via /soul or ask user.
