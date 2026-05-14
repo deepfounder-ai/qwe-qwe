@@ -6859,17 +6859,15 @@ function wireAutoResumeCard() {
     };
     btn.disabled = true; btn.textContent = 'Saving…';
     let ok = true;
-    for (const [k, v] of Object.entries(updates)) {
-      try {
-        const r = await fetch('/api/settings/' + k, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ value: v }),
-        });
-        if (!r.ok) ok = false;
-        else if (state.allSettings && state.allSettings[k]) state.allSettings[k].value = v;
-      } catch { ok = false; }
-    }
+    try {
+      // POST /api/settings accepts {key: value, ...} — one call for all keys
+      const r = await api('/api/settings', { method: 'POST', body: updates });
+      if (r && r.results) {
+        for (const [k, v] of Object.entries(updates)) {
+          if (state.allSettings && state.allSettings[k]) state.allSettings[k].value = v;
+        }
+      } else { ok = false; }
+    } catch { ok = false; }
     toast(ok ? 'auto-resume settings saved' : 'some settings failed to save', ok ? 'ok' : 'err');
     btn.disabled = false; btn.textContent = 'Save';
   };
