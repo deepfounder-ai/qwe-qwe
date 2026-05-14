@@ -804,11 +804,15 @@ def get_thread_totals(thread_id: str) -> dict:
         "FROM agent_runs WHERE thread_id=?",
         (thread_id,),
     ).fetchone()
+    run_count = int(row[3])
+    # cost_usd=None means "runs exist but we couldn't price them" (NULL from
+    # unknown-model pricing).  cost_usd=0.0 means "no runs" (definitively zero).
+    cost_usd = float(row[2]) if row[2] is not None else (0.0 if run_count == 0 else None)
     return {
         "input_tokens": int(row[0]),
         "output_tokens": int(row[1]),
-        "cost_usd": float(row[2]) if row[2] is not None else None,
-        "run_count": int(row[3]),
+        "cost_usd": cost_usd,
+        "run_count": run_count,
     }
 
 
