@@ -1170,6 +1170,106 @@ def _fix_indentation(code: str) -> str:
     return "\n".join(fixed)
 
 
+def _fix_elif_body_indent(code: str) -> str:
+    """Fix the LLM anti-pattern where elif/if branch bodies are at the elif's own indent.
+
+    Local models often emit:
+
+        elif name == "x":
+            pass                  ← _fix_empty_blocks added this (body was empty)
+        real_code()               ← at elif_indent, NOT inside the branch
+        return "result"           ← at elif_indent — breaks the if/elif chain
+
+        elif name == "y":         ← SyntaxError: elif after non-if statements
+
+    This function detects that pattern (elif/if followed by pass + body at wrong
+    indent) and re-indents the real body to be INSIDE the branch (+4).
+    """
+    lines = code.split("\n")
+    out: list[str] = []
+    i = 0
+
+    # Pattern that marks the start of a tool-dispatch branch at any indent
+    _branch_re = re.compile(r'^( *)(el)?if\s+name\s*==\s*.+:\s*$')
+
+    while i < len(lines):
+        line = lines[i]
+        m = _branch_re.match(line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+
+        elif_indent = len(m.group(1))
+        body_indent = elif_indent + 4
+
+        # Peek at next non-blank line after the branch header
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+
+        # Must be `pass` at body_indent
+        if not (j < len(lines)
+                and lines[j].strip() == "pass"
+                and len(lines[j]) - len(lines[j].lstrip()) == body_indent):
+            out.append(line)
+            i += 1
+            continue
+
+        # Peek at line after `pass`
+        k = j + 1
+        while k < len(lines) and not lines[k].strip():
+            k += 1
+
+        if k >= len(lines):
+            out.append(line)
+            i += 1
+            continue
+
+        after_indent = len(lines[k]) - len(lines[k].lstrip())
+        after_stripped = lines[k].strip()
+
+        # Bad pattern: code after pass is at elif_indent (same level as branch header)
+        # AND it is NOT a new tool-dispatch branch.
+        is_at_same_level = (after_indent == elif_indent)
+        is_new_branch = bool(_branch_re.match(lines[k]))
+        if not (is_at_same_level and not is_new_branch):
+            out.append(line)
+            i += 1
+            continue
+
+        # ── Bad pattern confirmed. Repair it. ──
+        # 1. Emit the branch header line.
+        out.append(line)
+        # 2. Emit any blank lines between the header and the pass (unusual but safe).
+        for b in range(i + 1, j):
+            out.append(lines[b])
+        # 3. Skip the spurious `pass` (j) — we'll give the branch a real body.
+        i = k  # jump straight to the real body
+
+        # 4. Collect and re-indent the real body until the next tool-dispatch
+        #    branch (or else:) at elif_indent.
+        while i < len(lines):
+            curr = lines[i]
+            curr_stripped = curr.strip()
+            if not curr_stripped:
+                out.append(curr)
+                i += 1
+                continue
+            curr_indent = len(curr) - len(curr.lstrip())
+            # Stop at the next elif/if that dispatches on `name` at the same level,
+            # or at a bare `else:` (catch-all branch).
+            if curr_indent == elif_indent:
+                if _branch_re.match(curr) or curr_stripped.rstrip() == "else:":
+                    break
+            # Re-indent by +4 to place inside the branch body.
+            out.append(" " * (curr_indent + 4) + curr_stripped)
+            i += 1
+        # `continue` so the outer while re-processes `lines[i]` (the next branch).
+
+    return "\n".join(out)
+
+
 def _fix_empty_blocks(code: str) -> str:
     """Add 'pass' after empty if/elif/else/try/except blocks."""
     lines = code.split("\n")
@@ -1529,6 +1629,7 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                 custom_code = _extract_code(custom_raw)
                 custom_code = _fix_indentation(custom_code)
                 custom_code = _fix_empty_blocks(custom_code)
+                custom_code = _fix_elif_body_indent(custom_code)
                 # Defensive post-process: even with the prompt fix,
                 # small models sometimes still emit `elif` first when
                 # they're supposed to start with `if`. If our body is
@@ -1591,8 +1692,10 @@ def _run_pipeline(skill_name: str, description: str, target: Path, task_id: int 
                 ast.parse(code)
             except SyntaxError as e:
                 _log.warning(f"[{skill_name}] syntax error on attempt {attempt}: {e}")
-                # Try one more fix: ensure all blocks have content
+                # Try one more fix: ensure all blocks have content and that
+                # LLM-generated elif branches have their bodies properly indented.
                 execute_body = _fix_empty_blocks(execute_body)
+                execute_body = _fix_elif_body_indent(execute_body)
                 code = SKILL_TEMPLATE.format(
                     docstring_block=docstring_block,
                     short_description_repr=short_desc_repr,
