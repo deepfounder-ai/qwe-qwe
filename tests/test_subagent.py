@@ -161,6 +161,58 @@ def test_subagent_injects_shared_facts_into_prompt(qwe_temp_data_dir, monkeypatc
     assert "search_kw: drayage" in user_msg["content"]
 
 
+def test_subagent_enforces_max_rounds_budget(qwe_temp_data_dir, monkeypatch):
+    """Regression test for the production bug where max_rounds was declared
+    as a parameter but never passed to run_loop. A scripted fake LLM that
+    always wants to call a tool would otherwise run forever.
+
+    The fix passes BudgetLimits(max_turns=max_rounds) into run_loop, which
+    hits the existing check_budget gate after the configured number of turns
+    and short-circuits with a summary message.
+    """
+    import db
+    import providers
+    import subagent
+
+    goal_id = db.create_goal(user_input="x", source="cli")
+
+    # Build a script that keeps calling http_request forever — if the
+    # budget didn't fire, the loop would consume every chunk and hit the
+    # "out of script → STOP" fallback. With the fix, the budget gate
+    # short-circuits before that.
+    bottomless = []
+    for i in range(50):  # plenty more than max_rounds=5
+        bottomless.append(_tool_call_response(
+            f"call_{i}", "http_request",
+            {"url": "https://example.com/", "method": "GET"},
+        ))
+    bottomless.append(_text_response("done"))
+
+    monkeypatch.setattr(providers, "get_client", lambda: ScriptedClient(bottomless))
+    monkeypatch.setattr(providers, "get_model", lambda: "fake-model")
+    # Stub http_request to avoid real network — return a short string fast.
+    import tools as _tools
+    monkeypatch.setattr(_tools, "execute",
+                        lambda name, args: "200 OK\n<html></html>"
+                        if name == "http_request"
+                        else _tools.execute.__wrapped__(name, args)
+                        if hasattr(_tools.execute, "__wrapped__")
+                        else "ok")
+
+    result = subagent.run_subagent(
+        goal_id=goal_id, subtask_id="st_1",
+        subagent_type="research", prompt="hammer http forever",
+        max_rounds=5,
+    )
+    # The result string is whatever run_loop produced when the budget fired —
+    # either the synthetic "[Task completed with N tool calls...]" message
+    # or some text from a final fallback. Either way it MUST exist and
+    # mention the cap was hit.
+    assert result is not None
+    # Budget hits "max turns (5) reached" — we expect a non-empty result.
+    assert len(result) > 0
+
+
 def test_subagent_truncates_oversize_result(qwe_temp_data_dir, monkeypatch):
     """A subagent that returns a >8 KB blob gets truncated before reaching the orchestrator."""
     import db

@@ -1615,11 +1615,19 @@ def _dispatch_subagent_impl(args: dict) -> str:
     subtask_id = (args.get("subtask_id") or "").strip()
     if not subagent_type or not prompt or not subtask_id:
         return "Error: type, prompt, and subtask_id are all required."
+    # Default subagent budget. Pull from EDITABLE_SETTINGS so operators can
+    # tune without code changes. Lazy import to keep the tools module light.
+    default_rounds = 30
     try:
-        max_rounds = int(args.get("max_rounds") or 20)
+        import config as _config
+        default_rounds = int(_config.get("subagent_default_max_rounds") or default_rounds)
+    except Exception:
+        pass
+    try:
+        max_rounds = int(args.get("max_rounds") or default_rounds)
     except (TypeError, ValueError):
-        max_rounds = 20
-    max_rounds = max(1, min(max_rounds, 100))  # clamp
+        max_rounds = default_rounds
+    max_rounds = max(1, min(max_rounds, 200))  # clamp (raised ceiling from 100 → 200)
     parent_ctx = _get_turn_ctx()
 
     try:

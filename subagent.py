@@ -39,6 +39,7 @@ import db
 import logger
 import providers
 import tools
+from agent_budget import BudgetLimits
 from agent_events import EventEmitter
 from agent_loop import run_loop
 from turn_context import TurnContext
@@ -168,6 +169,12 @@ def run_subagent(
 
     emitter = EventEmitter()
     started = time.time()
+    # Enforce max_rounds at run_loop's existing budget gate (max_turns).
+    # Without this the subagent runs unbounded — we found this in production
+    # when a browser subagent kept turning past 130 rounds while logging into
+    # LinkedIn. The budget gate triggers _force_finish on the run_loop side
+    # which gives the LLM a chance to produce a final summary before exit.
+    budget = BudgetLimits(max_turns=int(max_rounds) if max_rounds else 20)
     try:
         result = run_loop(
             client=client,
@@ -175,6 +182,7 @@ def run_subagent(
             messages=messages,
             tools=sub_tools,
             emitter=emitter,
+            budget=budget,
             temperature=0.3,
             presence_penalty=0.0,
             max_tokens=2048,

@@ -355,6 +355,8 @@ EDITABLE_SETTINGS = {
     "worker_concurrency":        ("setting:worker_concurrency",        int, 1,      "Max goals castor-worker runs concurrently. Default 1 (browser-heavy workloads are serial).", 1, 16),
     "worker_poll_interval_sec":  ("setting:worker_poll_interval_sec",  int, 5,      "How often castor-worker polls for new goals.", 1, 300),
     "worker_inline":             ("setting:worker_inline",             bool, True,  "Run the goal worker INSIDE the web server (great for dev/desktop). Disable when running a dedicated castor-worker via launchd/systemd.", None, None),
+    "orchestrator_max_turns":    ("setting:orchestrator_max_turns",    int, 80,     "Hard cap on orchestrator LLM rounds per goal. Should be high — real work happens in subagents.", 5, 1000),
+    "subagent_default_max_rounds": ("setting:subagent_default_max_rounds", int, 30, "Default max_rounds for dispatched subagents when the orchestrator doesn't specify.", 1, 200),
 }
 
 

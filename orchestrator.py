@@ -32,6 +32,7 @@ import db
 import logger
 import providers
 import tools
+from agent_budget import BudgetLimits
 from agent_events import EventEmitter
 from agent_loop import run_loop
 from turn_context import TurnContext
@@ -136,6 +137,12 @@ def run_orchestrator(goal_id: str, ctx: TurnContext) -> dict:
         ctx.on_round_complete = _default_checkpoint_callback(goal_id, start_round)
 
     # ── Run the loop ──
+    # Cap the orchestrator at a hard turn budget so a runaway plan can't
+    # rack up 200+ LLM calls before someone notices. The cap is generous
+    # — a real long-running goal should mostly delegate to subagents, so
+    # the orchestrator itself shouldn't need many rounds.
+    orch_max_turns = int(config.get("orchestrator_max_turns") or 80)
+    budget = BudgetLimits(max_turns=orch_max_turns)
     turn_start = time.time()
     try:
         result = run_loop(
@@ -144,6 +151,7 @@ def run_orchestrator(goal_id: str, ctx: TurnContext) -> dict:
             messages=messages,
             tools=tool_schemas,
             emitter=emitter,
+            budget=budget,
             temperature=0.3,  # orchestrators benefit from low temp for tool-calling reliability
             presence_penalty=0.0,
             max_tokens=2048,
