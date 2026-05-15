@@ -7345,6 +7345,29 @@ function _renderGoalPlanTab(g) {
       'No plan yet. Orchestrator builds it on its first round.' +
     '</div>';
   }
+  // Helpers: for an in_progress subtask the orchestrator might not be
+  // calling subtask_update between subagent retries, so the plain
+  // result_summary stays stale. Surface live signal from goal_events
+  // (last subagent dispatch/completion) and goal_facts (cumulative
+  // data the agent has saved) so the user can SEE progress.
+  const events = state.goalEvents || [];
+  const facts = state.goalFacts || {};
+  const _liveSignalFor = (stId) => {
+    // Last subagent_* event for this subtask
+    let lastDispatch = null;
+    let lastCompleted = null;
+    for (const ev of events) {
+      const p = ev.payload || {};
+      if (p.subtask_id !== stId) continue;
+      if (ev.event_type === 'subagent_dispatched') lastDispatch = ev;
+      else if (ev.event_type === 'subagent_completed') lastCompleted = ev;
+    }
+    // Facts that mention this subtask (via source_subtask_id) — heuristic:
+    // we don't surface source_subtask_id on the facts API yet, so count all.
+    const factKeys = Object.keys(facts);
+    return { lastDispatch, lastCompleted, factCount: factKeys.length };
+  };
+
   return '<div>' + plan.subtasks.map((st, i) => {
     const statusColor = GOAL_STATUS_COLORS[st.status === 'in_progress' ? 'running' : st.status] || 'var(--fg-3)';
     const statusIcon = (st.status === 'completed') ? 'check'
@@ -7352,6 +7375,34 @@ function _renderGoalPlanTab(g) {
                      : (st.status === 'skipped')   ? 'arrow'
                      : (st.status === 'in_progress') ? 'play'
                      : 'clock';
+    // Live signal block for in_progress tasks
+    let liveBlock = '';
+    if (st.status === 'in_progress') {
+      const sig = _liveSignalFor(st.id);
+      const lines = [];
+      if (sig.lastDispatch) {
+        const ago = fmtTime(sig.lastDispatch.timestamp);
+        lines.push(
+          'Last subagent: ' + esc(sig.lastDispatch.payload.type || '?') +
+          ' (max_rounds=' + esc(String(sig.lastDispatch.payload.max_rounds || '?')) + ') at ' + esc(ago)
+        );
+      }
+      if (sig.lastCompleted) {
+        const dur = Math.round((sig.lastCompleted.payload.duration_ms || 0) / 1000);
+        const len = sig.lastCompleted.payload.result_len || 0;
+        lines.push('Last result: ' + len + ' chars in ' + dur + 's');
+      }
+      if (sig.factCount > 0) {
+        lines.push('Goal facts saved: ' + sig.factCount + ' (see Facts tab for collected data)');
+      }
+      if (lines.length) {
+        liveBlock = '<div style="font-size:11px;color:var(--fg-3);margin-top:6px;' +
+          'padding:6px 8px;background:rgba(100,140,255,0.06);border-left:2px solid var(--info);' +
+          'border-radius:0 4px 4px 0;font-family:var(--font-mono)">' +
+          lines.map(l => esc(l)).join('<br>') +
+          '</div>';
+      }
+    }
     return '<div style="display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--bd-1)">' +
       '<div style="width:24px;height:24px;border-radius:50%;display:flex;align-items:center;' +
         'justify-content:center;border:1px solid ' + statusColor + ';color:' + statusColor +
@@ -7369,6 +7420,7 @@ function _renderGoalPlanTab(g) {
         (st.result_summary ? '<div style="font-size:12px;color:var(--fg-2);margin-top:6px;' +
           'padding:6px 8px;background:var(--bg-1);border-left:2px solid ' + statusColor + ';' +
           'border-radius:0 4px 4px 0">' + esc(st.result_summary) + '</div>' : '') +
+        liveBlock +
         (st.attempts > 1 ? '<div style="font-size:10px;color:var(--fg-4);margin-top:4px">' +
           'attempts: ' + st.attempts + '</div>' : '') +
       '</div>' +
