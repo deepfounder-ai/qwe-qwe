@@ -1635,6 +1635,22 @@ def _dispatch_subagent_impl(args: dict) -> str:
     except ImportError as e:
         return f"Error: subagent module unavailable ({e})"
 
+    # Auto-bump attempts counter on the plan so the UI can show "attempt 3/N"
+    # without the orchestrator having to remember to call subtask_update with
+    # bump_attempts. Also stamp the subagent type so the plan tab visualises
+    # which type was dispatched even mid-flight (the orchestrator's later
+    # subtask_update may overwrite this with a finished status, that's fine).
+    try:
+        db.update_subtask(
+            goal_id, subtask_id,
+            dispatched_subagent=subagent_type,
+            bump_attempts=True,
+        )
+    except Exception:
+        # Plan may not exist yet (orchestrator dispatched before plan_set?)
+        # — non-fatal, the dispatch still proceeds.
+        pass
+
     return subagent.run_subagent(
         goal_id=goal_id,
         subtask_id=subtask_id,
