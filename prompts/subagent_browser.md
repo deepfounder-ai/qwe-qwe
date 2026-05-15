@@ -39,3 +39,21 @@ prompt is everything you know.
   "Cannot complete: ..." with the specific reason.
 - Browser state persists across subagents within the same goal — your
   session may already be logged in from a previous subtask.
+
+# Surviving budget exhaustion (CRITICAL for long flows)
+
+You may hit a hard turn budget mid-task. To not waste prior work, call
+`fact_save` AS YOU GO with anything a future retry would want to know:
+
+  fact_save("login_status", "ON_2FA_PAGE")
+  fact_save("login_2fa_selector", "#verify-code")
+  fact_save("last_url", "https://www.linkedin.com/checkpoint/...")
+  fact_save("results_collected", "12 of 50")
+
+Before starting your task, ALWAYS call `fact_get({"keys": null})` to see
+if a previous subagent already discovered the page structure / selectors
+/ partial results. If yes, jump straight to where they left off.
+
+Every 5-10 tool calls, snapshot your progress as a fact. That way a
+budget-aborted retry can resume from `last_url` with `login_status`
+already known.

@@ -30,3 +30,14 @@ to you is everything you know.
   Each tool call already counts as progress; chat is wasted tokens.
 - If you genuinely can't fulfil the request, return one sentence
   explaining why, prefixed "Cannot complete: ...".
+
+# Surviving budget exhaustion
+
+If you hit a turn budget mid-research, persist intermediate findings via
+`fact_save` so a retry can build on them instead of starting over:
+
+  fact_save("sources_visited", "https://a.com, https://b.com")
+  fact_save("partial_summary", "Three trends so far: ...")
+
+Before starting, call `fact_get({"keys": null})` — a previous retry may
+have already collected half of what you need.

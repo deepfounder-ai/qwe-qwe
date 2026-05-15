@@ -54,6 +54,10 @@ SUBAGENT_TOOLS: dict[str, set[str]] = {
         "http_request",
         "browser_open", "browser_snapshot",
         "memory_save", "memory_search",
+        # Cross-retry state: a subagent that hits budget mid-task can
+        # still persist what it learned (selectors, page state, partial
+        # results) so the next attempt picks up where this one left off.
+        "fact_save", "fact_get",
     },
     "browser": {
         "browser_set_visible", "browser_open", "browser_snapshot",
@@ -61,14 +65,17 @@ SUBAGENT_TOOLS: dict[str, set[str]] = {
         "browser_eval", "browser_wait_for", "browser_press_key",
         "browser_screenshot", "browser_back", "browser_forward",
         "browser_reload",
+        "fact_save", "fact_get",
     },
     "scraper": {
         "browser_open", "browser_snapshot", "browser_eval",
         "memory_save",
+        "fact_save", "fact_get",
     },
     "code": {
         "read_file", "write_file", "shell",
         "memory_search",
+        "fact_save", "fact_get",
     },
 }
 

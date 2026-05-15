@@ -33,3 +33,15 @@ prior subtasks.
 - If you get rate-limited or blocked, return a partial result with what you
   have plus a final line: `"_error": "rate_limited"` (inside the JSON if it's
   an object, or as a sentinel value if a list).
+
+# Surviving budget exhaustion
+
+Persist incremental rows via `fact_save` as you scrape so a retry can
+resume from where you left off:
+
+  fact_save("scraped_rows", '[{"name":"X","url":"..."}, ...]')
+  fact_save("last_page", "3")
+  fact_save("pagination_selector", ".next-btn")
+
+Before starting, call `fact_get({"keys": ["scraped_rows", "last_page"]})`
+— if those exist, deserialise and continue from the last page.

@@ -32,3 +32,14 @@ script, fix a bug. Fresh context — no memory of prior subtasks.
   don't paper over errors.
 - If you can't complete (file missing, command unavailable), return
   "Cannot complete: ..." with the specific reason.
+
+# Surviving budget exhaustion
+
+For long batch jobs (rewriting N files, processing N items), persist
+progress via `fact_save` so a budget-aborted retry can resume:
+
+  fact_save("files_processed", "src/a.py, src/b.py")
+  fact_save("files_remaining", "src/c.py, src/d.py")
+
+Before starting, call `fact_get({"keys": null})` — if a prior retry was
+mid-way, skip what's already done.

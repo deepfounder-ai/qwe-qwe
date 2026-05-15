@@ -469,17 +469,38 @@ def run_loop(
     total_gen_ms = 0
     total_output_tokens = 0
 
+    _budget_summary_requested = False
     try:
         while True:
             # ── Budget check ──
             decision = check_budget(budget, stats)
             if decision.exceeded:
+                # First time we hit budget: don't break immediately. Give the
+                # model ONE more turn to write a proper "what I did, what's
+                # left, where I'm stuck" summary instead of returning the
+                # synthetic stub. Caller-level retry (orchestrator) is FAR
+                # more useful with a real status report than a tool-list.
+                if not _budget_summary_requested:
+                    _budget_summary_requested = True
+                    _log.warning(f"budget approaching limit: {decision.reason} — asking for status summary")
+                    emitter.status(f"Budget: {decision.reason} (writing summary)")
+                    messages.append({"role": "user", "content":
+                        "[system] You've hit your turn budget. Stop calling tools NOW. "
+                        "Write a final text message with: (1) ONE sentence of what you accomplished, "
+                        "(2) what's blocking you from finishing (if anything), "
+                        "(3) anything you've already saved via fact_save that a retry should read."})
+                    # Bump the budget by ONE so the next turn (the summary-only one) can run
+                    if budget.max_turns:
+                        budget.max_turns += 1
+                    continue
+                # Second time around: model didn't comply with the summary
+                # request. Fall back to the synthetic stub so the caller
+                # still gets SOMETHING.
                 _log.warning(f"budget exceeded: {decision.reason}")
                 emitter.status(f"Budget: {decision.reason}")
-                # Generate summary so model remembers what it did
                 if not final_content and all_tool_calls:
-                    tools_summary = ", ".join(dict.fromkeys(all_tool_calls))  # unique, ordered
-                    final_content = f"[Task completed with {len(all_tool_calls)} tool calls: {tools_summary}. Budget limit reached.]"
+                    tools_summary = ", ".join(dict.fromkeys(all_tool_calls))
+                    final_content = f"[Task completed with {len(all_tool_calls)} tool calls: {tools_summary}. Budget limit reached — model did not produce summary.]"
                 break
 
             # Abort check — user pressed Stop

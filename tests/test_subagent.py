@@ -35,6 +35,17 @@ def test_subagent_research_tools_are_restricted():
     assert "write_file" not in allowed
 
 
+def test_every_subagent_type_has_fact_tools():
+    """Every subagent type can persist + read cross-retry state via fact_save.
+    Without this, a budget-aborted retry has no way to resume from where the
+    previous attempt left off — it starts from scratch with a fresh context.
+    """
+    import subagent
+    for stype, allowed in subagent.SUBAGENT_TOOLS.items():
+        assert "fact_save" in allowed, f"{stype} missing fact_save"
+        assert "fact_get" in allowed, f"{stype} missing fact_get"
+
+
 def test_subagent_code_tools_exclude_browser():
     import subagent
     allowed = subagent.SUBAGENT_TOOLS["code"]
