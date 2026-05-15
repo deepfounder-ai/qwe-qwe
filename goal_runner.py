@@ -65,8 +65,11 @@ async def run(goal_id: str, shutdown_event: asyncio.Event) -> None:
                           {"input_preview": goal["user_input"][:200]})
 
     # Bridge asyncio shutdown_event → threading.Event so the sync agent loop
-    # (which runs in an executor) can poll it and exit cleanly.
-    abort_event = _bridge_shutdown_to_threading(shutdown_event)
+    # (which runs in an executor) can poll it and exit cleanly. The watcher
+    # task is returned so we can cancel it in finally — without that, every
+    # goal that completes normally leaks a pending watcher (asyncio warns:
+    # "Task pending ... wait_for=<Future pending>" until interpreter exit).
+    abort_event, _watcher_task = _bridge_shutdown_to_threading(shutdown_event)
 
     ctx = TurnContext(
         source=goal["source"],
@@ -93,6 +96,15 @@ async def run(goal_id: str, shutdown_event: asyncio.Event) -> None:
         _log.exception(f"goal {goal_id} crashed: {e}")
         db.mark_goal_failed(goal_id, error=f"{type(e).__name__}: {e}")
         return
+    finally:
+        # Always tear down the shutdown-event watcher so it doesn't outlive
+        # the goal. Cancel + suppress CancelledError so cleanup never raises.
+        if not _watcher_task.done():
+            _watcher_task.cancel()
+            try:
+                await _watcher_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     # Did the shutdown_event fire while the orchestrator was running? If yes
     # the loop may have returned early after abort — treat as paused.
@@ -134,12 +146,18 @@ def _make_checkpoint_callback(goal_id: str, start_round: int):
     return _cb
 
 
-def _bridge_shutdown_to_threading(shutdown_event: asyncio.Event) -> threading.Event:
-    """Return a threading.Event that is set whenever ``shutdown_event`` is set.
+def _bridge_shutdown_to_threading(
+    shutdown_event: asyncio.Event,
+) -> "tuple[threading.Event, asyncio.Task]":
+    """Return ``(threading.Event, watcher_task)``.
 
-    agent.run / agent_loop only know about threading.Event for aborts (it's
-    polled from blocking tool calls like shell, http_request). The worker
-    operates in asyncio land. This bridge fires once and stays set.
+    The threading.Event fires whenever ``shutdown_event`` is set, so the
+    sync agent loop (which lives in a thread executor and only knows
+    about ``threading.Event`` for aborts via ``shell`` / ``http_request``)
+    can poll it. The watcher_task is returned so the caller can cancel
+    it in a ``finally`` — without that, every goal that completes WITHOUT
+    setting shutdown_event leaks a pending task. Asyncio surfaces those
+    as warnings: "Task pending ... wait_for=<Future pending>".
     """
     evt = threading.Event()
 
@@ -150,6 +168,5 @@ def _bridge_shutdown_to_threading(shutdown_event: asyncio.Event) -> threading.Ev
             return
         evt.set()
 
-    # Fire-and-forget watcher; cancelled when the parent task ends.
-    asyncio.create_task(_watcher())
-    return evt
+    task = asyncio.create_task(_watcher())
+    return evt, task

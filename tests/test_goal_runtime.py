@@ -477,3 +477,80 @@ def test_turn_context_emit_round_complete_swallows_callback_errors():
     ctx = TurnContext(on_round_complete=_boom)
     # Must not raise.
     ctx.emit_round_complete(1, [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Bridge: no leaked tasks when goal completes normally
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_bridge_shutdown_returns_task_handle(qwe_temp_data_dir):
+    """_bridge_shutdown_to_threading must return BOTH the threading.Event
+    AND the watcher task so callers can cancel it in finally. Without the
+    task handle every completed goal leaked one pending Task per run,
+    which asyncio surfaced as: 'Task pending ... wait_for=<Future pending>'.
+    """
+    import asyncio as _aio
+    import goal_runner
+
+    async def _check():
+        shutdown = _aio.Event()
+        evt, task = goal_runner._bridge_shutdown_to_threading(shutdown)
+        # Contract: returns a 2-tuple (threading.Event, asyncio.Task).
+        import threading as _t
+        assert isinstance(evt, _t.Event)
+        assert isinstance(task, _aio.Task)
+        # Cleanup so this test itself doesn't leak.
+        task.cancel()
+        try:
+            await task
+        except _aio.CancelledError:
+            pass
+
+    _aio.run(_check())
+
+
+def test_bridge_watcher_cancellable_without_leak(qwe_temp_data_dir):
+    """When the goal completes WITHOUT setting shutdown_event, the watcher
+    task must be cancellable. After cancel + await, the task is fully
+    done and no asyncio warning about pending tasks remains.
+    """
+    import asyncio as _aio
+    import goal_runner
+
+    async def _check():
+        shutdown = _aio.Event()
+        evt, task = goal_runner._bridge_shutdown_to_threading(shutdown)
+        # Simulate "goal completed normally" — shutdown event was never set.
+        # Caller is responsible for tearing the watcher down.
+        assert not task.done()
+        task.cancel()
+        try:
+            await task
+        except _aio.CancelledError:
+            pass
+        assert task.done()
+        # threading.Event was NOT set because shutdown didn't fire — abort
+        # signal stays clean for the next goal.
+        assert not evt.is_set()
+
+    _aio.run(_check())
+
+
+def test_bridge_watcher_fires_threading_event(qwe_temp_data_dir):
+    """Happy path: when shutdown_event is set, watcher mirrors it to the
+    threading.Event so the sync agent loop sees the abort signal."""
+    import asyncio as _aio
+    import goal_runner
+
+    async def _check():
+        shutdown = _aio.Event()
+        evt, task = goal_runner._bridge_shutdown_to_threading(shutdown)
+        # Trigger the shutdown
+        shutdown.set()
+        # Wait for the watcher to run + mirror
+        await task
+        assert evt.is_set()
+        assert task.done()
+
+    _aio.run(_check())
