@@ -4,6 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 For a high-level system map see `ARCHITECTURE.md`. For contributor setup + release flow see `CONTRIBUTING.md`. This file is tuned for what an LLM agent actually needs to know to get work done.
 
+## Recommended Claude Code skills
+
+Castor is itself an agent harness — when designing or auditing castor's own
+runtime (Phase 3+ of `docs/superpowers/plans/2026-05-15-long-running-agent-architecture.md`),
+load the provider-neutral agentic-harness reference manual:
+
+```bash
+mkdir -p .claude/skills
+git clone https://github.com/DenisSergeevitch/agents-best-practices.git \
+  .claude/skills/agents-best-practices
+```
+
+That skill's 15 reference files (`agentic-loop.md`, `planning-and-goals.md`,
+`tools-and-permissions.md`, `context-memory-compaction.md`, etc.) map almost
+1:1 to castor's `agent_loop.py` / `orchestrator.py` / `subagent.py` modules
+and use a shared vocabulary (loop invariants, agent legibility, planning
+mode artifacts) that keeps internal docs consistent.
+
+The `.claude/` directory is gitignored — skills install per-clone.
+
 ## Build & Run
 
 ```bash
