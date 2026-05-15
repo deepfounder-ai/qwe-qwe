@@ -73,12 +73,42 @@ _ORCHESTRATOR_TOOL_NAMES: set[str] = {
 def _get_orchestrator_tools() -> list[dict]:
     """Return the OpenAI-format tool schemas the orchestrator is allowed to call.
 
-    Pulled fresh each turn so newly-registered tools (e.g. dispatch_subagent
-    from Phase 2c) show up without restart.
+    Three layers:
+      1. The hard-coded core whitelist (_ORCHESTRATOR_TOOL_NAMES) — goal
+         management + lightweight inline ops.
+      2. **All user-installed skill tools.** If the user installed a
+         ``linkedin_lead_gen`` skill, the orchestrator should be able to
+         use its tools directly instead of dispatching a generic browser
+         subagent that has to figure out LinkedIn from scratch. Skills
+         are user-controlled (active via Settings UI / KV ``active_skills``)
+         so they're trusted by definition.
+      3. **All MCP tools.** Same trust model — user opted into the MCP
+         server.
+
+    Pulled fresh each turn so a skill activated mid-goal (or an MCP server
+    started mid-goal) is immediately available.
     """
     all_tools = tools._get_all_tools_full()
-    return [t for t in all_tools
-            if t.get("function", {}).get("name") in _ORCHESTRATOR_TOOL_NAMES]
+    # Layer 1: core whitelist
+    keep_names = set(_ORCHESTRATOR_TOOL_NAMES)
+    # Layer 2 + 3: everything not in the core TOOLS list is from skills/MCP.
+    # tools.TOOLS is the canonical list of CORE tool schemas; anything else
+    # from _get_all_tools_full() came from skills.get_tools() or
+    # mcp_client.get_all_mcp_tools().
+    _core_names = {t.get("function", {}).get("name") for t in tools.TOOLS}
+    for t in all_tools:
+        fn_name = t.get("function", {}).get("name")
+        if fn_name and fn_name not in _core_names:
+            keep_names.add(fn_name)
+    # Filter + dedupe by name (skills loaded twice = keep first occurrence).
+    seen: set[str] = set()
+    result: list[dict] = []
+    for t in all_tools:
+        fn_name = t.get("function", {}).get("name", "")
+        if fn_name in keep_names and fn_name not in seen:
+            seen.add(fn_name)
+            result.append(t)
+    return result
 
 
 def run_orchestrator(goal_id: str, ctx: TurnContext) -> dict:

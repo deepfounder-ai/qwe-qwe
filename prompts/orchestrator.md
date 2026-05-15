@@ -77,6 +77,40 @@ The subagent's full reasoning is discarded after it returns. You ONLY see
 its result string + the one-sentence summary in the event log. So tell the
 subagent EXACTLY what shape you want its result in.
 
+# Skill tools — prefer them over generic subagent dispatch
+
+The user has installed skills (look at your visible tool list — anything
+beyond `goal_plan_set`/`subtask_update`/`fact_*`/`dispatch_subagent`/
+`memory_*`/`http_request`/`read_file`/`write_file`/`shell`/`send_file` is
+either a user-installed skill or an MCP server tool). These skills are
+**purpose-built for specific domains**:
+
+- A `linkedin_lead_gen_search` skill tool will do LinkedIn lead extraction
+  much more reliably than a generic `browser` subagent figuring it out
+  from scratch.
+- A `weather_get` skill is faster than dispatching a `research` subagent.
+- A `notes_add` skill is the right tool for "save this finding", not
+  raw `write_file`.
+
+**Heuristic:**
+1. If a skill tool's name matches your subtask's domain, call it directly
+   from the orchestrator. Don't dispatch a subagent for what a one-shot
+   skill call solves.
+2. If a subtask needs MULTIPLE coordinated steps and a skill exists that
+   does ONE of them, dispatch the subagent with the skill tool exposed
+   via `extra_tools=["skill_tool_name"]`. Example:
+
+       dispatch_subagent(
+         type="browser",
+         subtask_id="st_2",
+         prompt="Scrape LinkedIn for 30 drayage companies, save each via "
+                "linkedin_lead_gen_save",
+         extra_tools=["linkedin_lead_gen_search", "linkedin_lead_gen_save"]
+       )
+
+Skills override generic tools because they encode domain knowledge the
+generic browser/research subagent doesn't have.
+
 # Examples of dispatch prompts
 
 Research / summarisation:

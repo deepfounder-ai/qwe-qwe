@@ -92,9 +92,20 @@ def _load_prompt(subagent_type: str) -> str:
     return _prompt_cache[subagent_type]
 
 
-def _get_subagent_tools(subagent_type: str) -> list[dict]:
-    """Return only the OpenAI-schema tool defs the subagent type is allowed to use."""
-    allowed = SUBAGENT_TOOLS.get(subagent_type, set())
+def _get_subagent_tools(
+    subagent_type: str,
+    extra_tools: list[str] | None = None,
+) -> list[dict]:
+    """Return only the OpenAI-schema tool defs the subagent type is allowed to use.
+
+    ``extra_tools`` lets the orchestrator widen the whitelist on a per-dispatch
+    basis — useful when a user-installed skill (e.g. ``linkedin_lead_gen_*``)
+    should be available to THIS particular subagent run. The dispatcher
+    decides which extras are safe; we don't validate against any policy here.
+    """
+    allowed = set(SUBAGENT_TOOLS.get(subagent_type, set()))
+    if extra_tools:
+        allowed.update(t for t in extra_tools if isinstance(t, str) and t.strip())
     if not allowed:
         return []
     all_tools = tools._get_all_tools_full()
@@ -119,6 +130,7 @@ def run_subagent(
     shared_context: dict | None = None,
     max_rounds: int = 20,
     parent_ctx: TurnContext | None = None,
+    extra_tools: list[str] | None = None,
 ) -> str:
     """Run one subagent to completion. Returns its result string.
 
@@ -144,7 +156,7 @@ def run_subagent(
         {"role": "system", "content": system},
         {"role": "user", "content": user_msg},
     ]
-    sub_tools = _get_subagent_tools(subagent_type)
+    sub_tools = _get_subagent_tools(subagent_type, extra_tools=extra_tools)
 
     # Build a sub-TurnContext that:
     #   - Inherits the parent's abort_event (so an aborted goal stops the

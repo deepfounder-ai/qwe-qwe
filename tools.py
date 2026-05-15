@@ -1112,6 +1112,16 @@ TOOLS = [
                             "the subagent's prompt. {extras: {...}} inlines arbitrary k/v context."
                         ),
                     },
+                    "extra_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional. Tool names from user-installed skills or MCP servers to "
+                            "expose to the subagent IN ADDITION to its type's base whitelist. "
+                            "Use this when a specific skill (e.g. 'linkedin_lead_gen_search') "
+                            "would do the work better than raw browser_* calls."
+                        ),
+                    },
                 },
                 "required": ["type", "prompt", "subtask_id"],
             },
@@ -1651,6 +1661,15 @@ def _dispatch_subagent_impl(args: dict) -> str:
         # — non-fatal, the dispatch still proceeds.
         pass
 
+    # Optional extra tools to expose to the subagent beyond its type's
+    # base whitelist. Used by orchestrator to give a subagent access to a
+    # specific user-installed skill that fits the subtask (e.g. a
+    # `linkedin_lead_gen_search` skill for a browser subagent doing
+    # LinkedIn scraping).
+    extra_tools = args.get("extra_tools")
+    if extra_tools and not isinstance(extra_tools, list):
+        extra_tools = None
+
     return subagent.run_subagent(
         goal_id=goal_id,
         subtask_id=subtask_id,
@@ -1659,6 +1678,7 @@ def _dispatch_subagent_impl(args: dict) -> str:
         shared_context=args.get("shared_context"),
         max_rounds=max_rounds,
         parent_ctx=parent_ctx,
+        extra_tools=extra_tools,
     )
 
 
