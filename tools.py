@@ -1077,6 +1077,49 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "dispatch_subagent",
+            "description": (
+                "Orchestrator only: dispatch a focused subagent with a FRESH context window. "
+                "The subagent does the work and returns ONE result string. Use for anything "
+                "multi-step (browser scraping, complex research, long file edits). "
+                "The subagent's reasoning trace is discarded — you only see its result string. "
+                "Tell the subagent EXACTLY what shape you want its result in."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["research", "browser", "scraper", "code"],
+                        "description": "Which subagent type — picks the tool whitelist + system prompt",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Self-contained task description. Subagent has NO context except this + shared facts.",
+                    },
+                    "subtask_id": {
+                        "type": "string",
+                        "description": "Which plan subtask this subagent is working on (e.g. 'st_2')",
+                    },
+                    "max_rounds": {
+                        "type": "integer",
+                        "description": "Hard cap on subagent tool-call rounds. Default 20.",
+                    },
+                    "shared_context": {
+                        "type": "object",
+                        "description": (
+                            "Optional. {keys: ['fact_key_1', ...]} auto-injects those goal_facts into "
+                            "the subagent's prompt. {extras: {...}} inlines arbitrary k/v context."
+                        ),
+                    },
+                },
+                "required": ["type", "prompt", "subtask_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "secret_save",
             "description": "Securely store a secret (password, API key, token). Encrypted in vault.",
             "parameters": {
@@ -1554,6 +1597,47 @@ def _fact_get_impl(args: dict) -> str:
     return "\n".join(lines)
 
 
+def _dispatch_subagent_impl(args: dict) -> str:
+    """Dispatch a subagent — orchestrator-only entry point.
+
+    Reads goal_id + parent ctx from the active TurnContext, then delegates
+    to :func:`subagent.run_subagent`. The subagent's full reasoning trace
+    is consumed there; only the result string is returned.
+
+    Imported lazily so a stripped-down deployment without subagent.py
+    fails with a clean error instead of an ImportError on module load.
+    """
+    goal_id = _require_goal_id()
+    if not goal_id:
+        return "Error: dispatch_subagent requires an active goal."
+    subagent_type = (args.get("type") or "").strip()
+    prompt = (args.get("prompt") or "").strip()
+    subtask_id = (args.get("subtask_id") or "").strip()
+    if not subagent_type or not prompt or not subtask_id:
+        return "Error: type, prompt, and subtask_id are all required."
+    try:
+        max_rounds = int(args.get("max_rounds") or 20)
+    except (TypeError, ValueError):
+        max_rounds = 20
+    max_rounds = max(1, min(max_rounds, 100))  # clamp
+    parent_ctx = _get_turn_ctx()
+
+    try:
+        import subagent  # local import: keeps tools.py importable in trimmed builds
+    except ImportError as e:
+        return f"Error: subagent module unavailable ({e})"
+
+    return subagent.run_subagent(
+        goal_id=goal_id,
+        subtask_id=subtask_id,
+        subagent_type=subagent_type,
+        prompt=prompt,
+        shared_context=args.get("shared_context"),
+        max_rounds=max_rounds,
+        parent_ctx=parent_ctx,
+    )
+
+
 # ── Tool execution ──
 
 def execute(name: str, args: dict) -> str:
@@ -1897,6 +1981,9 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "fact_get":
             return _fact_get_impl(args)
+
+        elif name == "dispatch_subagent":
+            return _dispatch_subagent_impl(args)
 
         elif name == "secret_save":
             return vault.save(args["key"], args["value"])
