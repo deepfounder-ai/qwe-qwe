@@ -2369,6 +2369,66 @@ async def abort_goal(goal_id: str):
     return {"id": goal_id, "status": "aborted"}
 
 
+@app.delete("/api/goals/{goal_id}")
+async def delete_goal(goal_id: str):
+    """Permanently delete a goal + its checkpoints/events/facts (via FK cascade).
+
+    Refuses to delete a goal that's still ``running`` — caller should
+    POST /abort or /pause first to avoid removing a row a worker is
+    actively writing to.
+    """
+    g = db.get_goal(goal_id)
+    if not g:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if g["status"] == "running":
+        return JSONResponse(
+            {"error": "abort or pause the goal before deleting it"},
+            status_code=409,
+        )
+    conn = db._get_conn()
+    # Foreign keys default to OFF in sqlite3; turn them ON for this
+    # statement so the ON DELETE CASCADE in migrations 011 + 012 fires
+    # and reaps goal_checkpoints, goal_events, goal_facts in one go.
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("DELETE FROM goals WHERE id=?", (goal_id,))
+    conn.commit()
+    return {"id": goal_id, "deleted": True}
+
+
+@app.post("/api/goals/cleanup")
+async def cleanup_goals(data: dict | None = None):
+    """Bulk-delete goals matching a filter. Currently supports
+    ``{status: "done"|"failed"|"aborted"}`` (or a list of statuses) so the
+    UI can offer a "clean up finished goals" button without listing every
+    goal_id individually.
+
+    Refuses to touch running / paused / pending goals — those need an
+    explicit abort first.
+    """
+    data = data or {}
+    status = data.get("status") or ["done", "failed", "aborted"]
+    if isinstance(status, str):
+        status = [status]
+    # Belt-and-suspenders: filter the input through the known terminal
+    # statuses set so a caller can't accidentally delete a running goal
+    # by passing status="running".
+    allowed = [s for s in status if s in db.GOAL_TERMINAL_STATUSES]
+    if not allowed:
+        return JSONResponse(
+            {"error": f"status must be one of {db.GOAL_TERMINAL_STATUSES}"},
+            status_code=400,
+        )
+    conn = db._get_conn()
+    conn.execute("PRAGMA foreign_keys = ON")
+    placeholders = ",".join("?" * len(allowed))
+    cur = conn.execute(
+        f"DELETE FROM goals WHERE status IN ({placeholders})",
+        allowed,
+    )
+    conn.commit()
+    return {"deleted": cur.rowcount, "statuses": allowed}
+
+
 @app.post("/api/cron/{task_id}/run")
 async def run_cron_now(task_id: int):
     """Fire a routine immediately (manual trigger, out-of-schedule).

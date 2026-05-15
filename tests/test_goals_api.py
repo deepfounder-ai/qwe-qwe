@@ -197,3 +197,112 @@ def test_get_goal_facts_returns_saved_kv(client):
 def test_get_goal_facts_404_for_missing_goal(client):
     r = client.get("/api/goals/g_nope/facts")
     assert r.status_code == 404
+
+
+def test_delete_goal_cascades_facts_events_checkpoints(client):
+    """DELETE /api/goals/{id} removes the goal and all related rows."""
+    import db
+    gid = client.post("/api/goals", json={"user_input": "x"}).json()["id"]
+    db.fact_save(gid, "k", "v")
+    db.log_goal_event(gid, "test_event", {"a": 1})
+    db.save_checkpoint(gid, round_num=1, messages=[{"role": "user", "content": "x"}])
+    # Sanity: rows exist
+    assert db.get_goal(gid) is not None
+    assert db.fact_get(gid) == {"k": "v"}
+    # Delete
+    r = client.delete(f"/api/goals/{gid}")
+    assert r.status_code == 200
+    assert r.json() == {"id": gid, "deleted": True}
+    # Cascade — children gone
+    assert db.get_goal(gid) is None
+    assert db.fact_get(gid) == {}
+    assert db.load_latest_checkpoint(gid) is None
+    assert db.get_goal_events(gid) == []
+
+
+def test_delete_goal_404_for_missing(client):
+    r = client.delete("/api/goals/g_nope")
+    assert r.status_code == 404
+
+
+def test_delete_goal_refuses_running(client):
+    """A running goal must be aborted/paused before delete."""
+    import db
+    gid = client.post("/api/goals", json={"user_input": "x"}).json()["id"]
+    # Force status=running (no actual worker)
+    conn = db._get_conn()
+    conn.execute("UPDATE goals SET status='running' WHERE id=?", (gid,))
+    conn.commit()
+    r = client.delete(f"/api/goals/{gid}")
+    assert r.status_code == 409
+    assert "abort" in r.json()["error"].lower()
+
+
+def test_cleanup_goals_deletes_terminal_only(client):
+    """POST /api/goals/cleanup deletes done+failed+aborted by default,
+    leaves pending/running/paused alone.
+
+    Module-scoped client fixture means earlier tests may have left some
+    terminal goals in the DB. We assert against the SET of our own ids,
+    not against the absolute deleted count.
+    """
+    import db
+    ids = {
+        "done":    client.post("/api/goals", json={"user_input": "cleanup-d"}).json()["id"],
+        "failed":  client.post("/api/goals", json={"user_input": "cleanup-f"}).json()["id"],
+        "aborted": client.post("/api/goals", json={"user_input": "cleanup-a"}).json()["id"],
+        "pending": client.post("/api/goals", json={"user_input": "cleanup-p"}).json()["id"],
+        "paused":  client.post("/api/goals", json={"user_input": "cleanup-ps"}).json()["id"],
+    }
+    db.mark_goal_done(ids["done"], result="ok")
+    db.mark_goal_failed(ids["failed"], error="x")
+    db.mark_goal_aborted(ids["aborted"])
+    db.mark_goal_paused(ids["paused"], reason="user")
+
+    r = client.post("/api/goals/cleanup", json={})
+    assert r.status_code == 200
+    assert r.json()["deleted"] >= 3  # at least our 3, possibly more from prior tests
+    # Non-terminal goals survived
+    assert db.get_goal(ids["pending"]) is not None
+    assert db.get_goal(ids["paused"]) is not None
+    # Terminal goals are gone
+    assert db.get_goal(ids["done"]) is None
+    assert db.get_goal(ids["failed"]) is None
+    assert db.get_goal(ids["aborted"]) is None
+
+
+def test_cleanup_goals_status_filter(client):
+    """Filter to only delete e.g. 'aborted' — leaves done/failed intact."""
+    import db
+    done_id    = client.post("/api/goals", json={"user_input": "csf-d"}).json()["id"]
+    aborted_id = client.post("/api/goals", json={"user_input": "csf-a"}).json()["id"]
+    db.mark_goal_done(done_id, result="ok")
+    db.mark_goal_aborted(aborted_id)
+    r = client.post("/api/goals/cleanup", json={"status": "aborted"})
+    assert r.status_code == 200
+    assert r.json()["deleted"] >= 1
+    # done survives
+    assert db.get_goal(done_id) is not None
+    # aborted gone
+    assert db.get_goal(aborted_id) is None
+
+
+def test_cleanup_goals_rejects_non_terminal_status(client):
+    """Passing status='running' must be rejected — no foot-gun."""
+    r = client.post("/api/goals/cleanup", json={"status": "running"})
+    assert r.status_code == 400
+
+
+def test_cleanup_goals_accepts_list_status(client):
+    """status can be a list of terminal states."""
+    import db
+    a = client.post("/api/goals", json={"user_input": "cls-a"}).json()["id"]
+    b = client.post("/api/goals", json={"user_input": "cls-b"}).json()["id"]
+    db.mark_goal_done(a, result="ok")
+    db.mark_goal_failed(b, error="x")
+    r = client.post("/api/goals/cleanup", json={"status": ["done", "failed"]})
+    assert r.status_code == 200
+    assert r.json()["deleted"] >= 2
+    # Both our goals gone
+    assert db.get_goal(a) is None
+    assert db.get_goal(b) is None
