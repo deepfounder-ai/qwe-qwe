@@ -1645,6 +1645,24 @@ def _dispatch_subagent_impl(args: dict) -> str:
     except ImportError as e:
         return f"Error: subagent module unavailable ({e})"
 
+    # Validate subtask_id against the active plan. Without this, the
+    # orchestrator can hallucinate IDs like "st_2b" / "st_3a" thinking it's
+    # subdividing on the fly — but those IDs don't exist in the plan, so
+    # update_subtask silently returns None and the UI shows attempts stuck
+    # at the original count forever. Reject the dispatch with a clear
+    # error so the orchestrator either fixes the ID or calls goal_plan_set
+    # to extend the plan first.
+    plan = db.get_goal_plan(goal_id)
+    if plan and plan.get("subtasks"):
+        valid_ids = {st["id"] for st in plan["subtasks"]}
+        if subtask_id not in valid_ids:
+            return (
+                f"Error: subtask_id {subtask_id!r} is not in the goal's plan. "
+                f"Valid IDs: {sorted(valid_ids)}. "
+                f"If you need to add a new subtask, call goal_plan_set with the "
+                f"FULL updated list of subtasks first (this replaces the plan)."
+            )
+
     # Auto-bump attempts counter on the plan so the UI can show "attempt 3/N"
     # without the orchestrator having to remember to call subtask_update with
     # bump_attempts. Also stamp the subagent type so the plan tab visualises

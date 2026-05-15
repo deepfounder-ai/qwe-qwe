@@ -113,6 +113,43 @@ async def run(goal_id: str, shutdown_event: asyncio.Event) -> None:
         return
 
     reply = (result.get("reply") if isinstance(result, dict) else "") or ""
+
+    # ── Plan-completion backstop ──
+    # The orchestrator wrote a final reply, which usually means it's done.
+    # But sometimes it stops without explicitly marking every subtask
+    # (we've seen it leave st_2 as `pending` with attempts=7 while writing
+    # a perfectly good summary). Auto-skip any still-pending or in_progress
+    # subtasks with a clear reason so the plan reflects reality.
+    plan = db.get_goal_plan(goal_id)
+    if plan and plan.get("subtasks"):
+        unfinished = [
+            st for st in plan["subtasks"]
+            if st.get("status") in ("pending", "in_progress")
+        ]
+        if unfinished:
+            _log.warning(
+                f"goal {goal_id}: orchestrator finished but {len(unfinished)} "
+                f"subtask(s) still pending/in_progress; auto-skipping"
+            )
+            for st in unfinished:
+                # in_progress → orchestrator was working on it but stopped;
+                # call it "skipped" not "failed" since we don't have a hard
+                # error to report, just incomplete work.
+                try:
+                    db.update_subtask(
+                        goal_id, st["id"],
+                        status="skipped",
+                        result_summary=(
+                            "Auto-skipped: orchestrator wrote a final summary "
+                            "without explicitly closing this subtask. See "
+                            "goal.result for what was accomplished."
+                        ),
+                    )
+                except Exception:
+                    _log.exception(
+                        f"failed to auto-skip {st['id']} on {goal_id}"
+                    )
+
     db.mark_goal_done(goal_id, result=reply)
 
 

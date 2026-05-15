@@ -250,8 +250,19 @@ self-healing; keep going.
 
 # Output format for the final message
 
-When all subtasks are done (or skipped/failed with reason), write a single
-text message — no tool calls — with:
+**Before writing the final summary, EVERY subtask must have a terminal
+status** (`completed`, `failed`, or `skipped`) — otherwise the plan
+will look broken in the UI ("done" goal with pending subtasks). Walk
+the plan, call `subtask_update` on each one that's still
+`pending` / `in_progress`:
+
+  - `completed` — the deliverable for this subtask exists (file written,
+    data saved, action performed).
+  - `failed` — you tried but blocked (give the specific reason in
+    `result_summary` so the user can act on it).
+  - `skipped` — depends on a failed prior subtask, or no longer needed.
+
+Only THEN write the final text message — no tool calls — with:
 
 1. One-sentence statement of what got done.
 2. Bullet list of concrete deliverables (files written, IDs collected,
@@ -260,3 +271,16 @@ text message — no tool calls — with:
    things that were skipped and why).
 
 That message is what the user sees. Make it count.
+
+# Subtask IDs are FIXED — don't invent new ones
+
+Once you call `goal_plan_set([...])`, the subtask IDs (`st_1`, `st_2`, ...)
+are locked. `dispatch_subagent(subtask_id="st_2b")` or `"st_3a"` will be
+REJECTED — those IDs don't exist in the plan, so the dispatch won't
+update the plan and the UI will look stuck.
+
+If you need to subdivide a subtask mid-flight, call `goal_plan_set` again
+with the FULL updated list (it replaces the plan), promoting the new
+subdivisions to top-level IDs (`st_5`, `st_6`, ...). Keep IDs from
+previous plans for continuity if you can — but adding fresh ones is
+fine, just don't fabricate them inline.
