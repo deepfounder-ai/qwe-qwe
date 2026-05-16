@@ -7648,9 +7648,10 @@ function _renderGoalOutputs(g) {
       // Reuse the chat's markdown renderer — same look as assistant
       // replies. Headings / bold / italic / lists / code / links all
       // styled identically to chat output, so a "report" output reads
-      // exactly like the goal's final summary.
+      // exactly like the goal's final summary. No height cap / scroll —
+      // the user wants to see the full report inline, the page itself
+      // scrolls.
       body = '<div style="font-size:13px;color:var(--fg-1);line-height:1.55;' +
-             'max-height:400px;overflow-y:auto;' +
              'padding:10px 12px;background:var(--bg-1);border-radius:4px">' +
              renderMarkdownText(o.value) + '</div>';
       actions =
