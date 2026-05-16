@@ -33,6 +33,8 @@ setup.bat             # Windows
 python cli.py                                # Terminal chat
 python cli.py --web --ssl --port 7861        # Web UI (HTTPS required for mic/camera)
 castor --web --doctor                       # If installed as package; doctor runs 30+ checks
+python -m worker                             # Goal worker daemon (long-running tasks)
+python -m worker --once                      # Claim one goal, run it, exit (for tests)
 
 # Tests
 pytest tests/                                # All tests (~520 currently)
@@ -125,13 +127,23 @@ When adding new per-turn state: put it on TurnContext, not as a module global.
 
 - `001_initial.sql` — baseline (messages, kv, presets, threads, scheduled_tasks, secrets, FTS5 virtual tables).
 - `002_message_thread_ts_index.sql` — composite index example.
+- `006_canvas_artifacts.sql` — canvas HTML persistence.
+- `007_skill_imports.sql` — imported skill provenance.
+- `008_agent_runs.sql` — per-turn cost tracking (replaces legacy `routine_runs`).
+- `009_interrupted_runs.sql` — auto-resume support.
+- `010_routine_budget.sql` — per-routine spending caps.
+- `011_goals_subtasks_checkpoints.sql` — durable goal queue, subtask plan, orchestrator checkpoints + event log.
+- `012_goal_facts.sql` — per-goal structured fact store (key/value scoped by goal_id).
+- `013_goal_outputs.sql` — per-goal deliverables (file/link/report).
 - `migrations/README.md` — convention: `NNN_snake_case.sql`, transaction-per-file.
 
 `db._apply_migrations()` runs on first connection. Back-compat: if `schema_version` missing AND `messages` table exists, stamp at 1 without re-running baseline. Add a new migration by dropping a file — no code change needed.
 
-### System Prompt (`soul.py`)
+### System Prompts (`soul.py` + `prompts/`)
 
-`to_prompt()` order matters for KV cache — static rules first, dynamic context last. Key rules:
+Interactive chat uses `soul.py::to_prompt()` — order matters for KV cache (static rules first, dynamic context last). Goal orchestration and subagents use dedicated markdown prompts in `prompts/` (`orchestrator.md`, `subagent_research.md`, `subagent_browser.md`, `subagent_code.md`, `subagent_scraper.md`).
+
+Key soul.py rules:
 - **Rule 3** NEVER STOP EARLY — keep calling tools until all steps complete
 - **Rule 6** BROWSER MODES — `browser_open` = headless, `open_url` = show user, `browser_set_visible(true)` + browser tools = interact visibly
 - **Rule 8** MEMORY DISCIPLINE (v0.17.12) — default is DON'T save; only durable facts that matter weeks later
@@ -227,6 +239,35 @@ Per-routine USD spending caps over a configurable rolling window. Migration `010
 - API: `GET /api/routines/{id}/budget` returns `{cap, period_sec, spent}`; `POST /api/routines/{id}/budget` sets or clears the cap. `cap=null` disables enforcement.
 - UI: Routines page shows a color-coded budget chip per routine (green < 80%, orange 80–99%, red >= 100%). Click opens a `prompt()` dialog to set/clear cap + period. `loadRoutineBudgets()` runs alongside `loadRoutineCosts()` on every non-silent Routines view load.
 
+### Goal Runtime — long-running autonomous tasks (v0.22.0)
+
+**Architecture**: "Goal → Plan → Subagent dispatch" — inspired by Claude Code's `/goal` mode. A separate `castor-worker` daemon claims goals from a durable SQLite queue and executes them, surviving WS disconnects, process restarts, and context-window pressure. Full design doc: `docs/superpowers/plans/2026-05-15-long-running-agent-architecture.md`.
+
+**New modules:**
+- **`worker.py`** — standalone daemon (`python -m worker`, or `--once` for tests). Polls `goals` table, claims runnable goals via lease (`worker_id + lease_expires_at`), heartbeats throughout. Intentionally does NOT import `server.py` / FastAPI — can run in minimal containers. Identity: `hostname_pid_uuid6`. Lease 60s, heartbeat 20s.
+- **`goal_runner.py`** — bridges asyncio worker loop to orchestrator. Loads last checkpoint, invokes orchestrator, marks goals done/paused/failed.
+- **`orchestrator.py`** — the main LLM for goals. Uses `prompts/orchestrator.md` (NOT `soul.py`). Restricted tool set: `goal_plan_set`, `subtask_update`, `dispatch_subagent`, `fact_save`, `fact_get`, `memory_save`, `memory_search`, `http_request`, basic tools. Manages a linear `subtasks` plan (same model as Claude Code's TodoWrite).
+- **`subagent.py`** — fresh LLM context per subtask. 4 types: `research`, `browser`, `code`, `scraper` — each with a restricted tool whitelist (the load-bearing security boundary). Hard 20-round cap. Only the final result string flows back to the orchestrator (keeps context lean). Dedicated system prompts in `prompts/subagent_*.md`.
+
+**Budget & Events (supporting modules):**
+- **`agent_budget.py`** — `BudgetLimits` dataclass: `max_turns`, `max_tool_calls`, `max_input_tokens`, `max_output_tokens`. Constructed via `BudgetLimits.from_config()`. Used by both interactive turns and goal orchestration.
+- **`agent_events.py`** — typed `AgentEvent` dataclass with 8 event types (content/thinking/tool/turn/status deltas, budget warnings). Replaces callback spaghetti for fine-grained instrumentation.
+
+**State model:**
+- `goals` table — durable queue + status machine. Budget caps in wall-clock seconds + USD. Lease protocol for automatic failover.
+- `goal_checkpoints` — gzipped messages blob + plan JSON + facts snapshot. Created at subtask boundaries AND every `checkpoint_round_interval` (default 3) rounds mid-subtask.
+- `goal_facts` — structured key/value store scoped per-goal. Survives context compaction — source of truth for intermediate findings. Readable/writable from subagents.
+- `goal_outputs` — durable deliverables (kind: file/link/report). Lets UI render Download/Open/Save buttons without parsing prose.
+- `goal_events` — append-only event log for observability.
+
+**Config**: `checkpoint_round_interval` (default 3) in `EDITABLE_SETTINGS`. `max_tool_rounds` (default 0 = unlimited) controls tool call rounds per turn.
+
+**`spawn_task` still exists** as fire-and-forget short-task tool (<5 min, in-memory). `goal_create` / `dispatch_subagent` are the durable alternatives for hours-long work.
+
+### Discovery service (`discovery.py`)
+
+Auto-discovers LLM servers on the local network by scanning known ports (LM Studio 1234, Ollama 11434, llama.cpp 8080). Returns discovered servers with host/port/provider/model lists. Used by the provider picker UI.
+
 ### Skill import from skills.sh / GitHub (`skills/skill_import.py`)
 
 **Added v0.18.x.** Imports community skills following the agentskills.io SKILL.md spec (YAML frontmatter + markdown body + optional `scripts/` `references/` `assets/`). Two layers:
@@ -313,6 +354,8 @@ Render pattern: every state change rebuilds innerHTML. Event handlers attached v
 - If `v$VERSION` tag doesn't exist, creates tag + `gh release create` with `RELEASE_NOTES.md` body
 - Idempotent — duplicate triggers are no-ops
 
+`docker.yml` builds and pushes a Docker image to GitHub Container Registry on push to `main` / tags. Uses Docker Buildx with cache.
+
 **To release**: bump `VERSION` in `config.py` + `pyproject.toml` + README badge, write `RELEASE_NOTES.md`, commit, push to `main`. Workflow handles the rest.
 
 ## Key patterns + gotchas
@@ -343,6 +386,12 @@ Notable files:
 - `test_ws_attachments.py` — WS image/document round-trip + reload-path `splitFiles` contract
 - `test_text_to_tool_extraction.py` — all 5 patterns including the `!<function_call:>` Qwen variant (#10)
 - `test_camera_settings.py` — preset table + helper, `pytest.importorskip("cv2")` for CI
+- `test_orchestrator.py` — orchestrator loop + plan management
+- `test_subagent.py` — subagent dispatch + tool whitelist enforcement
+- `test_worker_lifecycle.py` — worker daemon claim/lease/heartbeat
+- `test_goal_plan_facts.py` — goal facts and plan state
+- `test_goals_ui_contracts.py` — goal UI WebSocket event contracts
+- `test_db_protection.py` — schema protection (skill tables must be prefixed)
 - `conftest.py` — shared fixtures; `scope="session"` TestClient lives here
 
 **JS contract tests live in pytest.** Two exist so far: `test_api_helper_disables_http_cache` (pins `cache:'no-store'`) and `test_reload_path_runs_meta_files_through_splitfiles` (pins live/reload symmetry). Pattern: `Path(...).read_text()` on `static/index.html`, locate a stable anchor string, assert the contract holds in a window after it. Cheap regression guards for JS-side bugs that pytest would otherwise miss entirely.
@@ -390,4 +439,5 @@ Telemetry-related settings live in `EDITABLE_SETTINGS` (not env vars): `telemetr
 7. **New WS event?** Emit via `ctx.on_*` callback, not a global. Client reads in `handleWSMessage` in `static/index.html`. If event is non-chat (notification / status / etc.), short-circuit at the top of `handleWsMessage` BEFORE the `state.streaming` creation gate — otherwise it triggers a ghost streaming message in the chat (lesson from `task_update` bug, fixed in v0.18.3).
 8. **New telemetry event?** Add to `telemetry.ALLOWED_EVENTS` whitelist with type-strict prop schema. String props that could carry free text MUST use a closed enum. Bump `telemetry._CURRENT_CONSENT_VERSION` so existing opted-in users get a re-consent banner. Wire the emitter near the action it observes (e.g. `_emit_thread_created_telemetry` lives in `threads.py`); always lazy-import telemetry + swallow exceptions so a queue/network blip can't break the host operation.
 9. **Skills are gitignored except whitelisted.** When working on built-in skills (`skills/skill_creator.py` etc.), `.gitignore` entry `skills/` excludes them by default; whitelist (`!skills/skill_creator.py`) keeps the built-ins tracked. Side effect: `ruff check .` skips skills/ via gitignore — for those files run `ruff check skills/` explicitly.
-10. **Before commit**: `ruff check .`, `python scripts/check_js.py` (if you touched `static/index.html`), `pytest tests/`.
+10. **New subagent type?** Add to `subagent.SUBAGENT_TOOLS` with a restricted tool whitelist. Add a matching system prompt in `prompts/subagent_<type>.md`. The whitelist is the security boundary — every extra tool is a chance for the LLM to wander off.
+11. **Before commit**: `ruff check .`, `python scripts/check_js.py` (if you touched `static/index.html`), `pytest tests/`.

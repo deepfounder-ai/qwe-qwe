@@ -7481,11 +7481,59 @@ function _renderGoalPlanTab(g) {
           'padding:6px 8px;background:var(--bg-1);border-left:2px solid ' + statusColor + ';' +
           'border-radius:0 4px 4px 0">' + esc(st.result_summary) + '</div>' : '') +
         liveBlock +
+        _renderDoneCondition(st) +
         (st.attempts > 1 ? '<div style="font-size:10px;color:var(--fg-4);margin-top:4px">' +
           'attempts: ' + st.attempts + '</div>' : '') +
       '</div>' +
     '</div>';
   }).join('') + '</div>';
+}
+
+// Compact display of done_condition + validation status per subtask.
+// Empty if no condition set (legacy plans). Green chip when validated,
+// orange chip when still pending, red box when validator last failed.
+function _renderDoneCondition(st) {
+  const cond = st.done_condition;
+  if (!cond || !cond.kind) return '';
+  // One-line summary of the criterion — keep it dense.
+  const spec = cond.spec || {};
+  let summary = cond.kind;
+  if (cond.kind === 'files_exist' && Array.isArray(spec.paths)) {
+    summary += ': ' + spec.paths.slice(0, 2).join(', ') +
+      (spec.paths.length > 2 ? ' +' + (spec.paths.length - 2) + ' more' : '');
+  } else if (cond.kind === 'min_count') {
+    summary += ': ' + (spec.glob || '?') + ' ≥ ' + (spec.min || '?');
+  } else if (cond.kind === 'regex_in_file') {
+    summary += ': ' + (spec.path || '?') + ' /' + (spec.pattern || '').slice(0, 30) + '/';
+  } else if (cond.kind === 'shell_returns_zero') {
+    summary += ': ' + (spec.cmd || '?').slice(0, 60);
+  } else if (cond.kind === 'http_200') {
+    summary += ': ' + (spec.url || '?').slice(0, 60);
+  }
+  // Status: validation_passed=true → green check; validation failure
+  // recorded → red remediation box; otherwise neutral pending chip.
+  const passed = st.validation_passed === true;
+  const failure = st.last_validation_failure || null;
+  let chip;
+  if (passed) {
+    chip = '<span style="display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;' +
+      'background:rgba(75,180,100,0.15);color:#4bb464;border:1px solid rgba(75,180,100,0.3)">✓ verified</span>';
+  } else if (failure) {
+    chip = '<span style="display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;' +
+      'background:rgba(220,80,80,0.15);color:#dc5050;border:1px solid rgba(220,80,80,0.3)">✗ failing</span>';
+  } else {
+    chip = '<span style="display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;' +
+      'background:var(--bg-1);color:var(--fg-4);border:1px solid var(--bd-1)">pending</span>';
+  }
+  let block = '<div style="font-size:10px;color:var(--fg-3);margin-top:5px;display:flex;gap:6px;align-items:center;font-family:var(--font-mono)">' +
+    chip + '<span title="acceptance criterion">' + esc(summary) + '</span>' +
+    '</div>';
+  if (failure) {
+    block += '<div style="font-size:11px;color:var(--fg-2);margin-top:4px;padding:5px 7px;' +
+      'background:rgba(220,80,80,0.06);border-left:2px solid #dc5050;border-radius:0 4px 4px 0">' +
+      '<span style="color:#dc5050;font-weight:500">Remediation:</span> ' + esc(failure) + '</div>';
+  }
+  return block;
 }
 
 function _renderGoalEventsTab() {
