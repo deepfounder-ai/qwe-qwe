@@ -1751,6 +1751,59 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
 /* ── Interrupted-count chip in thread list ───────────────────────────── */
 .chip-interrupted { display:inline-flex;align-items:center;gap:4px;padding:2px 6px;margin-left:4px;background:var(--warning-bg,#fff3cd);border-radius:8px;font-size:.8em;color:var(--warning,#b8860b);cursor:pointer; }
 
+/* ── Tabs (Goal detail: Plan / Events / Facts / Result) ──────────────── */
+/* Before this rule the tab row rendered as concatenated text without any
+   visual cue that the words were buttons ("Plan5Events37FactsResult2").
+   Buttons inherit zero browser styles in our reset; need explicit ones. */
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.tab-btn {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-3);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+  /* margin-bottom:-1px keeps the active underline flush with the row's
+     own border-bottom (set inline on .tabs) instead of stacking. */
+  margin-bottom: -1px;
+}
+.tab-btn:hover {
+  color: var(--fg-1);
+  background: var(--surface-2);
+}
+.tab-btn.active {
+  color: var(--fg-1);
+  border-bottom-color: var(--info);
+}
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--surface-2);
+  border-radius: 9px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--fg-3);
+  font-weight: 600;
+}
+.tab-btn.active .tab-count {
+  background: rgba(var(--info-rgb, 80,140,255), 0.15);
+  color: var(--info);
+}
+
 </style>
 </head>
 <body>
