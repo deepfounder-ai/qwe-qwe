@@ -45,6 +45,25 @@ def test_dead_session_markers_recognized():
     assert not browser._looks_like_dead_session("")
 
 
+def _mock_session_methods(browser_mod, monkeypatch, close_calls, ensure_calls,
+                         ensure_raises=None):
+    """Patch the active session's close + ensure_running methods.
+
+    Recovery now operates per-session (Phase 3) — we capture the active
+    session in the same call and patch its methods, so the test sees the
+    SAME session the recovery code targets.
+    """
+    sess = browser_mod._get_active_session()
+    monkeypatch.setattr(sess, "close", lambda: close_calls.append(True))
+    if ensure_raises:
+        def _broken():
+            raise ensure_raises
+        monkeypatch.setattr(sess, "ensure_running", _broken)
+    else:
+        monkeypatch.setattr(sess, "ensure_running", lambda: ensure_calls.append(True))
+    return sess
+
+
 def test_recovery_retries_on_dead_session(monkeypatch):
     """First call returns TargetClosedError → close+relaunch → second call succeeds.
 
@@ -61,25 +80,15 @@ def test_recovery_retries_on_dead_session(monkeypatch):
         return "Title: Example\nURL: https://example.com\n\nbody text"
 
     closes = []
-    def _fake_close():
-        closes.append(True)
-
     ensures = []
-    def _fake_ensure():
-        ensures.append(True)
-
     monkeypatch.setattr(browser, "_execute_impl", _fake_impl)
-    monkeypatch.setattr(browser, "_close_browser", _fake_close)
-    monkeypatch.setattr(browser, "_ensure_browser", _fake_ensure)
+    _mock_session_methods(browser, monkeypatch, closes, ensures)
 
     result = browser._execute_with_recovery("browser_open", {"url": "https://example.com"})
 
-    # Tried twice
     assert len(calls) == 2
-    # Cleaned up between attempts
     assert closes == [True]
     assert ensures == [True]
-    # Surface the recovered output with a prefix the LLM can recognise
     assert "[recovered from dead session" in result
     assert "Example" in result
 
@@ -92,11 +101,10 @@ def test_recovery_skips_for_browser_close(monkeypatch):
         lambda n, a: "Browser error (TargetClosedError): closed",
     )
     closes = []
-    monkeypatch.setattr(browser, "_close_browser", lambda: closes.append(True))
-    monkeypatch.setattr(browser, "_ensure_browser", lambda: None)
+    ensures = []
+    _mock_session_methods(browser, monkeypatch, closes, ensures)
 
     result = browser._execute_with_recovery("browser_close", {})
-    # No recovery attempted for browser_close
     assert closes == []
     assert result.startswith("Browser error")
 
@@ -109,13 +117,12 @@ def test_recovery_surfaces_error_after_second_failure(monkeypatch):
         browser, "_execute_impl",
         lambda n, a: "Browser error (TargetClosedError): again",
     )
-    monkeypatch.setattr(browser, "_close_browser", lambda: None)
-    monkeypatch.setattr(browser, "_ensure_browser", lambda: None)
+    closes = []
+    ensures = []
+    _mock_session_methods(browser, monkeypatch, closes, ensures)
 
     result = browser._execute_with_recovery("browser_open", {"url": "x"})
     assert "twice in a row" in result
-    # The hint must point the LLM at http_request as an escape hatch — this is
-    # what makes the agent autonomous (try a different tool, not give up).
     assert "http_request" in result or "alternative" in result.lower()
 
 
@@ -128,11 +135,11 @@ def test_recovery_passes_through_non_session_errors(monkeypatch):
         lambda n, a: "Browser error (TimeoutError): 30000ms exceeded",
     )
     closes = []
-    monkeypatch.setattr(browser, "_close_browser", lambda: closes.append(True))
+    ensures = []
+    _mock_session_methods(browser, monkeypatch, closes, ensures)
 
     result = browser._execute_with_recovery("browser_open", {"url": "x"})
     assert "30000ms exceeded" in result
-    # No recovery attempted — agent has to handle this itself
     assert closes == []
 
 
@@ -144,10 +151,10 @@ def test_recovery_handles_ensure_browser_failure(monkeypatch):
         browser, "_execute_impl",
         lambda n, a: "Browser error (TargetClosedError): boom",
     )
-    monkeypatch.setattr(browser, "_close_browser", lambda: None)
-    def _broken_ensure():
-        raise RuntimeError("playwright install broken")
-    monkeypatch.setattr(browser, "_ensure_browser", _broken_ensure)
+    closes = []
+    ensures = []
+    _mock_session_methods(browser, monkeypatch, closes, ensures,
+                          ensure_raises=RuntimeError("playwright install broken"))
 
     result = browser._execute_with_recovery("browser_open", {"url": "x"})
     assert "recovery failed" in result.lower()

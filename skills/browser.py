@@ -360,43 +360,54 @@ TOOLS = [
     },
 ]
 
-# ── Module state ──
-_playwright = None
-_browser = None
-_page = None               # currently active page
-_pages: list = []          # all open pages (tabs)
-_network_log = []          # list of {url, method, status, resource_type}
-_console_log: list = []    # list of {level, text, location}
+# ── Per-goal browser sessions (Phase 3 of long-running agent runtime) ──
+#
+# Each Goal gets its own BrowserSession keyed by goal_id, with a persistent
+# user_data_dir under ~/.castor/browser_sessions/<goal_id>/. This means:
+#
+#   - Parallel goals don't fight over cookies/login/page state.
+#   - A goal that logged into LinkedIn in subtask 1 keeps that session for
+#     subtasks 2..N — even across worker restarts (user_data_dir on disk).
+#   - Chat / cli / telegram (no goal context) share a single "__default__"
+#     session — same UX as before this refactor.
+#
+# Concurrency model: each session has its OWN Playwright instance + lock.
+# The global _browser_executor still serialises Python calls into Playwright
+# (Playwright sync API isn't thread-safe within one instance), but different
+# sessions can have their browsers open simultaneously — different Chrome
+# processes, fully isolated profiles.
+import config
+from pathlib import Path
 
-# Serialize browser launch/close to prevent multiple Chrome windows when
-# concurrent spawn_task workers all try to open the browser at the same time.
-_browser_lock = threading.Lock()
+
+_DEFAULT_SESSION_ID = "__default__"
+_headless_mode = True  # default for fresh sessions; can be flipped per-session
 
 
-def _attach_page_listeners(page):
-    """Attach network + console listeners to a page."""
+def _attach_page_listeners(page, session):
+    """Attach network + console listeners that write into *session*'s logs."""
     def _on_response(response):
         try:
-            _network_log.append({
+            session.network_log.append({
                 "url": response.url[:120],
                 "method": response.request.method,
                 "status": response.status,
                 "type": response.request.resource_type,
             })
-            if len(_network_log) > 50:
-                _network_log.pop(0)
+            if len(session.network_log) > 50:
+                session.network_log.pop(0)
         except Exception:
             pass
 
     def _on_console(msg):
         try:
-            _console_log.append({
+            session.console_log.append({
                 "level": msg.type,
                 "text": msg.text[:400],
                 "location": str(msg.location.get("url", ""))[:120] if hasattr(msg, 'location') and msg.location else "",
             })
-            if len(_console_log) > 100:
-                _console_log.pop(0)
+            if len(session.console_log) > 100:
+                session.console_log.pop(0)
         except Exception:
             pass
 
@@ -404,68 +415,182 @@ def _attach_page_listeners(page):
     page.on("console", _on_console)
 
 
-_headless_mode = True  # True = headless (default); False = visible window
+class BrowserSession:
+    """One isolated browser state — Playwright instance, BrowserContext,
+    open pages, per-page logs. Use ``ensure_running()`` to lazily launch
+    Chrome with the session's ``user_data_dir`` and ``close()`` to release.
 
+    Thread-safe: ``self.lock`` is held during launch + close so concurrent
+    tool calls on the same session don't double-launch or close mid-op.
+    The global _browser_executor (max_workers=1) further serialises
+    Playwright sync calls.
+    """
+
+    def __init__(self, session_id: str, headless: bool = True):
+        self.session_id = session_id
+        self.headless = headless
+        self.playwright = None
+        # NOTE: this is a BrowserContext (from launch_persistent_context),
+        # not a Browser. The .close() method closes both context AND the
+        # underlying browser process, so we never store the browser handle
+        # separately.
+        self.browser = None
+        self.page = None
+        self.pages: list = []
+        self.network_log: list = []
+        self.console_log: list = []
+        self.lock = threading.Lock()
+        # The persistent profile directory. Created lazily in ensure_running.
+        self.user_data_dir = (
+            Path(config.DATA_DIR) / "browser_sessions" / session_id
+        )
+
+    def is_alive(self) -> bool:
+        if self.browser is None:
+            return False
+        try:
+            # BrowserContext doesn't expose .is_connected(); .pages access
+            # raises if the underlying context is closed.
+            _ = self.browser.pages
+            return True
+        except Exception:
+            return False
+
+    def ensure_running(self) -> None:
+        if self.is_alive():
+            return
+        with self.lock:
+            if self.is_alive():
+                return
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError:
+                raise RuntimeError(
+                    "Playwright is not installed. Run: pip install playwright "
+                    "&& python -m playwright install chromium"
+                )
+            self.user_data_dir.mkdir(parents=True, exist_ok=True)
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.user_data_dir),
+                headless=self.headless,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                ignore_https_errors=True,
+            )
+            existing = list(self.browser.pages)
+            self.pages = existing or [self.browser.new_page()]
+            self.page = self.pages[0]
+            self.network_log = []
+            self.console_log = []
+            _attach_page_listeners(self.page, self)
+
+    def close(self) -> None:
+        with self.lock:
+            try:
+                if self.browser:
+                    self.browser.close()
+            except Exception:
+                pass
+            try:
+                if self.playwright:
+                    self.playwright.stop()
+            except Exception:
+                pass
+            self.browser = None
+            self.playwright = None
+            self.page = None
+            self.pages = []
+            self.network_log = []
+            self.console_log = []
+
+
+# Session registry. _get_session is idempotent / get-or-create.
+_sessions: dict[str, BrowserSession] = {}
+_sessions_registry_lock = threading.Lock()
+
+
+def _get_session(session_id: str) -> BrowserSession:
+    with _sessions_registry_lock:
+        sess = _sessions.get(session_id)
+        if sess is None:
+            sess = BrowserSession(session_id, headless=_headless_mode)
+            _sessions[session_id] = sess
+        return sess
+
+
+def _get_active_session() -> BrowserSession:
+    """Pick session based on the active TurnContext.
+
+    Resolution order:
+      1. _executor_thread_session.session_id — set when we cross the
+         ThreadPoolExecutor boundary so the inner thread knows which goal
+         it's serving (ctx is per-thread, doesn't auto-propagate).
+      2. ctx.goal_id — set by tools._set_turn_ctx before each tool dispatch.
+      3. fall back to "__default__" (chat / cli / telegram).
+    """
+    try:
+        override = getattr(_executor_thread_session, "session_id", None)
+        if override:
+            return _get_session(override)
+    except Exception:
+        pass
+    try:
+        # Local import to avoid the tools↔skills circular dependency at
+        # module import time.
+        import tools as _tools
+        ctx = _tools._get_turn_ctx()
+        if ctx is not None:
+            gid = getattr(ctx, "goal_id", None)
+            if gid:
+                return _get_session(gid)
+    except Exception:
+        pass
+    return _get_session(_DEFAULT_SESSION_ID)
+
+
+def _close_session(session_id: str) -> None:
+    """Close + drop a session from the registry. Idempotent."""
+    with _sessions_registry_lock:
+        sess = _sessions.pop(session_id, None)
+    if sess is not None:
+        sess.close()
+
+
+# Serialize browser launch/close to prevent multiple Chrome windows when
+# concurrent spawn_task workers all try to open the browser at the same time.
+# (Kept module-level for backward-compat with any external caller that
+# imports it; new code uses session.lock.)
+_browser_lock = threading.Lock()
+
+
+# Backward-compat shims so any external caller that imported _ensure_browser /
+# _close_browser still works. They operate on the active session.
 
 def _ensure_browser():
-    """Launch Playwright browser if not running. Thread-safe: double-checked lock."""
-    global _playwright, _browser, _page, _pages, _network_log, _console_log
-    # Fast path — browser already running (no lock needed)
-    if _browser and _browser.is_connected():
-        return
-    with _browser_lock:
-        # Re-check inside lock: another thread may have launched while we waited
-        if _browser and _browser.is_connected():
-            return
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            raise RuntimeError(
-                "Playwright is not installed. Run: pip install playwright && python -m playwright install chromium"
-            )
-        _playwright = sync_playwright().start()
-        _browser = _playwright.chromium.launch(
-            headless=_headless_mode,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        context = _browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            ignore_https_errors=True,  # accept self-signed certs (e.g. localhost HTTPS dev servers)
-        )
-        _page = context.new_page()
-        _pages = [_page]
-        _network_log = []
-        _console_log = []
-
-        _attach_page_listeners(_page)
+    """Backward-compat shim: ensure the active session's browser is running."""
+    _get_active_session().ensure_running()
 
 
 def _close_browser():
-    """Close browser and clean up."""
-    global _playwright, _browser, _page, _pages, _network_log, _console_log
-    try:
-        if _page:
-            _page.close()
-    except Exception:
-        pass
-    try:
-        if _browser:
-            _browser.close()
-    except Exception:
-        pass
-    try:
-        if _playwright:
-            _playwright.stop()
-    except Exception:
-        pass
-    _pages = []
-    _console_log = []
+    """Backward-compat shim: close the active session's browser."""
+    _get_active_session().close()
 
-    _playwright = None
-    _browser = None
-    _page = None
-    _network_log = []
+
+# Legacy access for old code that read module-level _page / _pages directly
+# (none of our codebase does after this refactor, but keep these as None to
+# avoid AttributeError on accidental imports).
+_playwright = None
+_browser = None
+_page = None
+_pages: list = []
+_network_log: list = []
+_console_log: list = []
 
 
 _browser_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -501,23 +626,23 @@ def _execute_with_recovery(name: str, args: dict) -> str:
     Only after a SECOND failure do we surface the error string — that's when
     something genuinely odd is happening that the LLM should reason about.
     """
+    # Capture which session WAS active when the call began, so recovery
+    # operates on the SAME session (otherwise a context switch between
+    # calls could heal the wrong session).
+    session = _get_active_session()
     result = _execute_impl(name, args)
     if not _looks_like_dead_session(result):
         return result
-    # First failure looked like a dead session. Reset state explicitly and try
-    # again. Skip the retry for browser_close itself (no point reopening just
-    # to close) and browser_set_visible (which manages lifecycle on its own).
     if name in ("browser_close", "browser_set_visible"):
         return result
-    _log.warning(f"browser tool {name} hit dead-session error; auto-recovering: {result[:140]}")
+    _log.warning(f"browser tool {name} hit dead-session error on session "
+                 f"{session.session_id!r}; auto-recovering: {result[:140]}")
     try:
-        _close_browser()
+        session.close()
     except Exception:
         pass
-    # _ensure_browser is called by _execute_impl on most paths, but call here
-    # explicitly so the retry starts with a fresh, healthy browser.
     try:
-        _ensure_browser()
+        session.ensure_running()
     except Exception as e:
         return f"Browser recovery failed: {e}. Goal-runtime is now stuck — escalate to user."
     retry_result = _execute_impl(name, args)
@@ -535,8 +660,17 @@ def _execute_with_recovery(name: str, args: dict) -> str:
 
 
 def execute(name: str, args: dict) -> str:
-    """Execute a browser tool - runs in a dedicated thread to avoid asyncio conflicts."""
-    global _page, _pages
+    """Execute a browser tool - runs in a dedicated thread to avoid asyncio conflicts.
+
+    Session resolution happens HERE (in the caller's thread) so the
+    ctx.goal_id stashed in threading.local doesn't get lost when we hop
+    to the _browser_executor thread. We resolve the session_id up-front
+    and stash it on threading.local of the inner thread before delegating
+    to _execute_with_recovery.
+    """
+    # Resolve the target session in THIS thread — _get_active_session
+    # reads tools._get_turn_ctx() which is threading.local.
+    target_session_id = _resolve_session_id_from_ctx()
 
     # Check if we're inside an asyncio event loop
     try:
@@ -546,19 +680,55 @@ def execute(name: str, args: dict) -> str:
         in_async = False
 
     if not in_async:
+        # Same thread — ctx is already set, just dispatch.
         return _execute_with_recovery(name, args)
 
-    # Run in a separate thread to avoid sync_playwright inside async loop
-    future = _browser_executor.submit(_execute_with_recovery, name, args)
+    # Async caller: hop to the executor thread, and propagate the
+    # resolved session_id explicitly so the executor doesn't fall back
+    # to "__default__".
+    def _run_with_session():
+        _executor_thread_session.session_id = target_session_id
+        try:
+            return _execute_with_recovery(name, args)
+        finally:
+            _executor_thread_session.session_id = None
+
+    future = _browser_executor.submit(_run_with_session)
     try:
         return future.result(timeout=30)
     except concurrent.futures.TimeoutError:
         return "Error: browser operation timed out after 30s"
 
 
+# Thread-local override used by the _browser_executor thread.
+# _get_active_session reads this BEFORE falling back to ctx-lookup.
+_executor_thread_session = threading.local()
+
+
+def _resolve_session_id_from_ctx() -> str:
+    """Same logic as _get_active_session but returns the id only, not the
+    object. Caller passes this through threading boundaries."""
+    try:
+        import tools as _tools
+        ctx = _tools._get_turn_ctx()
+        if ctx is not None:
+            gid = getattr(ctx, "goal_id", None)
+            if gid:
+                return gid
+    except Exception:
+        pass
+    return _DEFAULT_SESSION_ID
+
+
 def _execute_impl(name: str, args: dict) -> str:
-    """Actual implementation of browser tool execution."""
-    global _page, _pages
+    """Browser tool execution against the active per-goal session.
+
+    Picks the session at the top via _get_active_session() — a Goal-bound
+    ctx routes to its own per-goal session (isolated cookies, page state,
+    network log), anything else goes to the singleton ``__default__``
+    session. Two parallel goals never share state.
+    """
+    session = _get_active_session()
     try:
         # Handle common hallucinated tool names — redirect to real tools
         if name == "google_search":
@@ -574,22 +744,21 @@ def _execute_impl(name: str, args: dict) -> str:
             name = "browser_screenshot"
 
         if name == "browser_set_visible":
-            global _headless_mode
             visible = args.get("visible", True)
             new_mode = not visible  # headless is the opposite of visible
-            with _browser_lock:
-                if new_mode == _headless_mode and _browser and _browser.is_connected():
-                    # Already in the requested mode with a running browser — no-op.
-                    # This is the common case when multiple spawn_task workers all
-                    # call browser_set_visible(True) on an already-visible browser:
-                    # only the first one opens Chrome; the rest reuse it.
+            with session.lock:
+                if new_mode == session.headless and session.is_alive():
                     return f"Browser already in {'visible' if visible else 'headless'} mode (reusing existing window)."
-                if new_mode != _headless_mode:
-                    _headless_mode = new_mode
-                    _close_browser()  # restart with new mode on next call
-            # Telemetry: track first time the user enables visible mode in
-            # this session. We only emit on visible=True — toggling back to
-            # headless is the default state and not a "feature use".
+                if new_mode != session.headless:
+                    session.headless = new_mode
+                    # Trigger relaunch with new mode on the next call.
+                    # Inside the lock would deadlock (close() acquires it),
+                    # so flag it for after-release.
+                    _need_close = True
+                else:
+                    _need_close = False
+            if _need_close:
+                session.close()
             if visible:
                 try:
                     import telemetry as _tel
@@ -599,33 +768,28 @@ def _execute_impl(name: str, args: dict) -> str:
             return f"Browser set to {'visible' if visible else 'headless'} mode. Next browser_open will {'show' if visible else 'hide'} the window."
 
         if name == "browser_close":
-            _close_browser()
+            session.close()
             return "Browser closed."
 
         # All other tools need browser running
-        _ensure_browser()
+        session.ensure_running()
 
         if name == "browser_open":
             url = args.get("url", "")
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
-            # No URL rewriting — model should follow system prompt instructions
-            # about which search engine to use (currently Brave Search)
-            _page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            # Wait a bit for dynamic content
-            _page.wait_for_timeout(1000)
-            title = _page.title() or "(no title)"
-            # Get text preview
+            session.page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            session.page.wait_for_timeout(1000)
+            title = session.page.title() or "(no title)"
             try:
-                text = _page.inner_text("body")[:2000]
+                text = session.page.inner_text("body")[:2000]
             except Exception:
                 text = "(could not extract text)"
 
-            # For search engine results: extract links with URLs so model can navigate
             links_section = ""
-            if any(se in _page.url for se in ("duckduckgo.com", "bing.com", "google.com", "search.brave.com")):
+            if any(se in session.page.url for se in ("duckduckgo.com", "bing.com", "google.com", "search.brave.com")):
                 try:
-                    links = _page.evaluate('''() => {
+                    links = session.page.evaluate('''() => {
                         const results = [];
                         document.querySelectorAll('a[href]').forEach(a => {
                             const href = a.href;
@@ -646,50 +810,46 @@ def _execute_impl(name: str, args: dict) -> str:
                 except Exception:
                     pass
 
-            return f"Title: {title}\nURL: {_page.url}\n\n{text}{links_section}"
+            return f"Title: {title}\nURL: {session.page.url}\n\n{text}{links_section}"
 
         elif name == "browser_screenshot":
-            import config
             workspace = str(config.WORKSPACE_DIR)
             filename = f"screenshot_{int(time.time())}.png"
             filepath = os.path.join(workspace, filename)
-            _page.screenshot(path=filepath, full_page=False)
+            session.page.screenshot(path=filepath, full_page=False)
             return f"Screenshot saved: {filepath} ({os.path.getsize(filepath)} bytes)"
 
         elif name == "browser_snapshot":
             selector = args.get("selector", "body")
             try:
-                text = _page.inner_text(selector)
+                text = session.page.inner_text(selector)
             except Exception:
-                text = _page.content()
-            title = _page.title() or ""
-            url = _page.url
-            # Truncate for LLM context
+                text = session.page.content()
+            title = session.page.title() or ""
+            url = session.page.url
             if len(text) > 4000:
                 text = text[:4000] + "\n... (truncated)"
             return f"Title: {title}\nURL: {url}\n\n{text}"
 
         elif name == "browser_click":
             selector = args["selector"]
-            # Try direct CSS selector first, then text-based
             try:
-                _page.click(selector, timeout=5000)
+                session.page.click(selector, timeout=5000)
             except Exception:
-                # Try as text selector
-                _page.get_by_text(selector).first.click(timeout=5000)
-            _page.wait_for_timeout(1000)
-            title = _page.title() or ""
-            return f"Clicked '{selector}'. Page: {title} ({_page.url})"
+                session.page.get_by_text(selector).first.click(timeout=5000)
+            session.page.wait_for_timeout(1000)
+            title = session.page.title() or ""
+            return f"Clicked '{selector}'. Page: {title} ({session.page.url})"
 
         elif name == "browser_fill":
             selector = args["selector"]
             value = args["value"]
-            _page.fill(selector, value, timeout=5000)
+            session.page.fill(selector, value, timeout=5000)
             return f"Filled '{selector}' with '{value[:50]}'"
 
         elif name == "browser_eval":
             expression = args["expression"]
-            result = _page.evaluate(expression)
+            result = session.page.evaluate(expression)
             import json
             try:
                 return json.dumps(result, ensure_ascii=False, default=str)[:2000]
@@ -698,7 +858,7 @@ def _execute_impl(name: str, args: dict) -> str:
 
         elif name == "browser_network":
             filt = args.get("filter", "all")
-            entries = _network_log[-30:]  # last 30
+            entries = session.network_log[-30:]
             if filt == "failed":
                 entries = [e for e in entries if e["status"] >= 400]
             if not entries:
@@ -706,31 +866,27 @@ def _execute_impl(name: str, args: dict) -> str:
             lines = [f"{e['method']} {e['status']} {e['type']}: {e['url']}" for e in entries]
             return "\n".join(lines)
 
-        # ── Navigation: back/forward/reload ──
         elif name == "browser_back":
-            _page.go_back(timeout=10000)
-            _page.wait_for_timeout(500)
-            return f"Back. Page: {_page.title() or ''} ({_page.url})"
+            session.page.go_back(timeout=10000)
+            session.page.wait_for_timeout(500)
+            return f"Back. Page: {session.page.title() or ''} ({session.page.url})"
 
         elif name == "browser_forward":
-            _page.go_forward(timeout=10000)
-            _page.wait_for_timeout(500)
-            return f"Forward. Page: {_page.title() or ''} ({_page.url})"
+            session.page.go_forward(timeout=10000)
+            session.page.wait_for_timeout(500)
+            return f"Forward. Page: {session.page.title() or ''} ({session.page.url})"
 
         elif name == "browser_reload":
-            _page.reload(timeout=15000)
-            _page.wait_for_timeout(500)
-            return f"Reloaded. Page: {_page.title() or ''} ({_page.url})"
+            session.page.reload(timeout=15000)
+            session.page.wait_for_timeout(500)
+            return f"Reloaded. Page: {session.page.title() or ''} ({session.page.url})"
 
-        # ── Accessibility tree (structured DOM) ──
         elif name == "browser_accessibility":
-            # Playwright removed page.accessibility in 1.56+. Use CDP directly.
             try:
-                cdp = _page.context.new_cdp_session(_page)
+                cdp = session.page.context.new_cdp_session(session.page)
                 tree = cdp.send("Accessibility.getFullAXTree", {})
                 cdp.detach()
                 nodes = tree.get("nodes", [])
-                # Keep only meaningful nodes (with role+name)
                 interesting = args.get("interesting_only", True)
                 simple = []
                 for n in nodes:
@@ -744,8 +900,7 @@ def _execute_impl(name: str, args: dict) -> str:
                 if len(text) > 8000:
                     text = text[:8000] + "\n... (truncated)"
                 return text
-            except Exception as e:
-                # Fallback: JS-based extraction of interactive elements
+            except Exception:
                 expr = '''(function(){
                   const els = document.querySelectorAll('button, a, input, select, textarea, [role]');
                   return Array.from(els).slice(0, 100).map(e => ({
@@ -756,18 +911,17 @@ def _execute_impl(name: str, args: dict) -> str:
                     class: (e.className || '').substring(0, 60)
                   })).filter(x => x.text || x.id || x.role);
                 })()'''
-                result = _page.evaluate(expr)
+                result = session.page.evaluate(expr)
                 import json as _json
                 text = _json.dumps(result, ensure_ascii=False, indent=2)
                 if len(text) > 8000:
                     text = text[:8000] + "\n... (truncated)"
                 return text
 
-        # ── Console logs ──
         elif name == "browser_console":
             level = (args.get("level") or "all").lower()
             limit = int(args.get("limit") or 50)
-            entries = _console_log[-limit:]
+            entries = session.console_log[-limit:]
             if level != "all":
                 entries = [e for e in entries if e["level"] == level]
             if not entries:
@@ -775,30 +929,28 @@ def _execute_impl(name: str, args: dict) -> str:
             lines = [f"[{e['level']}] {e['text']}" + (f"  @ {e['location']}" if e['location'] else "") for e in entries]
             return "\n".join(lines)
 
-        # ── Element interactions ──
         elif name == "browser_hover":
             selector = args["selector"]
             try:
-                _page.hover(selector, timeout=5000)
+                session.page.hover(selector, timeout=5000)
             except Exception:
-                _page.get_by_text(selector).first.hover(timeout=5000)
-            _page.wait_for_timeout(300)
+                session.page.get_by_text(selector).first.hover(timeout=5000)
+            session.page.wait_for_timeout(300)
             return f"Hovered '{selector}'"
 
         elif name == "browser_select":
             selector = args["selector"]
             value = args["value"]
-            # Try by value first, then by label
             try:
-                _page.select_option(selector, value=value, timeout=5000)
+                session.page.select_option(selector, value=value, timeout=5000)
             except Exception:
-                _page.select_option(selector, label=value, timeout=5000)
+                session.page.select_option(selector, label=value, timeout=5000)
             return f"Selected '{value}' in {selector}"
 
         elif name == "browser_press_key":
             key = args["key"]
-            _page.keyboard.press(key)
-            _page.wait_for_timeout(200)
+            session.page.keyboard.press(key)
+            session.page.wait_for_timeout(200)
             return f"Pressed '{key}'"
 
         elif name == "browser_wait_for":
@@ -806,7 +958,7 @@ def _execute_impl(name: str, args: dict) -> str:
             state = args.get("state", "visible")
             timeout = int(args.get("timeout_ms", 5000))
             try:
-                _page.wait_for_selector(selector, state=state, timeout=timeout)
+                session.page.wait_for_selector(selector, state=state, timeout=timeout)
                 return f"'{selector}' is now {state}"
             except Exception as e:
                 return f"Timeout waiting for '{selector}' ({state}): {str(e)[:150]}"
@@ -814,25 +966,23 @@ def _execute_impl(name: str, args: dict) -> str:
         elif name == "browser_drag":
             source = args["source"]
             target = args["target"]
-            _page.drag_and_drop(source, target, timeout=5000)
-            _page.wait_for_timeout(300)
+            session.page.drag_and_drop(source, target, timeout=5000)
+            session.page.wait_for_timeout(300)
             return f"Dragged '{source}' → '{target}'"
 
         elif name == "browser_upload":
             selector = args["selector"]
             filepath = args["filepath"]
-            _page.set_input_files(selector, filepath)
+            session.page.set_input_files(selector, filepath)
             return f"Uploaded {filepath} to {selector}"
 
-        # ── Tabs ──
         elif name == "browser_tabs":
-            # Clean closed pages
-            _pages = [p for p in _pages if not p.is_closed()]
-            if not _pages:
+            session.pages = [p for p in session.pages if not p.is_closed()]
+            if not session.pages:
                 return "No open tabs."
-            active_idx = _pages.index(_page) if _page in _pages else -1
+            active_idx = session.pages.index(session.page) if session.page in session.pages else -1
             lines = []
-            for i, p in enumerate(_pages):
+            for i, p in enumerate(session.pages):
                 marker = "→ " if i == active_idx else "  "
                 try:
                     title = p.title() or "(untitled)"
@@ -843,37 +993,37 @@ def _execute_impl(name: str, args: dict) -> str:
 
         elif name == "browser_tab_new":
             url = args.get("url")
-            ctx = _page.context
+            ctx = session.page.context
             new_page = ctx.new_page()
-            _pages.append(new_page)
-            _page = new_page
-            _attach_page_listeners(new_page)
+            session.pages.append(new_page)
+            session.page = new_page
+            _attach_page_listeners(new_page, session)
             if url:
                 if not url.startswith(("http://", "https://")):
                     url = "https://" + url
                 new_page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 new_page.wait_for_timeout(500)
-            return f"Opened tab [{len(_pages)-1}]: {new_page.title() or ''} ({new_page.url})"
+            return f"Opened tab [{len(session.pages)-1}]: {new_page.title() or ''} ({new_page.url})"
 
         elif name == "browser_tab_switch":
             idx = int(args["index"])
-            _pages = [p for p in _pages if not p.is_closed()]
-            if idx < 0 or idx >= len(_pages):
-                return f"Invalid index {idx}. Valid: 0..{len(_pages)-1}"
-            _page = _pages[idx]
-            _page.bring_to_front()
-            return f"Switched to tab [{idx}]: {_page.title() or ''} ({_page.url})"
+            session.pages = [p for p in session.pages if not p.is_closed()]
+            if idx < 0 or idx >= len(session.pages):
+                return f"Invalid index {idx}. Valid: 0..{len(session.pages)-1}"
+            session.page = session.pages[idx]
+            session.page.bring_to_front()
+            return f"Switched to tab [{idx}]: {session.page.title() or ''} ({session.page.url})"
 
         elif name == "browser_tab_close":
             idx = int(args["index"])
-            _pages = [p for p in _pages if not p.is_closed()]
-            if idx < 0 or idx >= len(_pages):
-                return f"Invalid index {idx}. Valid: 0..{len(_pages)-1}"
-            closing = _pages.pop(idx)
+            session.pages = [p for p in session.pages if not p.is_closed()]
+            if idx < 0 or idx >= len(session.pages):
+                return f"Invalid index {idx}. Valid: 0..{len(session.pages)-1}"
+            closing = session.pages.pop(idx)
             closing.close()
-            if _page == closing and _pages:
-                _page = _pages[0]
-            return f"Closed tab [{idx}]. Now {len(_pages)} tab(s) open."
+            if session.page == closing and session.pages:
+                session.page = session.pages[0]
+            return f"Closed tab [{idx}]. Now {len(session.pages)} tab(s) open."
 
         return f"Unknown browser tool: {name}"
 

@@ -22,11 +22,15 @@ import pytest
 
 @pytest.fixture
 def browser(monkeypatch):
-    """Fresh browser module with a fake _page injected.
+    """Fresh browser module with a fake page injected into the active session.
 
-    Yields ``(module, page_mock, pages_list)`` — the mock page is what
-    every browser_* tool reaches for, so assertions go through it.
-    ``_ensure_browser`` is stubbed to no-op so no real Playwright runs.
+    Post-Phase-3 the browser module no longer has module-level _page /
+    _pages — state lives on a per-goal BrowserSession. The fixture
+    therefore mocks the DEFAULT session's page directly. ensure_running
+    is stubbed so we never launch real Chromium.
+
+    Yields ``(module, page_mock, pages_list)`` with the same shape as
+    before so existing assertions still work.
     """
     import importlib
     import sys
@@ -36,25 +40,29 @@ def browser(monkeypatch):
         mod = importlib.import_module("skills.browser")
 
     page = MagicMock(name="page")
-    # Sensible defaults — most tools chain title() / url / inner_text()
     page.title.return_value = "Example Domain"
     page.url = "https://example.com/"
     page.inner_text.return_value = "Example Domain\nThis domain is for use in examples."
     page.content.return_value = "<html><body>Example Domain</body></html>"
     page.evaluate.return_value = []
     page.accessibility.snapshot.return_value = {"role": "WebArea", "name": "Example"}
+    page.is_closed.return_value = False
 
-    # Inject the fake
-    mod._page = page
-    mod._pages = [page]
-    mod._network_log = []
-    mod._console_log = []
+    # Reset the session registry and inject the fake into the default session.
+    # _get_active_session falls back to "__default__" when no ctx.goal_id.
+    mod._sessions.clear()
+    sess = mod._get_session(mod._DEFAULT_SESSION_ID)
+    sess.page = page
+    sess.pages = [page]
+    sess.network_log = []
+    sess.console_log = []
 
-    # Prevent _ensure_browser from launching real Playwright
-    monkeypatch.setattr(mod, "_ensure_browser", lambda: None)
-    monkeypatch.setattr(mod, "_close_browser", lambda: None)
+    # Stub session lifecycle so no Chromium launches
+    monkeypatch.setattr(sess, "ensure_running", lambda: None)
+    monkeypatch.setattr(sess, "close", lambda: None)
+    monkeypatch.setattr(sess, "is_alive", lambda: True)
 
-    return mod, page, mod._pages
+    return mod, page, sess.pages
 
 
 # ── Navigation ────────────────────────────────────────────────────────
@@ -155,11 +163,20 @@ def test_browser_eval_returns_playwright_evaluate_result(browser):
 
 
 def test_browser_set_visible_restarts_browser_on_mode_change(browser, monkeypatch):
-    """Flipping headless/visible should trigger _close_browser so the
-    next browser_open launches with the new mode."""
+    """Flipping headless/visible should close the active session so the
+    next browser_open launches with the new mode.
+
+    Post-Phase-3 the close happens per-session (`session.close()`), not via
+    a module-level `_close_browser` shim. We patch the active session's
+    close directly.
+    """
     mod, _page, _ = browser
+    sess = mod._get_active_session()
     close_called = {"n": 0}
-    monkeypatch.setattr(mod, "_close_browser", lambda: close_called.__setitem__("n", close_called["n"] + 1))
+    monkeypatch.setattr(sess, "close", lambda: close_called.__setitem__("n", close_called["n"] + 1))
+    # is_alive must return True so the "already in mode + alive" short-circuit
+    # is not taken on the no-op repeat call below.
+    monkeypatch.setattr(sess, "is_alive", lambda: True)
 
     # Default is headless=True; set_visible(True) means not-headless → mode flip
     out = mod.execute("browser_set_visible", {"visible": True})
@@ -172,9 +189,11 @@ def test_browser_set_visible_restarts_browser_on_mode_change(browser, monkeypatc
 
 
 def test_browser_close_invokes_close(browser, monkeypatch):
+    """browser_close should call the active session's close()."""
     mod, _page, _ = browser
+    sess = mod._get_active_session()
     close_called = {"n": 0}
-    monkeypatch.setattr(mod, "_close_browser", lambda: close_called.__setitem__("n", close_called["n"] + 1))
+    monkeypatch.setattr(sess, "close", lambda: close_called.__setitem__("n", close_called["n"] + 1))
     out = mod.execute("browser_close", {})
     assert "closed" in out.lower()
     assert close_called["n"] == 1

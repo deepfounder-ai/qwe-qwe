@@ -352,7 +352,7 @@ EDITABLE_SETTINGS = {
     "resume_routine_auto":      ("setting:resume_routine_auto",      bool, True,   "Enable/disable routine auto-resume entirely.", None, None),
     # ── Goal runtime (Phase 1 of long-running agent) ──
     "checkpoint_round_interval": ("setting:checkpoint_round_interval", int, 3,      "Goal runtime: save a checkpoint every N orchestrator rounds. Lower = safer resume, more DB writes.", 1, 100),
-    "worker_concurrency":        ("setting:worker_concurrency",        int, 1,      "Max goals castor-worker runs concurrently. Default 1 (browser-heavy workloads are serial).", 1, 16),
+    "worker_concurrency":        ("setting:worker_concurrency",        int, 3,      "Max goals castor-worker runs concurrently. Each goal gets its own isolated browser session, so parallel browser scraping works out of the box.", 1, 16),
     "worker_poll_interval_sec":  ("setting:worker_poll_interval_sec",  int, 5,      "How often castor-worker polls for new goals.", 1, 300),
     "worker_inline":             ("setting:worker_inline",             bool, True,  "Run the goal worker INSIDE the web server (great for dev/desktop). Disable when running a dedicated castor-worker via launchd/systemd.", None, None),
     "orchestrator_max_turns":    ("setting:orchestrator_max_turns",    int, 80,     "Hard cap on orchestrator LLM rounds per goal. Should be high — real work happens in subagents.", 5, 1000),
