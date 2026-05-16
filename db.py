@@ -1801,3 +1801,120 @@ def delete_goal_output(goal_id: str, output_id: int) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+# ── Auto-attach: workspace-diff scan ────────────────────────────────────────
+
+
+# Subdirs inside workspace that are infrastructure, never user deliverables.
+# These are excluded from auto-attach scans.
+_WORKSPACE_AUTOATTACH_EXCLUDED_DIRS = frozenset({
+    "browser_sessions",   # per-goal Chrome profile dirs
+    "memory",             # Qdrant local
+    "kb",                 # ingested knowledge sources
+    "module_data",        # AST extraction scratch (from doc-gen goals)
+    ".tmp",               # convention for scratch
+})
+
+# File extensions / prefixes that are scratch / noise, not deliverables.
+_WORKSPACE_AUTOATTACH_EXCLUDED_SUFFIXES = (".pyc", ".log", ".tmp", ".bak", ".swp")
+
+# Hard size cap. Files larger than this aren't worth surfacing in the UI
+# (the user would download them through other means).
+_WORKSPACE_AUTOATTACH_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def auto_attach_workspace_outputs(
+    goal_id: str,
+    *,
+    workspace_root: str | None = None,
+    since_ts: float | None = None,
+) -> list[int]:
+    """Scan ``workspace_root`` for files created/modified since ``since_ts``
+    and register each as a ``kind=file`` goal_output. Returns the list of
+    newly-created output row ids.
+
+    Why this exists: orchestrators don't always remember to call
+    ``goal_attach_output`` for every file they write. This is the runtime
+    safety net that finds them anyway — workspace contents at goal-finalize
+    minus workspace contents at goal-start = user-visible deliverables.
+
+    Filters:
+      - Hidden files (starting with ``.``)
+      - Subdirs in ``_WORKSPACE_AUTOATTACH_EXCLUDED_DIRS`` (browser_sessions,
+        memory, etc.)
+      - Suffixes in ``_WORKSPACE_AUTOATTACH_EXCLUDED_SUFFIXES``
+      - Anything > ``_WORKSPACE_AUTOATTACH_MAX_BYTES`` (10 MB)
+      - Files already attached for this goal (dedup by ``value``).
+
+    ``since_ts`` defaults to the goal's ``started_at``. ``workspace_root``
+    defaults to ``config.DATA_DIR/workspace`` (the production path).
+
+    Idempotent: re-running on the same goal returns 0 new attachments
+    (dedup by file path).
+
+    Never raises — best-effort. Logs and continues on filesystem errors.
+    """
+    import os
+    import config as _config
+
+    root = workspace_root or os.path.join(_config.DATA_DIR, "workspace")
+    if not os.path.isdir(root):
+        return []
+
+    if since_ts is None:
+        goal = get_goal(goal_id)
+        if not goal:
+            return []
+        since_ts = float(goal.get("started_at") or 0.0)
+
+    # Build a set of already-attached values so we dedup cheaply.
+    already = {
+        out.get("value")
+        for out in get_goal_outputs(goal_id)
+        if out.get("kind") == "file"
+    }
+
+    new_ids: list[int] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Mutate dirnames in place to prune excluded subtrees + hidden dirs.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _WORKSPACE_AUTOATTACH_EXCLUDED_DIRS
+            and not d.startswith(".")
+        ]
+        for fname in filenames:
+            if fname.startswith("."):
+                continue
+            if fname.endswith(_WORKSPACE_AUTOATTACH_EXCLUDED_SUFFIXES):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                st = os.stat(fpath)
+            except OSError:
+                continue
+            if st.st_mtime < since_ts:
+                continue
+            if st.st_size <= 0:
+                continue
+            if st.st_size > _WORKSPACE_AUTOATTACH_MAX_BYTES:
+                continue
+            if fpath in already:
+                continue
+            # Attach. Best-effort — a single broken file shouldn't break the scan.
+            try:
+                output_id = attach_goal_output(
+                    goal_id,
+                    kind="file",
+                    title=fname,
+                    value=fpath,
+                    meta={"auto_attached": True, "size_bytes": st.st_size},
+                )
+                new_ids.append(output_id)
+                already.add(fpath)
+            except Exception:
+                # Log via stderr — module avoids the logger dep to keep
+                # imports clean. The caller will see len(new_ids) anyway.
+                import sys
+                sys.stderr.write(f"auto_attach_workspace_outputs: failed to attach {fpath}\n")
+    return new_ids

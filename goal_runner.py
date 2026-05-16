@@ -266,6 +266,22 @@ async def run(goal_id: str, shutdown_event: asyncio.Event) -> None:
             except Exception:
                 _log.exception(f"failed to close browser session for {goal_id}")
 
+        # Auto-attach workspace files written during this goal as outputs.
+        # Orchestrators don't always remember to call goal_attach_output for
+        # every file they wrote — this is the runtime safety net. Runs on
+        # EVERY terminal path (done / failed / paused / cancelled) so
+        # partial progress is visible in the UI even when the orchestrator
+        # capitulated mid-goal. Dedups vs already-attached outputs.
+        try:
+            new_ids = db.auto_attach_workspace_outputs(goal_id)
+            if new_ids:
+                _log.info(
+                    f"auto-attached {len(new_ids)} workspace file(s) "
+                    f"as outputs for {goal_id}"
+                )
+        except Exception:
+            _log.exception(f"workspace auto-attach failed for {goal_id}")
+
     # Gate passed — proceed to mark the goal done.
     reply = (
         final_result.get("reply") if isinstance(final_result, dict) else ""
