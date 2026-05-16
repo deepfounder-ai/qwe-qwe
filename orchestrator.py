@@ -59,6 +59,7 @@ def _load_system_prompt() -> str:
 _ORCHESTRATOR_TOOL_NAMES: set[str] = {
     # Goal management (Phase 2)
     "goal_plan_set", "subtask_update", "fact_save", "fact_get",
+    "goal_attach_output",
     # Lightweight ops the orchestrator may want to do inline.
     "memory_save", "memory_search",
     "http_request",

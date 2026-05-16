@@ -1581,3 +1581,96 @@ def fact_delete(goal_id: str, key: str) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+# ── Goal outputs (Phase 2 follow-up) ─────────────────────────────────────────
+#
+# Structured deliverables the orchestrator produces during a goal: files
+# written to the workspace, URLs to open, standalone markdown reports.
+# Stored separately from goals.result (free-form prose) so the UI can
+# render Download / Open / Save-to-memory buttons without parsing.
+
+
+GOAL_OUTPUT_KINDS = ("file", "link", "report")
+
+
+def attach_goal_output(
+    goal_id: str,
+    *,
+    kind: str,
+    title: str,
+    value: str,
+    meta: dict | None = None,
+) -> int:
+    """Register a deliverable on the goal. Returns the new output's row id.
+
+    Validation is light here (kind whitelist, non-empty title/value); the
+    orchestrator-side tool wrapper does the heavier per-kind checks
+    (path-traversal guard for files, scheme check for links).
+    """
+    if kind not in GOAL_OUTPUT_KINDS:
+        raise ValueError(f"invalid output kind {kind!r}; want one of {GOAL_OUTPUT_KINDS}")
+    if not title or not title.strip():
+        raise ValueError("output title cannot be empty")
+    if not value or not value.strip():
+        raise ValueError("output value cannot be empty")
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO goal_outputs (goal_id, kind, title, value, meta, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (goal_id, kind, title.strip(), value, json.dumps(meta or {}), time.time()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_goal_outputs(goal_id: str) -> list[dict]:
+    """List outputs for a goal, oldest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT id, kind, title, value, meta, created_at
+           FROM goal_outputs WHERE goal_id=? ORDER BY id""",
+        (goal_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "kind": r[1],
+            "title": r[2],
+            "value": r[3],
+            "meta": json.loads(r[4]) if r[4] else {},
+            "created_at": float(r[5]),
+        }
+        for r in rows
+    ]
+
+
+def get_goal_output(goal_id: str, output_id: int) -> dict | None:
+    """Fetch one output. Returns dict or None if not found."""
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT id, kind, title, value, meta, created_at
+           FROM goal_outputs WHERE goal_id=? AND id=?""",
+        (goal_id, int(output_id)),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "kind": row[1],
+        "title": row[2],
+        "value": row[3],
+        "meta": json.loads(row[4]) if row[4] else {},
+        "created_at": float(row[5]),
+    }
+
+
+def delete_goal_output(goal_id: str, output_id: int) -> bool:
+    """Delete one output. Returns True if a row was removed."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "DELETE FROM goal_outputs WHERE goal_id=? AND id=?",
+        (goal_id, int(output_id)),
+    )
+    conn.commit()
+    return cur.rowcount > 0

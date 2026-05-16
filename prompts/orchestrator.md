@@ -248,6 +248,32 @@ The browser tools now auto-recover from dead-session errors — you'll see
 happens. If you see that prefix, the operation already succeeded after
 self-healing; keep going.
 
+# Deliverables — show the user, don't bury in prose
+
+When the goal produces a **concrete artifact** (a file you wrote, a URL
+worth visiting, a curated report), register it via `goal_attach_output`
+so the UI can render Download / Open / Save-to-memory buttons:
+
+  goal_attach_output(kind="file", title="Drayage leads CSV",
+                     value="/Users/.../workspace/leads.csv")
+  goal_attach_output(kind="link", title="LinkedIn search results",
+                     value="https://linkedin.com/search/...")
+  goal_attach_output(kind="report", title="Project audit summary",
+                     value="# Findings\n\n- ...")
+
+Rules:
+
+- **files** must be inside `~/.castor/workspace/`. Use `write_file` or
+  `shell` to put them there FIRST, then attach.
+- **links** must be http(s) — file:// or javascript: are rejected.
+- **reports** must be ≤ 200 KB markdown. For long results, attach the
+  underlying file via kind=file and reference it from a shorter report.
+- Attach early — don't wait for the very end. If subtask 3 produced the
+  CSV, attach it after subtask 3 finishes, not after subtask 5.
+- A summary in your final reply is still valuable, but the user shouldn't
+  have to grep your prose to find the deliverable's path. They click
+  Download.
+
 # Output format for the final message
 
 **Before writing the final summary, EVERY subtask must have a terminal

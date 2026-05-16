@@ -7134,15 +7134,17 @@ async function loadGoals() {
 async function loadGoalDetail(goalId, opts) {
   opts = opts || {};
   try {
-    const [g, ev, fa] = await Promise.all([
+    const [g, ev, fa, out] = await Promise.all([
       api('/api/goals/' + encodeURIComponent(goalId)),
       api('/api/goals/' + encodeURIComponent(goalId) + '/events?limit=200'),
       api('/api/goals/' + encodeURIComponent(goalId) + '/facts'),
+      api('/api/goals/' + encodeURIComponent(goalId) + '/outputs'),
     ]);
     if (g && !g.error) {
       state.goalDetail = g;
       state.goalEvents = (ev && ev.events) || [];
       state.goalFacts = (fa && fa.facts) || {};
+      state.goalOutputs = (out && out.outputs) || [];
     }
   } catch (e) {
     if (!opts.silent) {
@@ -7277,6 +7279,11 @@ function renderGoalDetailView() {
   const plan = g.plan;
   const subtaskCount = plan && plan.subtasks ? plan.subtasks.length : 0;
   const eventCount = (state.goalEvents || []).length;
+  const outputCount = (state.goalOutputs || []).length;
+  // Result tab shows deliverables + prose. Surface output count on the
+  // tab itself so the user knows there's a download/link waiting even
+  // if they haven't switched tabs yet.
+  const resultLabel = outputCount > 0 ? 'Result' : 'Result';
 
   return '<div class="scroll-col"><div class="inner-wide">' +
     // Header
@@ -7306,7 +7313,7 @@ function renderGoalDetailView() {
       tabBtn('plan', 'Plan', subtaskCount) +
       tabBtn('events', 'Events', eventCount) +
       tabBtn('facts', 'Facts') +
-      tabBtn('result', 'Result') +
+      tabBtn('result', resultLabel, outputCount > 0 ? outputCount : null) +
     '</div>' +
 
     // Tab body
@@ -7548,22 +7555,105 @@ function openCreateGoalModal() {
   });
 }
 
+function _humanBytes(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function _renderGoalOutputs(g) {
+  const outputs = state.goalOutputs || [];
+  if (!outputs.length) return '';
+  const renderOne = (o) => {
+    const kindColor = o.kind === 'file' ? 'var(--ok)'
+                    : o.kind === 'link' ? 'var(--info)'
+                    : 'var(--magic)';
+    let actions = '';
+    let body = '';
+    if (o.kind === 'file') {
+      const size = (o.meta && o.meta.byte_size) ? ' · ' + _humanBytes(o.meta.byte_size) : '';
+      body = '<div class="mono" style="font-size:11px;color:var(--fg-4);' +
+             'word-break:break-all">' + esc(o.value) + esc(size) + '</div>';
+      const url = '/api/goals/' + encodeURIComponent(g.id) +
+                  '/outputs/' + o.id + '/download';
+      actions =
+        '<a href="' + esc(url) + '" download class="btn-primary" ' +
+          'style="padding:6px 12px;font-size:12px;text-decoration:none;' +
+          'display:inline-flex;align-items:center;gap:6px">' +
+          ico('download', 12) + 'Download</a>';
+    } else if (o.kind === 'link') {
+      body = '<a href="' + esc(o.value) + '" target="_blank" rel="noopener" ' +
+             'class="mono" style="font-size:11px;color:var(--info);' +
+             'word-break:break-all">' + esc(o.value) + '</a>';
+      actions =
+        '<a href="' + esc(o.value) + '" target="_blank" rel="noopener" ' +
+          'class="btn-primary" style="padding:6px 12px;font-size:12px;' +
+          'text-decoration:none;display:inline-flex;align-items:center;gap:6px">' +
+          ico('external', 12) + 'Open</a>';
+    } else if (o.kind === 'report') {
+      // Inline-render markdown body. We have a renderer (renderMessageMarkdown)
+      // used for chat — but it's heavy. For an MVP just escape + preserve
+      // line breaks; a richer render lands later.
+      body = '<div style="font-size:13px;color:var(--fg-1);line-height:1.55;' +
+             'white-space:pre-wrap;max-height:400px;overflow-y:auto;' +
+             'padding:8px;background:var(--bg-1);border-radius:4px">' +
+             esc(o.value) + '</div>';
+      actions =
+        '<button class="btn-primary" data-output-act="save-to-memory" ' +
+          'data-goal="' + esc(g.id) + '" data-output-id="' + o.id + '" ' +
+          'style="padding:6px 12px;font-size:12px;display:inline-flex;' +
+          'align-items:center;gap:6px">' +
+          ico('brain', 12) + 'Save to memory</button>';
+    }
+    return '<div style="border:1px solid var(--bd-1);border-radius:8px;' +
+        'padding:12px;margin-bottom:12px">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
+        '<span class="chip" style="background:transparent;border:1px solid ' +
+          kindColor + ';color:' + kindColor + ';font-size:10px;' +
+          'text-transform:uppercase;letter-spacing:0.5px;padding:2px 8px">' +
+          esc(o.kind) + '</span>' +
+        '<span style="font-size:13px;color:var(--fg-1);font-weight:500;flex:1">' +
+          esc(o.title) + '</span>' +
+        '<button class="icon-btn" data-output-act="delete" ' +
+          'data-goal="' + esc(g.id) + '" data-output-id="' + o.id + '" ' +
+          'title="Remove from outputs (file on disk stays)">' +
+          ico('trash', 12) + '</button>' +
+      '</div>' +
+      body +
+      '<div style="margin-top:10px">' + actions + '</div>' +
+    '</div>';
+  };
+  return '<div style="margin-bottom:18px">' +
+    '<div style="font-size:11px;color:var(--fg-3);text-transform:uppercase;' +
+      'letter-spacing:0.5px;margin-bottom:8px">Deliverables · ' + outputs.length + '</div>' +
+    outputs.map(renderOne).join('') +
+  '</div>';
+}
+
 function _renderGoalResultTab(g) {
+  // Outputs (deliverables) sit ABOVE the prose summary — that's what the
+  // user wants first (download / open), not five paragraphs of narrative.
+  const outputsBlock = _renderGoalOutputs(g);
+
   if (g.error) {
-    return '<div style="padding:14px;background:rgba(255,80,80,0.08);border:1px solid var(--err);' +
+    return outputsBlock +
+      '<div style="padding:14px;background:rgba(255,80,80,0.08);border:1px solid var(--err);' +
       'border-radius:6px;color:var(--fg-1)">' +
       '<div style="font-weight:600;color:var(--err);margin-bottom:6px">Failed</div>' +
       '<div class="mono" style="font-size:12px;white-space:pre-wrap">' + esc(g.error) + '</div>' +
     '</div>';
   }
   if (!g.result) {
+    if (outputsBlock) return outputsBlock; // deliverables only, no prose
     return '<div style="padding:40px;text-align:center;color:var(--fg-3);font-size:13px">' +
       (g.status === 'running' || g.status === 'pending' || g.status === 'paused'
         ? 'Not finished yet. The final reply appears here once the orchestrator writes its summary message.'
         : 'No result captured.') +
     '</div>';
   }
-  return '<div style="padding:14px;background:var(--bg-1);border-radius:6px;' +
+  return outputsBlock +
+    '<div style="padding:14px;background:var(--bg-1);border-radius:6px;' +
     'font-size:14px;line-height:1.6;color:var(--fg-1);white-space:pre-wrap">' +
     esc(g.result) + '</div>';
 }
@@ -8267,6 +8357,38 @@ function wireEvents() {
   });
   document.querySelectorAll('[data-act="goal-create"]').forEach(b => {
     b.onclick = () => openCreateGoalModal();
+  });
+  // Goal output action buttons (save to memory, delete)
+  document.querySelectorAll('[data-output-act]').forEach(b => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const goalId = b.dataset.goal;
+      const outId = b.dataset.outputId;
+      const act = b.dataset.outputAct;
+      if (!goalId || !outId || !act) return;
+      try {
+        if (act === 'save-to-memory') {
+          const r = await api(
+            '/api/goals/' + encodeURIComponent(goalId) +
+            '/outputs/' + outId + '/save-to-memory',
+            { method: 'POST', body: {} }
+          );
+          if (r && r.saved) toast('Saved to memory', 'ok');
+          else toast('Failed: ' + ((r && r.error) || 'unknown'), 'err');
+        } else if (act === 'delete') {
+          if (!confirm('Remove this output? The underlying file stays on disk.')) return;
+          await api(
+            '/api/goals/' + encodeURIComponent(goalId) +
+            '/outputs/' + outId,
+            { method: 'DELETE' }
+          );
+          await loadGoalDetail(goalId, { silent: true });
+          toast('Output removed', 'ok');
+        }
+      } catch (err) {
+        toast('Failed: ' + (err.message || err), 'err');
+      }
+    };
   });
 
   document.querySelectorAll('[data-act="canvas-open"]').forEach(card => {

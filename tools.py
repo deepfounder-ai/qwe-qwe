@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -1077,6 +1078,42 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "goal_attach_output",
+            "description": (
+                "Register a deliverable on the active goal so the UI can show "
+                "Download / Open / Save-to-memory buttons. Use this for "
+                "concrete artifacts the user wants in their hands — not for "
+                "progress notes (those go in subtask_update). "
+                "Three kinds:\n"
+                "  - file  : value = absolute path under ~/.castor/workspace/. "
+                "          UI offers a Download button.\n"
+                "  - link  : value = http(s) URL. UI offers an Open button.\n"
+                "  - report: value = a markdown body you wrote as a standalone "
+                "          artifact. UI renders inline + offers Save-to-memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["file", "link", "report"],
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short human-facing label, e.g. 'Drayage leads CSV' or 'Project summary'.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "File path (for file), URL (for link), or markdown body (for report).",
+                    },
+                },
+                "required": ["kind", "title", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "dispatch_subagent",
             "description": (
                 "Orchestrator only: dispatch a focused subagent with a FRESH context window. "
@@ -1607,6 +1644,93 @@ def _fact_get_impl(args: dict) -> str:
     return "\n".join(lines)
 
 
+def _goal_attach_output_impl(args: dict) -> str:
+    """Register a deliverable on the active goal.
+
+    Per-kind validation guards against the LLM accidentally exposing
+    sensitive resources via Download / Open buttons:
+
+      - file   — resolved against config.WORKSPACE_DIR; reject paths that
+                 escape (e.g. `..`, symlinks pointing outside, absolute
+                 paths to /etc). Records byte_size so the UI can show
+                 "8.1 KB" without re-stat'ing.
+      - link   — must be http(s); reject file://, javascript:, etc.
+      - report — markdown body, capped at 200 KB (anything larger is
+                 probably the agent dumping raw HTML, not a curated
+                 report).
+    """
+    goal_id = _require_goal_id()
+    if not goal_id:
+        return "Error: goal_attach_output requires an active goal."
+    kind = (args.get("kind") or "").strip()
+    title = (args.get("title") or "").strip()
+    value = args.get("value")
+    if not kind or not title or value is None:
+        return "Error: kind, title, and value are all required."
+    if kind not in db.GOAL_OUTPUT_KINDS:
+        return f"Error: kind must be one of {db.GOAL_OUTPUT_KINDS}."
+
+    value_str = str(value)
+    meta: dict = {}
+
+    if kind == "file":
+        # Resolve and contain within WORKSPACE_DIR. Without this an LLM
+        # confused or prompt-injected could attach /etc/passwd as an
+        # "output" and the user's browser would happily download it via
+        # the API endpoint.
+        try:
+            p = Path(value_str).expanduser().resolve()
+        except (OSError, RuntimeError) as e:
+            return f"Error: invalid file path: {e}"
+        workspace = Path(config.WORKSPACE_DIR).expanduser().resolve()
+        try:
+            p.relative_to(workspace)
+        except ValueError:
+            return (
+                f"Error: file path must be inside the workspace "
+                f"({workspace}). Got: {p}. Write the file to the "
+                f"workspace first (use write_file or shell)."
+            )
+        if not p.exists():
+            return f"Error: file does not exist at {p}. Write it first."
+        if not p.is_file():
+            return f"Error: {p} is not a regular file."
+        try:
+            meta["byte_size"] = p.stat().st_size
+        except OSError:
+            pass
+        value_str = str(p)  # store the resolved canonical path
+
+    elif kind == "link":
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(value_str)
+        except ValueError as e:
+            return f"Error: invalid URL: {e}"
+        if parsed.scheme not in ("http", "https"):
+            return f"Error: link must use http(s) scheme; got {parsed.scheme!r}."
+        if not parsed.netloc:
+            return f"Error: URL has no host: {value_str!r}"
+
+    elif kind == "report":
+        if len(value_str) > 200 * 1024:
+            return (
+                f"Error: report body is {len(value_str)} chars (limit 200 KB). "
+                f"Trim or split it. Reports should be curated summaries, not "
+                f"raw HTML/log dumps."
+            )
+
+    try:
+        out_id = db.attach_goal_output(
+            goal_id, kind=kind, title=title, value=value_str, meta=meta,
+        )
+    except (ValueError, sqlite3.Error) as e:
+        return f"Error: {e}"
+    db.log_goal_event(goal_id, "output_attached",
+                      {"id": out_id, "kind": kind, "title": title})
+    return f"Output #{out_id} attached: {kind} '{title}' — visible in the goal's Outputs panel."
+
+
 def _dispatch_subagent_impl(args: dict) -> str:
     """Dispatch a subagent — orchestrator-only entry point.
 
@@ -2043,6 +2167,9 @@ def execute(name: str, args: dict) -> str:
 
         elif name == "fact_get":
             return _fact_get_impl(args)
+
+        elif name == "goal_attach_output":
+            return _goal_attach_output_impl(args)
 
         elif name == "dispatch_subagent":
             return _dispatch_subagent_impl(args)

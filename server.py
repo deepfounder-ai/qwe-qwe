@@ -2316,6 +2316,93 @@ async def get_goal_facts(goal_id: str):
     return {"facts": db.fact_get(goal_id)}
 
 
+@app.get("/api/goals/{goal_id}/outputs")
+async def get_goal_outputs(goal_id: str):
+    """Deliverables (files / links / reports) registered by the orchestrator
+    via goal_attach_output. Returns ``{outputs: [...]}``.
+    """
+    if not db.get_goal(goal_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"outputs": db.get_goal_outputs(goal_id)}
+
+
+@app.get("/api/goals/{goal_id}/outputs/{output_id}/download")
+async def download_goal_output(goal_id: str, output_id: int):
+    """Stream a goal_output of kind='file' to the user's browser.
+
+    Re-validates the path against WORKSPACE_DIR on every request (the
+    LLM's goal_attach_output impl already did this at attach time, but
+    files can be moved/replaced between attach and download — never trust
+    the stored path implicitly).
+    """
+    from fastapi.responses import FileResponse
+
+    if not db.get_goal(goal_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    out = db.get_goal_output(goal_id, output_id)
+    if not out:
+        return JSONResponse({"error": "output not found"}, status_code=404)
+    if out["kind"] != "file":
+        return JSONResponse(
+            {"error": f"output {output_id} is kind={out['kind']!r}, not a file"},
+            status_code=400,
+        )
+    try:
+        p = Path(out["value"]).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return JSONResponse({"error": "invalid path"}, status_code=500)
+    workspace = Path(config.WORKSPACE_DIR).expanduser().resolve()
+    try:
+        p.relative_to(workspace)
+    except ValueError:
+        return JSONResponse(
+            {"error": "path escapes workspace (file was moved or symlinked)"},
+            status_code=403,
+        )
+    if not p.exists() or not p.is_file():
+        return JSONResponse({"error": "file no longer exists"}, status_code=404)
+    return FileResponse(str(p), filename=p.name)
+
+
+@app.post("/api/goals/{goal_id}/outputs/{output_id}/save-to-memory")
+async def save_output_to_memory(goal_id: str, output_id: int, data: dict | None = None):
+    """Persist a report output to long-term memory (Qdrant). UI's
+    "Save to memory" button calls this. Optional body: ``{tag: "..."}``;
+    defaults to 'goal_report'.
+    """
+    if not db.get_goal(goal_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    out = db.get_goal_output(goal_id, output_id)
+    if not out:
+        return JSONResponse({"error": "output not found"}, status_code=404)
+    if out["kind"] != "report":
+        return JSONResponse(
+            {"error": f"only report kind can be saved to memory; got {out['kind']!r}"},
+            status_code=400,
+        )
+    tag = (data or {}).get("tag") or "goal_report"
+    try:
+        import memory
+        # Prepend a title header so the saved memory has context when
+        # surfaced via memory_search in a future thread.
+        body = f"# {out['title']}\n\n{out['value']}"
+        memory.save(body, tag=tag)
+    except Exception as e:
+        return JSONResponse({"error": f"memory save failed: {e}"}, status_code=500)
+    return {"saved": True, "tag": tag}
+
+
+@app.delete("/api/goals/{goal_id}/outputs/{output_id}")
+async def delete_goal_output_endpoint(goal_id: str, output_id: int):
+    """Remove a single output. The file on disk (if any) is NOT deleted —
+    the user can still find it via Finder. Only the registration is gone."""
+    if not db.get_goal(goal_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not db.delete_goal_output(goal_id, output_id):
+        return JSONResponse({"error": "output not found"}, status_code=404)
+    return {"deleted": True}
+
+
 @app.post("/api/goals/{goal_id}/pause")
 async def pause_goal(goal_id: str):
     """Mark a goal paused. Worker observes on next heartbeat and releases lease.
