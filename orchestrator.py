@@ -274,6 +274,9 @@ def run_orchestrator(
     budget = BudgetLimits(max_turns=orch_max_turns)
     turn_start = time.time()
     try:
+        # Build allowed_tools from the schemas so text-extracted tool calls
+        # can't escape the orchestrator's whitelist.
+        _orch_allowed = {t["function"]["name"] for t in tool_schemas if "function" in t}
         result = run_loop(
             client=client,
             model=model,
@@ -286,6 +289,7 @@ def run_orchestrator(
             max_tokens=2048,
             tool_executor=tools.execute,
             ctx=ctx,
+            allowed_tools=_orch_allowed,
         )
     except Exception:
         _log.exception(f"[{goal_id}] run_loop crashed")

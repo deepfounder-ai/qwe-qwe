@@ -63,7 +63,8 @@ _log = logging.getLogger("qwe.telemetry")
 #   v2 = added `thread_created` event + extended SOURCES with "preset"
 #   v3 = added `cost_tracking` to FEATURES enum (feature_first_use)
 #   v4 = added `auto_resume` to FEATURES enum (feature_first_use)
-_CURRENT_CONSENT_VERSION = 4
+#   v5 = added `text_extractions` field to turn_complete
+_CURRENT_CONSENT_VERSION = 5
 
 # ── HTTP send tunables ───────────────────────────────────────────────
 # Single timeout cap for the whole urlopen call. urllib doesn't separate
@@ -130,6 +131,7 @@ ALLOWED_EVENTS: dict[str, dict[str, type]] = {
         "input_tokens": int,
         "output_tokens": int,
         "context_hits": int,           # number of memory-recall items injected
+        "text_extractions": int,       # text-to-tool extraction fallback count (v5)
         # Surface where the turn came from
         "source": str,                  # "web" / "cli" / "telegram" / "scheduler"
     },

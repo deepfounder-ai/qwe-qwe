@@ -71,7 +71,8 @@ def _emit_tool_error_telemetry(tool_name: str, error_kind: str) -> None:
         _log.debug(f"telemetry tool_error: {e}")
 
 
-def _run_tool(tool_executor, name: str, args: dict, abort_event, ctx=None) -> str:
+def _run_tool(tool_executor, name: str, args: dict, abort_event, ctx=None,
+              allowed_tools: set[str] | None = None) -> str:
     """Invoke a tool with the per-thread abort event set, then clear it.
 
     This lets blocking tools (shell, http_request) observe the abort signal
@@ -82,7 +83,16 @@ def _run_tool(tool_executor, name: str, args: dict, abort_event, ctx=None) -> st
     ``ctx`` is stashed alongside the abort event so tools that want to emit
     status / tool_call events (none do today, but it's there if they grow
     that need) can reach the right client's queue.
+
+    ``allowed_tools`` enforces a caller-type tool whitelist at execution time.
+    When set, only tools in the set are executed; others return an error.
+    This is the execute-level enforcement for subagent/orchestrator whitelists
+    — schema-level filtering alone can be bypassed by text-extracted tool calls.
     """
+    # Execute-level whitelist gate: reject tools not in the allowed set.
+    if allowed_tools is not None and name not in allowed_tools:
+        _log.warning("tool %s rejected by allowed_tools whitelist", name)
+        return f"Error: tool '{name}' is not available in this context."
     try:
         import tools as _tools_mod
         _tools_mod._set_abort_event(abort_event)
@@ -280,7 +290,8 @@ def _pre_dispatch_safety_check(tool_name: str, args: dict, self_check_fn=None) -
 
 
 def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: list, emitter, stats,
-                          abort_event=None, self_check_fn=None, ctx=None) -> str:
+                          abort_event=None, self_check_fn=None, ctx=None,
+                          allowed_tools: set[str] | None = None) -> str:
     """Execute a tool call that was detected from text/intent (not native function calling).
     Injects proper messages into the conversation and returns the tool result.
 
@@ -339,7 +350,8 @@ def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: l
 
     tool_start = time.time()
     try:
-        result = _run_tool(tool_executor, tool_name, args, abort_event, ctx=ctx)
+        result = _run_tool(tool_executor, tool_name, args, abort_event, ctx=ctx,
+                           allowed_tools=allowed_tools)
     except Exception as e:
         result = f"Error: {e}"
         stats.add_error()
@@ -352,6 +364,24 @@ def _synthesize_tool_call(tool_name: str, args: dict, tool_executor, messages: l
     # Inject tool result
     messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
     return result
+
+
+def _detect_loop_period(sigs: list[str]) -> int | None:
+    """Detect repeating patterns in recent tool signatures.
+
+    Checks periods 1 (A→A), 2 (A→B→A→B), and 3 (A→B→C→A→B→C).
+    Returns the period if detected, None otherwise.
+    """
+    n = len(sigs)
+    for period in (1, 2, 3):
+        if n < period * 2:
+            continue
+        tail = sigs[-period * 2:]
+        first_half = tail[:period]
+        second_half = tail[period:]
+        if first_half == second_half:
+            return period
+    return None
 
 
 def run_loop(
@@ -372,6 +402,7 @@ def run_loop(
     ctx=None,
     thread_id: str | None = None,
     system_note: str | None = None,
+    allowed_tools: set[str] | None = None,
 ) -> dict:
     """Run the agent loop.
 
@@ -454,12 +485,13 @@ def run_loop(
     extra = extra_kwargs or {}
     _budget_warned = False
     from collections import deque
-    _recent_tool_sigs: deque[str] = deque(maxlen=5)  # loop detection: O(1) append+evict
+    _recent_tool_sigs: deque[str] = deque(maxlen=6)  # loop detection: O(1) append+evict
     _tool_name_counts: dict[str, int] = {}  # Layer 4: per-tool frequency
     _tool_search_count = 0  # Layer 3: tool_search call counter
     _nudge_count = 0  # Layer 5: anti-hedge nudge counter
     _nudge_cleanup = False  # Layer 5: cleanup nudge messages on next iteration
     _force_finish = False  # Layer 4: force finish after loop detection
+    _text_extraction_count = 0  # Fix 13: text-to-tool extraction counter
     _tool_names = _get_tool_names(tools) if tools else set()
 
 
@@ -777,7 +809,8 @@ def run_loop(
 
                         tool_start = time.time()
                         try:
-                            tool_result = _run_tool(tool_executor, tc["name"], args, abort_event, ctx=ctx)
+                            tool_result = _run_tool(tool_executor, tc["name"], args, abort_event, ctx=ctx,
+                                                    allowed_tools=allowed_tools)
                         except Exception as e:
                             tool_result = f"Error: {e}"
                             stats.add_error()
@@ -798,11 +831,12 @@ def run_loop(
                         "content": tool_result,
                     })
 
-                # Layer 4: Loop detection — 2 identical calls = force finish
+                # Layer 4: Loop detection — period-1/2/3 repeating patterns = force finish
                 _turn_sig = "|".join(f"{tc['name']}:{tc['arguments'][:200]}" for tc in tool_calls_data.values())
                 _recent_tool_sigs.append(_turn_sig)  # deque auto-evicts oldest
-                if len(_recent_tool_sigs) >= 2 and _recent_tool_sigs[-1] == _recent_tool_sigs[-2]:
-                    _log.warning(f"loop detected: {_turn_sig[:80]}")
+                _loop_period = _detect_loop_period(list(_recent_tool_sigs))
+                if _loop_period is not None:
+                    _log.warning(f"loop detected (period={_loop_period}): {_turn_sig[:80]}")
                     _force_finish = True
                     messages.append({"role": "user", "content":
                         "[system] STOP. You are in a loop. Give your final answer NOW based on what you already have. Do NOT call any more tools."})
@@ -832,7 +866,8 @@ def run_loop(
             if not _force_finish and tools and raw_reply:
                 extracted = _extract_tool_from_text(full_content, _tool_names)
                 if extracted:
-                    _log.info(f"extracted tool from text: {extracted[0]}({str(extracted[1])[:60]})")
+                    _text_extraction_count += 1
+                    _log.info(f"extracted tool from text (count={_text_extraction_count}): {extracted[0]}({str(extracted[1])[:60]})")
                     # Don't add the hedge text as final reply — execute the tool
                     # instead. Route through the pre-dispatch safety gate so a
                     # ``<tool_call>`` regex hit can't bypass shell-safety /
@@ -844,6 +879,7 @@ def run_loop(
                         abort_event=abort_event,
                         self_check_fn=self_check_fn,
                         ctx=ctx,
+                        allowed_tools=allowed_tools,
                     )
                     all_tool_calls.append(extracted[0])
                     continue  # Let LLM summarize the result
@@ -898,6 +934,7 @@ def run_loop(
             "tok_per_sec": tok_per_sec,
             "prompt_tokens": getattr(usage, 'prompt_tokens', 0) if usage else 0,
             "completion_tokens": getattr(usage, 'completion_tokens', 0) if usage else 0,
+            "text_extractions": _text_extraction_count,
         }
     except Exception as _e:
         _final_status = "err"

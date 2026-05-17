@@ -217,7 +217,13 @@ def _resolve_path(raw: str, for_write: bool = False) -> Path:
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = WORKSPACE / p
+    pre_resolve = p
     p = p.resolve()
+    # Observability: log when path traverses a symlink (defence-in-depth).
+    # The whitelist check below operates on the resolved target, so writes
+    # through symlinks to outside the whitelist are already blocked.
+    if for_write and pre_resolve.exists() and pre_resolve != p:
+        _log.warning("path resolved through symlink: %s → %s", pre_resolve, p)
     if for_write:
         s = str(p)
         allowed = any(s.startswith(w) for w in _get_write_whitelist())
@@ -2070,7 +2076,8 @@ def execute(name: str, args: dict) -> str:
             if block_reason:
                 _log.warning(f"shell blocked: {cmd}")
                 return block_reason
-            t = min(args.get("timeout", 120), 300)
+            _shell_default = config.get("tool_timeout_shell") if hasattr(config, "get") else 120
+            t = min(args.get("timeout", _shell_default), 300)
             cwd = str(WORKSPACE)
 
             env = os.environ.copy()
@@ -2298,7 +2305,8 @@ def execute(name: str, args: dict) -> str:
             abort_evt = _get_abort_event()
             if abort_evt is not None and abort_evt.is_set():
                 return "⏹ HTTP aborted (user pressed Stop)."
-            http_timeout = float(args.get("timeout", 5))
+            _http_default = config.get("tool_timeout_http") if hasattr(config, "get") else 5
+            http_timeout = float(args.get("timeout", _http_default))
             if http_timeout > 30:
                 http_timeout = 30
             try:

@@ -350,6 +350,12 @@ EDITABLE_SETTINGS = {
     "resume_ttl_telegram_sec":  ("setting:resume_ttl_telegram_sec",  int, 86400,  "How long (sec) a Telegram abort stays resumable. Default 24h.", 60, 31536000),
     "resume_ttl_routine_sec":   ("setting:resume_ttl_routine_sec",   int, 300,    "Window (sec) for auto-firing aborted routines on server start. Default 5 min.", 0, 86400),
     "resume_routine_auto":      ("setting:resume_routine_auto",      bool, True,   "Enable/disable routine auto-resume entirely.", None, None),
+    # ── Scheduler ──
+    "routine_dry_run_mock":  ("setting:routine_dry_run_mock",  int, 1,  "Stub dangerous tools (shell, http_request, send_file) during dry-run validation (0=real, 1=stubbed)", 0, 1),
+    "system_task_budget_usd": ("setting:system_task_budget_usd", float, 5.0, "Daily USD budget cap for system tasks (heartbeat, synthesis). 0 = no cap.", 0.0, None),
+    "failure_alert_threshold": ("setting:failure_alert_threshold", int, 3, "Alert after N consecutive routine failures", 1, None),
+    "tool_timeout_shell":     ("setting:tool_timeout_shell",     int, 120, "Shell tool timeout in seconds", 5, 600),
+    "tool_timeout_http":      ("setting:tool_timeout_http",      int, 5,   "HTTP request tool timeout in seconds", 1, 60),
     # ── Goal runtime (Phase 1 of long-running agent) ──
     "checkpoint_round_interval": ("setting:checkpoint_round_interval", int, 3,      "Goal runtime: save a checkpoint every N orchestrator rounds. Lower = safer resume, more DB writes.", 1, 100),
     "worker_concurrency":        ("setting:worker_concurrency",        int, 3,      "Max goals castor-worker runs concurrently. Each goal gets its own isolated browser session, so parallel browser scraping works out of the box.", 1, 16),

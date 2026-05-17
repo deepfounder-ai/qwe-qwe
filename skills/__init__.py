@@ -5,11 +5,15 @@ Skills are loaded from two directories:
   2. User skills: ~/.castor/skills/ (safe from git updates)
 """
 
-import importlib, importlib.util, re, sys
+import hashlib
+import importlib, importlib.util, json, re, sys
 from pathlib import Path
 from types import ModuleType
 import db
 import config
+import logger
+
+_log = logger.get("skills")
 
 # Skill names: lowercase alphanumeric + underscores only, no path separators
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -97,6 +101,40 @@ def _find_skill(name: str) -> Path | None:
 # cache when the active preset changes.
 _module_cache: dict[str, tuple[float, ModuleType]] = {}
 
+# ── Skill integrity manifest (SHA-256) ──────────────────────────────────
+# Protects user skills at ~/.castor/skills/ from silent tampering.
+# Built-in skills (in repo skills/) are git-tracked and exempt.
+_MANIFEST_PATH = Path(config.DATA_DIR) / "skills_manifest.json"
+
+
+def _load_manifest() -> dict:
+    """Load skill integrity manifest.  Returns ``{abs_path: sha256_hex}``."""
+    if _MANIFEST_PATH.exists():
+        try:
+            return json.loads(_MANIFEST_PATH.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            _log.warning("corrupt skills manifest — will re-register on next load")
+            return {}
+    return {}
+
+
+def _save_manifest(manifest: dict) -> None:
+    _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _MANIFEST_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _is_user_skill(path: Path) -> bool:
+    """True if *path* lives under the user-skills directory (not built-in)."""
+    try:
+        path.resolve().relative_to(Path(USER_SKILLS_DIR).resolve())
+        return True
+    except ValueError:
+        return False
+
 
 def _load_module(path: Path) -> ModuleType:
     """Load a Python module from path, with mtime-based caching."""
@@ -109,6 +147,26 @@ def _load_module(path: Path) -> ModuleType:
     cached = _module_cache.get(cache_key)
     if cached and cached[0] == mtime:
         return cached[1]
+
+    # Integrity check for user skills (not built-in / git-tracked)
+    if _is_user_skill(path):
+        manifest = _load_manifest()
+        current_hash = _file_sha256(path)
+        stored_hash = manifest.get(cache_key)
+        if stored_hash is None:
+            # First load — register
+            manifest[cache_key] = current_hash
+            _save_manifest(manifest)
+            _log.info("skill %s: registered integrity hash", path.stem)
+        elif stored_hash != current_hash:
+            _log.warning(
+                "skill %s: integrity hash mismatch (expected %.16s…, got %.16s…). "
+                "Refusing to load. Delete %s to re-register.",
+                path.stem, stored_hash, current_hash, _MANIFEST_PATH,
+            )
+            raise ImportError(
+                f"Skill {path.stem} integrity check failed — file modified since registration"
+            )
 
     # Load fresh
     name = f"skill_{path.stem}"
@@ -203,9 +261,12 @@ def get_tools(compact: bool = False) -> list[dict]:
     """Get merged tool definitions from all active skills.
 
     If compact=True, truncate descriptions to save tokens in system prompt.
+    Detects tool-name collisions across skills — first skill wins, duplicates
+    are dropped with a warning.
     """
     active = get_active()
     all_tools = []
+    seen_names: dict[str, str] = {}  # tool_name → skill_name
     for name in active:
         path = _find_skill(name)
         if not path:
@@ -215,7 +276,19 @@ def get_tools(compact: bool = False) -> list[dict]:
             skill_tools = getattr(mod, "TOOLS", [])
             if compact:
                 skill_tools = [_compact_tool(t) for t in skill_tools]
-            all_tools.extend(skill_tools)
+            for t in skill_tools:
+                tool_name = t.get("function", {}).get("name")
+                if not tool_name:
+                    continue
+                if tool_name in seen_names:
+                    _log.warning(
+                        "Tool name collision: '%s' defined by skill '%s' "
+                        "shadows earlier definition from skill '%s' — skipping duplicate",
+                        tool_name, name, seen_names[tool_name],
+                    )
+                    continue
+                seen_names[tool_name] = name
+                all_tools.append(t)
         except Exception:
             pass
     return all_tools

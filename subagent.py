@@ -195,6 +195,11 @@ def run_subagent(
     # which gives the LLM a chance to produce a final summary before exit.
     budget = BudgetLimits(max_turns=int(max_rounds) if max_rounds else 20)
     try:
+        # Build the allowed_tools set from schema + any extras so text-extracted
+        # tool calls can't escape the subagent's whitelist.
+        _allowed = set(SUBAGENT_TOOLS.get(subagent_type, set()))
+        if extra_tools:
+            _allowed.update(t for t in extra_tools if isinstance(t, str) and t.strip())
         result = run_loop(
             client=client,
             model=model,
@@ -207,6 +212,7 @@ def run_subagent(
             max_tokens=2048,
             tool_executor=tools.execute,
             ctx=sub_ctx,
+            allowed_tools=_allowed,
         )
     except Exception as e:
         _log.exception(

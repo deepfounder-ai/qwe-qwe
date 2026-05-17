@@ -317,6 +317,57 @@ def test_orchestrator_dispatches_subagent_and_uses_result(qwe_temp_data_dir, mon
     assert "subagent_completed" in types
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Execute-level allowed_tools whitelist (Fix 4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_run_tool_blocks_disallowed_tool():
+    """_run_tool rejects a tool not in allowed_tools with an error string."""
+    from agent_loop import _run_tool
+
+    def _fake_executor(name, args):
+        return "should-not-reach"
+
+    result = _run_tool(
+        _fake_executor, "shell", {"command": "rm -rf /"},
+        abort_event=None,
+        allowed_tools={"http_request", "browser_open"},
+    )
+    assert "not available" in result
+    assert "shell" in result
+
+
+def test_run_tool_allows_whitelisted_tool():
+    """_run_tool permits a tool that IS in allowed_tools."""
+    from agent_loop import _run_tool
+
+    def _fake_executor(name, args):
+        return f"executed-{name}"
+
+    result = _run_tool(
+        _fake_executor, "http_request", {"url": "https://example.com"},
+        abort_event=None,
+        allowed_tools={"http_request", "browser_open"},
+    )
+    assert result == "executed-http_request"
+
+
+def test_run_tool_allows_all_when_no_whitelist():
+    """When allowed_tools is None, all tools are allowed (default behavior)."""
+    from agent_loop import _run_tool
+
+    def _fake_executor(name, args):
+        return f"executed-{name}"
+
+    result = _run_tool(
+        _fake_executor, "shell", {"command": "echo hi"},
+        abort_event=None,
+        allowed_tools=None,
+    )
+    assert result == "executed-shell"
+
+
 def test_dispatch_subagent_tool_validates_required_args(qwe_temp_data_dir):
     """Direct tool call without a goal → clear error string."""
     import tools

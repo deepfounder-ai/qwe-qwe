@@ -570,12 +570,25 @@ def kv_get_prefix(prefix: str) -> dict[str, str]:
 # FTS5 BM25 helpers
 # ---------------------------------------------------------------------------
 
+# Characters with special meaning in FTS5 syntax — stripped before quoting.
+_FTS5_STRIP = str.maketrans("", "", '"*:^(){}')
+
+
 def _fts_escape(query: str) -> str:
-    """Escape FTS5 special characters by quoting each word."""
+    """Escape FTS5 special characters by quoting each word.
+
+    Strips ``"  *  :  ^  (  )  {  }`` from individual words so user input
+    can never break the MATCH syntax or inject FTS5 operators.
+    """
     words = query.split()
     if not words:
         return '""'
-    return " ".join(f'"{w}"' for w in words if w.strip())
+    escaped = []
+    for w in words:
+        clean = w.translate(_FTS5_STRIP).strip()
+        if clean:
+            escaped.append(f'"{clean}"')
+    return " ".join(escaped) if escaped else '""'
 
 
 _SAFE_IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")

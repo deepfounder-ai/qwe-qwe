@@ -93,7 +93,9 @@ def add(name: str, task: str, schedule: str, skip_dry_run: bool = False) -> dict
     # the actual action. 5 was too tight.
     if not skip_dry_run:
         _log.info(f"dry-run for '{name}': {task[:100]}")
-        dry_result = _execute_task(task, max_rounds=8)
+        import config as _cfg
+        _dry_exec = _dry_run_executor if _cfg.get("routine_dry_run_mock") else None
+        dry_result = _execute_task(task, max_rounds=8, tool_executor=_dry_exec)
         validation = _validate_dry_run(dry_result, task)
         if not validation["ok"]:
             _log.warning(f"dry-run failed for '{name}': {validation['reason']}")
@@ -490,9 +492,12 @@ def _register_heartbeat():
     interval = config.get("heartbeat_interval_min")
     schedule = f"every {interval}m"
     next_run = time.time() + interval * 60
+    _sys_cap = config.get("system_task_budget_usd")
     db.execute(
-        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,1,1)",
-        (HEARTBEAT_TASK_NAME, HEARTBEAT_TASK_NAME, schedule, next_run)
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled, budget_usd_cap, budget_period_sec) "
+        "VALUES (?,?,?,?,1,1,?,86400)",
+        (HEARTBEAT_TASK_NAME, HEARTBEAT_TASK_NAME, schedule, next_run,
+         _sys_cap if _sys_cap else None)
     )
     _log.info(f"heartbeat registered: every {interval}m")
 
@@ -549,11 +554,29 @@ def _register_synthesis():
     if target <= now:
         target += timedelta(days=1)
     next_run = target.timestamp()
+    _sys_cap = config.get("system_task_budget_usd")
     db.execute(
-        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled) VALUES (?,?,?,?,1,1)",
-        (SYNTHESIS_TASK_NAME, SYNTHESIS_TASK_NAME, schedule, next_run)
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled, budget_usd_cap, budget_period_sec) "
+        "VALUES (?,?,?,?,1,1,?,86400)",
+        (SYNTHESIS_TASK_NAME, SYNTHESIS_TASK_NAME, schedule, next_run,
+         _sys_cap if _sys_cap else None)
     )
     _log.info(f"synthesis registered: {schedule}")
+
+
+def _stamp_system_task_budgets():
+    """One-time migration: stamp existing system tasks with budget caps."""
+    if db.kv_get("_system_task_budgets_stamped"):
+        return
+    _sys_cap = config.get("system_task_budget_usd")
+    if _sys_cap:
+        for name in (HEARTBEAT_TASK_NAME, SYNTHESIS_TASK_NAME):
+            db.execute(
+                "UPDATE scheduled_tasks SET budget_usd_cap=?, budget_period_sec=86400 "
+                "WHERE name=? AND budget_usd_cap IS NULL",
+                (_sys_cap, name),
+            )
+    db.kv_set("_system_task_budgets_stamped", "1")
 
 
 def start():
@@ -564,6 +587,7 @@ def start():
     _thread_started = True
     _register_heartbeat()
     _register_synthesis()
+    _stamp_system_task_budgets()
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
 
@@ -657,6 +681,23 @@ def _check_and_run():
         # text starting with a known error marker, count as failures.
         status = "err" if (error_msg or _looks_like_error(result)) else "ok"
         last_result_preview = (error_msg or result or "")[:500]
+
+        # Failure streak alerting — log.error after N consecutive errors.
+        if status == "err" and repeat and id_:
+            try:
+                threshold = int(config.get("failure_alert_threshold") or 3)
+                rows = db.fetchall(
+                    "SELECT status FROM agent_runs WHERE cron_id=? "
+                    "ORDER BY started_at DESC LIMIT ?",
+                    (id_, threshold),
+                )
+                if len(rows) >= threshold and all(r[0] in ("err", "error") for r in rows):
+                    _log.error(
+                        "routine #%d '%s' has failed %d consecutive times. Last error: %s",
+                        id_, name, threshold, (error_msg or result[:200]),
+                    )
+            except Exception:
+                pass  # alerting must never crash the scheduler
 
         # Notify callbacks
         for fn in _callbacks:
@@ -987,9 +1028,17 @@ def _execute_routine(task_desc: str, routine_name: str, cron_id: int,
 
     # Budget cap check (v0.21.0) — runs after lock acquisition so the check
     # is atomic w.r.t. concurrent fires on the same thread.
-    budget = db.get_routine_budget(cron_id) if cron_id else None
+    try:
+        budget = db.get_routine_budget(cron_id) if cron_id else None
+    except Exception as _budget_err:
+        _log.warning(f"routine #{cron_id}: budget lookup failed ({_budget_err}) — proceeding without cap")
+        budget = None
     if budget:
-        spent = db.get_routine_period_spend(cron_id, budget["period_sec"])
+        try:
+            spent = db.get_routine_period_spend(cron_id, budget["period_sec"])
+        except Exception as _spend_err:
+            _log.warning(f"routine #{cron_id}: spend query failed ({_spend_err}) — proceeding without cap")
+            spent = 0
         if spent >= budget["cap"]:
             _log.warning(
                 f"routine #{cron_id}: budget cap ${budget['cap']:.4f} reached "
@@ -1069,15 +1118,34 @@ def is_routine_firing(thread_id: str) -> bool:
     return bool(lock and lock.locked())
 
 
-def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
+# Tools that are stubbed during dry-run validation when routine_dry_run_mock=1.
+# These tools have real side effects (send messages, run commands, upload files)
+# that shouldn't fire during pre-save validation.
+_DRY_RUN_STUBBED_TOOLS = {"shell", "http_request", "send_file", "telegram_notify_owner"}
+
+
+def _dry_run_executor(name: str, args: dict) -> str:
+    """Wrapping executor that stubs dangerous tools during dry-run validation."""
+    if name in _DRY_RUN_STUBBED_TOOLS:
+        _log.info(f"dry-run stub: {name}({str(args)[:80]})")
+        return f"[DRY-RUN STUB] {name} would execute with args: {str(args)[:200]}"
+    import tools
+    return tools.execute(name, args)
+
+
+def _execute_task(task_desc: str, max_rounds: int = 10, tool_executor=None) -> str:
     """Run a task through the LLM.
 
     Args:
         task_desc: task description or special name (e.g. __heartbeat__).
         max_rounds: maximum tool call rounds (default 10, dry-run uses 5).
+        tool_executor: callable(name, args) -> str. Defaults to tools.execute.
     """
     import config
     import tools
+
+    if tool_executor is None:
+        tool_executor = tools.execute
 
     # Heartbeat tasks — special handling
     if task_desc == HEARTBEAT_TASK_NAME:
@@ -1175,7 +1243,7 @@ def _execute_task(task_desc: str, max_rounds: int = 10) -> str:
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     args = {}
-                result = tools.execute(tc.function.name, args)
+                result = tool_executor(tc.function.name, args)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
             rounds += 1
             continue

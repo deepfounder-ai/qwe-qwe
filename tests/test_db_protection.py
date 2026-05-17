@@ -189,3 +189,62 @@ def test_lifespan_calls_graceful_shutdown(qwe_temp_data_dir, monkeypatch):
             pass
     asyncio.run(_run())
     assert len(calls) >= 1, "graceful_shutdown was not called from lifespan shutdown"
+
+
+# ── FTS5 query escaping ─────────────────────────────────────────────────────
+
+class TestFtsEscape:
+    """Tests for db._fts_escape() — FTS5 special-char stripping."""
+
+    def test_normal_words(self):
+        from db import _fts_escape
+        assert _fts_escape("hello world") == '"hello" "world"'
+
+    def test_embedded_double_quotes(self):
+        from db import _fts_escape
+        result = _fts_escape('foo"bar')
+        assert '"' not in result.replace('"foobar"', "")  # quotes only as delimiters
+        assert result == '"foobar"'
+
+    def test_fts5_operators_stripped(self):
+        from db import _fts_escape
+        # NEAR, *, : are FTS5 operators — must be stripped from words
+        result = _fts_escape("col:value test*")
+        assert "*" not in result
+        assert ":" not in result
+        assert '"colvalue"' in result
+        assert '"test"' in result
+
+    def test_parentheses_stripped(self):
+        from db import _fts_escape
+        result = _fts_escape("(hello) {world}")
+        assert "(" not in result
+        assert ")" not in result
+        assert "{" not in result
+        assert "}" not in result
+        assert '"hello"' in result
+        assert '"world"' in result
+
+    def test_caret_stripped(self):
+        from db import _fts_escape
+        result = _fts_escape("^boost term")
+        assert "^" not in result
+        assert '"boost"' in result
+
+    def test_all_special_returns_empty_quoted(self):
+        from db import _fts_escape
+        # Input that becomes empty after stripping
+        result = _fts_escape('"*:^(){}')
+        assert result == '""'
+
+    def test_empty_input(self):
+        from db import _fts_escape
+        assert _fts_escape("") == '""'
+
+    def test_mixed_clean_and_dirty(self):
+        from db import _fts_escape
+        result = _fts_escape('normal "quoted" special*')
+        assert '"normal"' in result
+        assert '"quoted"' in result
+        assert '"special"' in result
+        assert "*" not in result

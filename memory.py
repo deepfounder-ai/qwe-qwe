@@ -210,8 +210,13 @@ def _get_sparse_model():
     return _sparse_model
 
 
+_sparse_fallback_count = 0
+_sparse_fallback_escalated = False
+
+
 def sparse_embed(text: str) -> SparseVector:
     """Generate SPLADE++ sparse vector via FastEmbed (learned sparse, not BM25 hash)."""
+    global _sparse_fallback_count, _sparse_fallback_escalated
     text = text.encode("utf-8", errors="replace").decode("utf-8")
     try:
         model = _get_sparse_model()
@@ -221,7 +226,14 @@ def sparse_embed(text: str) -> SparseVector:
             values=result.values.tolist(),
         )
     except Exception as e:
-        _log.warning(f"sparse embedding failed: {e}")
+        _sparse_fallback_count += 1
+        _log.warning(f"sparse embedding failed (count={_sparse_fallback_count}): {e}")
+        if _sparse_fallback_count >= 10 and not _sparse_fallback_escalated:
+            _sparse_fallback_escalated = True
+            _log.error(
+                "sparse embedding has failed %d times this session — search quality is degraded. "
+                "Check SPLADE model installation.", _sparse_fallback_count,
+            )
         return SparseVector(indices=[0], values=[1.0])
 
 
@@ -763,7 +775,7 @@ def _chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLA
         # Find best split point (sentence boundary near end)
         best = -1
         for sep in [". ", ".\n", "\n\n", "\n", "! ", "? ", "; "]:
-            idx = text.rfind(sep, start + size // 2, end)
+            idx = text.rfind(sep, start + size // 4, end)
             if idx > best:
                 best = idx + len(sep)
         if best <= start:
