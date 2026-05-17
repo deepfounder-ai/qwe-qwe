@@ -652,6 +652,24 @@ details.tool[open] > summary .tool-result { color: var(--fg-4); }
   color: var(--fg-5); font-variant-numeric: tabular-nums;
   margin-left: auto; padding-left: 8px;
 }
+/* Collapse beyond N tool rows per category — keeps long agent turns
+   (e.g. 20 browser_open + 30 shell calls) from drowning the chat.
+   First N rows always visible; rest hidden until "Show more" clicked. */
+.tool-overflow[data-collapsed="1"] .tool-overflow-rows { display: none; }
+.tool-overflow-toggle {
+  display: block;
+  margin: 4px 0 0 18px;
+  padding: 3px 8px;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--fg-3); background: transparent;
+  border: 1px dashed var(--line-2); border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.05em;
+}
+.tool-overflow-toggle:hover {
+  color: var(--fg-1); border-color: var(--fg-4);
+  background: var(--surface);
+}
 .codeblock {
   margin: 12px 0; border: 1px solid var(--line-2);
   border-radius: 8px; overflow: hidden; background: #0d0d0d;
@@ -4367,6 +4385,11 @@ function renderToolRow(t, idx) {
   '</details>';
 }
 
+// Beyond this many rows in a single tool-call group, the remainder is
+// collapsed behind a "Show N more" button so the chat doesn't drown in
+// repeated browser_open / shell call rows during long agent turns.
+const TOOL_GROUP_VISIBLE_LIMIT = 3;
+
 function renderTools(tools) {
   if (!tools || !tools.length) return '';
   const groups = new Map();
@@ -4387,7 +4410,8 @@ function renderTools(tools) {
   ].filter(Boolean);
   let html = '<div class="tools-hdr">' + headBits.join(' · ') + '</div>';
   for (const { cat, items } of groups.values()) {
-    // If only one category OR just one call — skip group wrapper for cleaner visual
+    // If only one category OR just one call — skip group wrapper for cleaner visual.
+    // (Items.length <= 2 here means no overflow to collapse anyway.)
     if (catCount === 1 && items.length <= 2) {
       html += items.map((t, i) => renderToolRow(t, i)).join('');
       continue;
@@ -4398,10 +4422,40 @@ function renderTools(tools) {
         '<span class="tool-group-label">' + cat.label + '</span>' +
         '<span class="tool-group-count">' + items.length + '</span>' +
       '</div>' +
-      items.map((t, i) => renderToolRow(t, i)).join('') +
+      _renderToolGroupItems(items) +
     '</div>';
   }
   return html;
+}
+
+// Render the rows inside a tool-call group. If beyond TOOL_GROUP_VISIBLE_LIMIT,
+// the remainder lives inside a collapsed wrapper with a toggle button.
+function _renderToolGroupItems(items) {
+  const limit = TOOL_GROUP_VISIBLE_LIMIT;
+  if (items.length <= limit) {
+    return items.map((t, i) => renderToolRow(t, i)).join('');
+  }
+  const visible = items.slice(0, limit).map((t, i) => renderToolRow(t, i)).join('');
+  const hidden = items.slice(limit).map((t, i) => renderToolRow(t, i + limit)).join('');
+  const remaining = items.length - limit;
+  // Status hint on the toggle so the user knows if errors are hiding below.
+  const hiddenErrCount = items.slice(limit).filter(x => x.status === 'err').length;
+  const hiddenRunningCount = items.slice(limit).filter(x => x.status === 'running').length;
+  const statusHint = [
+    hiddenErrCount ? hiddenErrCount + ' error' + (hiddenErrCount === 1 ? '' : 's') : '',
+    hiddenRunningCount ? hiddenRunningCount + ' running' : '',
+  ].filter(Boolean).join(', ');
+  const toggleLabel = 'Show ' + remaining + ' more' +
+    (statusHint ? ' (' + statusHint + ')' : '');
+  return visible +
+    '<div class="tool-overflow" data-collapsed="1">' +
+      '<button class="tool-overflow-toggle" data-act="tool-overflow-toggle" ' +
+        'data-collapsed-label="' + esc(toggleLabel) + '" ' +
+        'data-expanded-label="Show less">' +
+        esc(toggleLabel) +
+      '</button>' +
+      '<div class="tool-overflow-rows">' + hidden + '</div>' +
+    '</div>';
 }
 
 function renderMessage(m) {
@@ -9013,6 +9067,23 @@ function wireEvents() {
     };
   });
   document.querySelectorAll('[data-act="add-trait"]').forEach(b => { b.onclick = openAddTraitModal; });
+
+  // Tool-call overflow toggle — collapses/expands hidden rows in groups
+  // with more than TOOL_GROUP_VISIBLE_LIMIT calls. State lives on the
+  // parent .tool-overflow's data-collapsed attribute, so it survives
+  // partial re-renders within the same DOM node.
+  document.querySelectorAll('[data-act="tool-overflow-toggle"]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const wrap = btn.closest('.tool-overflow');
+      if (!wrap) return;
+      const isCollapsed = wrap.getAttribute('data-collapsed') === '1';
+      wrap.setAttribute('data-collapsed', isCollapsed ? '0' : '1');
+      btn.textContent = isCollapsed
+        ? (btn.dataset.expandedLabel || 'Show less')
+        : (btn.dataset.collapsedLabel || 'Show more');
+    };
+  });
 
   // Spicy easter-egg — need 7 clicks on the heart cluster in ≤6s
   document.querySelectorAll('[data-spicy-click]').forEach(h => {
