@@ -96,6 +96,23 @@ PRESETS = {
         "models": ["mistral-large-latest", "mistral-small-latest",
                    "codestral-latest", "ministral-8b-latest"],
     },
+    # ── Native Anthropic (v0.22+) — routed through providers_anthropic.py
+    #     when the SDK is installed + ANTHROPIC_API_KEY is set. Without the
+    #     SDK, ``get_client()`` transparently falls back to the OpenAI client,
+    #     which talks to the (mostly compatible) /v1 endpoint Anthropic also
+    #     exposes. URL is bare host — the SDK appends its own paths.
+    "anthropic": {
+        "name": "Anthropic",
+        "url": "https://api.anthropic.com",
+        "key": "",
+        "models": [
+            "claude-sonnet-4-5",
+            "claude-opus-4",
+            "claude-haiku-4",
+            "claude-sonnet-4-6",
+            "claude-opus-4-1",
+        ],
+    },
 }
 
 # Provider capabilities — not all support all features
@@ -115,6 +132,11 @@ CAPABILITIES = {
     # cache in agent.py will remember per-run if not.
     "cerebras":   {"supports_response_format": True},
     "mistral":    {"supports_response_format": True},
+    # Anthropic's native API doesn't expose OpenAI's ``response_format`` knob —
+    # the native adapter handles tool-use directly, callers asking for JSON
+    # just prompt for it. Keep this consistent whether we use the native
+    # client or fall back to the OpenAI-compatible path.
+    "anthropic":  {"supports_response_format": False},
 }
 
 
@@ -182,13 +204,76 @@ def get_key() -> str:
     return p.get("key") or config.LLM_API_KEY
 
 
-def get_client() -> OpenAI:
-    """Get or create an OpenAI client for the active provider."""
+def _wants_native_anthropic_for_openrouter() -> bool:
+    """Opt-in flag for routing OpenRouter Anthropic models through the native
+    adapter. Reads ``setting:anthropic_native_routing`` from kv. Defaults to
+    off — OpenRouter users keep the OpenAI-compatible path until they flip
+    the switch in Settings.
+    """
+    try:
+        return db.kv_get("setting:anthropic_native_routing") == "1"
+    except Exception:
+        return False
+
+
+def get_client():
+    """Get or create a client for the active provider.
+
+    Returns either an ``openai.OpenAI`` instance (for the 10 OpenAI-compatible
+    providers) or an :class:`providers_anthropic.AnthropicNativeClient`
+    (which duck-types ``OpenAI`` — same ``.chat.completions.create()`` surface).
+
+    Routes through the native Anthropic adapter when EITHER:
+      - the active provider is ``anthropic`` and a key is resolvable, OR
+      - the active provider is ``openrouter``, the user has explicitly opted
+        in via ``setting:anthropic_native_routing=1``, AND the active model
+        name starts with ``anthropic/`` (the OpenRouter naming convention).
+
+    Falls back to the OpenAI-compatible client if any of:
+      - the ``anthropic`` SDK is not installed
+      - no Anthropic API key is resolvable
+      - the routing conditions don't match
+    """
     global _client, _client_key
 
     url = get_url()
     key = get_key()
     cache_key = f"{url}|{key}"
+
+    name = (get_active_name() or "").lower()
+    want_native = False
+    if name == "anthropic":
+        want_native = True
+    elif name == "openrouter" and _wants_native_anthropic_for_openrouter():
+        # Only route when the model is an Anthropic one. OpenRouter hosts many
+        # non-Claude models; we mustn't shovel a Gemini request into Anthropic.
+        model = (get_model() or "").lower()
+        if model.startswith("anthropic/"):
+            want_native = True
+
+    if want_native:
+        try:
+            from providers_anthropic import _resolve_anthropic_key
+            ant_key = _resolve_anthropic_key()
+        except Exception as e:  # pragma: no cover — defensive
+            _log.warning(f"key resolution failed: {e}")
+            ant_key = None
+        if ant_key:
+            native_cache_key = f"anthropic-native|{ant_key}"
+            if _client is not None and _client_key == native_cache_key:
+                return _client
+            try:
+                from providers_anthropic import AnthropicNativeClient
+                _client = AnthropicNativeClient(api_key=ant_key)
+                _client_key = native_cache_key
+                _log.info(f"native Anthropic client created (provider={name})")
+                return _client
+            except (ImportError, RuntimeError) as e:
+                # SDK missing or constructor failed — log + fall through.
+                _log.warning(
+                    f"native Anthropic adapter unavailable: {e}; "
+                    "falling back to OpenAI-compatible client"
+                )
 
     if _client is not None and _client_key == cache_key:
         return _client
