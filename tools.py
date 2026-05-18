@@ -1275,6 +1275,18 @@ TOOLS = [
                             "would do the work better than raw browser_* calls."
                         ),
                     },
+                    "previous_attempt_feedback": {
+                        "type": "string",
+                        "description": (
+                            "Optional. When you're RE-DISPATCHING the same subtask after the "
+                            "prior subagent's result was inadequate, put your specific critique "
+                            "here (e.g. 'previous attempt found only 12 carriers and got "
+                            "rate-limited on FMCSA — avoid FMCSA, try OpenCorporates instead'). "
+                            "The new subagent sees this as a system directive BEFORE the prompt "
+                            "so it knows what to avoid. Also stored on the plan for audit. "
+                            "Use ONLY when re-dispatching, not on first attempt."
+                        ),
+                    },
                 },
                 "required": ["type", "prompt", "subtask_id"],
             },
@@ -1947,6 +1959,20 @@ def _dispatch_subagent_impl(args: dict) -> str:
                 f"FULL updated list of subtasks first (this replaces the plan)."
             )
 
+    # Optional rejection-reason feedback for this re-dispatch attempt.
+    # When the orchestrator looked at a prior subagent's result and
+    # decided it wasn't good enough, it passes ``previous_attempt_feedback``
+    # so the new subagent knows what to avoid. We:
+    #   1. Validate as a non-empty string
+    #   2. Cap at 4000 chars so it doesn't bloat the subagent prompt
+    #   3. Store on the plan (last_rejection_reason) for UI / audit
+    #   4. Pass through to subagent.run_subagent — it'll inject as a
+    #      second system message before the user prompt
+    feedback_raw = args.get("previous_attempt_feedback")
+    feedback: str | None = None
+    if isinstance(feedback_raw, str) and feedback_raw.strip():
+        feedback = feedback_raw.strip()[:4000]
+
     # Auto-bump attempts counter on the plan so the UI can show "attempt 3/N"
     # without the orchestrator having to remember to call subtask_update with
     # bump_attempts. Also stamp the subagent type so the plan tab visualises
@@ -1957,6 +1983,7 @@ def _dispatch_subagent_impl(args: dict) -> str:
             goal_id, subtask_id,
             dispatched_subagent=subagent_type,
             bump_attempts=True,
+            last_rejection_reason=feedback,
         )
     except Exception:
         # Plan may not exist yet (orchestrator dispatched before plan_set?)
@@ -1981,6 +2008,7 @@ def _dispatch_subagent_impl(args: dict) -> str:
         max_rounds=max_rounds,
         parent_ctx=parent_ctx,
         extra_tools=extra_tools,
+        previous_attempt_feedback=feedback,
     )
 
 

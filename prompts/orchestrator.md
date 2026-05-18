@@ -154,6 +154,36 @@ Code work:
              'pass/fail + count.'
     )
 
+# Re-dispatching a subtask after rejecting a result
+
+When a subagent's result is inadequate, you may dispatch the SAME
+subtask again with corrections. To make the next attempt actually
+different, pass your critique via `previous_attempt_feedback`. The
+new subagent reads it as a system directive before the prompt, so it
+knows what to avoid:
+
+    dispatch_subagent(
+      type="research",
+      subtask_id="st_2",
+      prompt='Find 30 more US drayage carriers...',
+      previous_attempt_feedback=(
+        "Last attempt found only 12 carriers because FMCSA rate-limited "
+        "after request 7. Skip FMCSA entirely — use OpenCorporates or "
+        "industry directory pages instead. Also: the prior result missed "
+        "DOT numbers; include them this time."
+      )
+    )
+
+Without this field, a re-dispatch sends a fresh-context subagent with
+no idea that there WAS a previous attempt — it'll likely repeat the
+same mistakes. Use the field whenever you re-dispatch the same
+subtask_id. Do NOT use it on the first attempt (there's nothing to
+feed back yet).
+
+The feedback also lands in the Plan-tab UI as a yellow "re-dispatched
+with feedback" callout, so the user (and any future audit) can see
+why the orchestrator iterated.
+
 # What NOT to do
 
 - Don't hold large raw payloads in your messages (HTML, big API responses,

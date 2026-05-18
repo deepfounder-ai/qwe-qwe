@@ -131,6 +131,7 @@ def run_subagent(
     max_rounds: int = 20,
     parent_ctx: TurnContext | None = None,
     extra_tools: list[str] | None = None,
+    previous_attempt_feedback: str | None = None,
 ) -> str:
     """Run one subagent to completion. Returns its result string.
 
@@ -140,6 +141,14 @@ def run_subagent(
 
     Truncates the final reply at MAX_RESULT_CHARS — the orchestrator's
     context budget shouldn't be eaten by one subagent's verbose output.
+
+    ``previous_attempt_feedback``: when the orchestrator re-dispatches the
+    same subtask after rejecting a prior result, it can pass this string
+    to tell the new subagent what went wrong. Injected as a second
+    ``{role:"system"}`` message right after the role prompt so the
+    subagent sees it as a directive, not as part of the user request.
+    Also persisted to ``plan.subtasks[i].last_rejection_reason`` for the
+    UI / timeline audit. Truncated at 4000 chars to keep prompt small.
     """
     if subagent_type not in SUBAGENT_TOOLS:
         return (
@@ -152,10 +161,23 @@ def run_subagent(
     system = _load_prompt(subagent_type)
     user_msg = _format_user_message(goal_id, prompt, shared_context)
 
-    messages = [
+    messages: list[dict] = [
         {"role": "system", "content": system},
-        {"role": "user", "content": user_msg},
     ]
+    # Inject orchestrator's rejection-reason feedback BEFORE the user
+    # request so the subagent reads it as a "what to avoid this time"
+    # directive at the top of context.
+    if previous_attempt_feedback and previous_attempt_feedback.strip():
+        feedback = previous_attempt_feedback.strip()[:4000]
+        messages.append({
+            "role": "system",
+            "content": (
+                "PREVIOUS ATTEMPT FEEDBACK from orchestrator:\n\n"
+                f"{feedback}\n\n"
+                "Take this into account. Do NOT repeat the issue above."
+            ),
+        })
+    messages.append({"role": "user", "content": user_msg})
     sub_tools = _get_subagent_tools(subagent_type, extra_tools=extra_tools)
 
     # Build a sub-TurnContext that:
@@ -176,6 +198,9 @@ def run_subagent(
         "type": subagent_type,
         "max_rounds": max_rounds,
         "prompt_preview": prompt[:200],
+        # Empty string means no feedback this attempt — kept on the event
+        # so timeline rendering can show "(with feedback)" vs "(fresh)".
+        "feedback_preview": (previous_attempt_feedback or "").strip()[:200] or None,
     })
 
     _log.info(

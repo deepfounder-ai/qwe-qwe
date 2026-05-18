@@ -7621,6 +7621,16 @@ function _renderDoneCondition(st) {
       'background:rgba(220,80,80,0.06);border-left:2px solid #dc5050;border-radius:0 4px 4px 0">' +
       '<span style="color:#dc5050;font-weight:500">Remediation:</span> ' + esc(failure) + '</div>';
   }
+  // Orchestrator's rejection feedback for the latest re-dispatch — shown
+  // as an amber callout so the user can see WHY the subagent was
+  // re-dispatched, separate from the validator's pass/fail state.
+  const rejection = st.last_rejection_reason || null;
+  if (rejection) {
+    block += '<div style="font-size:11px;color:var(--fg-2);margin-top:4px;padding:5px 7px;' +
+      'background:rgba(220,170,60,0.08);border-left:2px solid #d4a526;border-radius:0 4px 4px 0">' +
+      '<span style="color:#d4a526;font-weight:500">Re-dispatched with feedback:</span> ' +
+      esc(rejection) + '</div>';
+  }
   return block;
 }
 

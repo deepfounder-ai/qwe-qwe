@@ -1564,6 +1564,7 @@ def set_goal_plan(goal_id: str, subtasks: list[dict]) -> dict:
             "done_condition": done_condition,
             "validation_passed": False,
             "last_validation_failure": None,
+            "last_rejection_reason": None,
         })
     plan = {
         "version": 1,
@@ -1592,6 +1593,7 @@ def update_subtask(
     bump_attempts: bool = False,
     validation_passed: bool | None = None,
     last_validation_failure: str | None = None,
+    last_rejection_reason: str | None = None,
 ) -> dict | None:
     """Patch one subtask in the goal's plan. Returns the new plan or None.
 
@@ -1680,6 +1682,12 @@ def update_subtask(
             st["validation_passed"] = bool(validation_passed)
         if last_validation_failure is not None:
             st["last_validation_failure"] = (last_validation_failure or "")[:4000] or None
+        if last_rejection_reason is not None:
+            # Set by dispatch_subagent when orchestrator passes
+            # ``previous_attempt_feedback`` — surfaces in the Plan-tab UI so
+            # the user (and future audit) can see WHY the orchestrator
+            # re-dispatched. Empty string clears prior feedback.
+            st["last_rejection_reason"] = (last_rejection_reason or "")[:4000] or None
         break
     if not found:
         return None
