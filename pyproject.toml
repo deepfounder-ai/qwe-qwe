@@ -68,7 +68,7 @@ castor = "cli:main_entry"
 
 [tool.setuptools]
 packages = ["skills"]
-py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "commands", "config", "db", "discovery", "goal_runner", "goal_validators", "inference_setup", "logger", "mcp_client", "memory", "memory_store", "orchestrator", "presets", "pricing", "providers", "providers_anthropic", "providers_anthropic_convert", "providers_anthropic_stream", "rag", "scheduler", "server", "soul", "stt", "subagent", "synthesis", "tasks", "telegram_bot", "telemetry", "threads", "tools", "tts", "turn_context", "updater", "utils", "vault", "worker"]
+py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "commands", "config", "db", "discovery", "goal_runner", "goal_validators", "inference_setup", "logger", "mcp_client", "memory", "memory_store", "orchestrator", "plugin_registry", "presets", "pricing", "providers", "providers_anthropic", "providers_anthropic_convert", "providers_anthropic_stream", "rag", "scheduler", "server", "soul", "stt", "subagent", "synthesis", "tasks", "telegram_bot", "telemetry", "threads", "tools", "tts", "turn_context", "updater", "utils", "vault", "worker"]
 
 [tool.setuptools.package-data]
 "*" = ["static/**/*", "schemas/*.yaml", "migrations/*.sql", "migrations/*.md"]
