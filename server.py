@@ -3435,6 +3435,39 @@ async def knowledge_delete(request: Request):
     return result
 
 
+# ── Commands registry ──
+#
+# Central source of truth for slash commands across CLI / Telegram / Web
+# (see commands.py). The Web UI uses this to render /help and drive
+# slash-autocomplete.
+
+@app.get("/api/commands")
+async def list_commands(surface: str = "web"):
+    """List slash commands exposed on a given surface.
+
+    Query param ``surface`` is one of ``"cli"``, ``"tg"``, ``"web"``
+    (default: ``"web"``). Unknown values return an empty list, not an
+    error — keeps the autocomplete UX silent in misconfigured clients.
+
+    Each entry: ``{name, description, category, aliases, args_hint}``.
+    """
+    import commands as _cmd_registry
+    cmds = _cmd_registry.for_surface(surface)
+    return {
+        "surface": surface,
+        "commands": [
+            {
+                "name": c.name,
+                "description": c.description,
+                "category": c.category,
+                "aliases": list(c.aliases),
+                "args_hint": c.args_hint,
+            }
+            for c in cmds
+        ],
+    }
+
+
 # ── Skills endpoints ──
 
 @app.get("/api/skills")

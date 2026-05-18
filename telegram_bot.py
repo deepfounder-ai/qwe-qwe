@@ -481,56 +481,41 @@ def _api(method: str, token: str, **kwargs) -> dict:
         return {"ok": False, "description": str(e)}
 
 
-# ── Slash commands (dynamic registry) ──
+# ── Slash commands ──
+#
+# Command METADATA (name + description shown in the Telegram predictive
+# menu) lives in the central registry ``commands.py``. Handler dispatch
+# bodies still live below in ``_handle_bot_command`` — the registry is
+# metadata-only by design (Telegram, CLI, and Web each handle the same
+# command differently).
+#
+# To add a NEW command for Telegram: edit ``commands.py``'s
+# ``COMMAND_REGISTRY`` and include ``"tg"`` in its ``surfaces`` set.
+# Then add the handler branch to ``_handle_bot_command``.
 
-_command_registry: dict[str, dict] = {}  # cmd → {description, handler}
-
-
-def register_command(cmd: str, description: str, handler=None):
-    """Register a bot command. Called at module level or by skills/plugins.
-
-    Args:
-        cmd: command name without slash (e.g. "status")
-        description: shown in Telegram predictive input (max 256 chars)
-        handler: optional callable(args, chat_id, user_id, token, topic_id, thread_id) → str|None
-    """
-    _command_registry[cmd] = {"description": description[:256], "handler": handler}
+import commands as _commands_registry
 
 
 def get_commands() -> list[dict]:
-    """Get all registered commands for Telegram API."""
-    return [{"command": k, "description": v["description"]} for k, v in _command_registry.items()]
+    """Get all Telegram-exposed commands for the Telegram API.
+
+    Reads from the central registry filtered by ``surface="tg"``.
+    Output shape matches Telegram's setMyCommands payload exactly.
+    """
+    return [
+        {"command": c.name, "description": c.description[:256]}
+        for c in _commands_registry.for_surface("tg")
+    ]
 
 
 def _register_commands(token: str):
-    """Push registered commands to Telegram for predictive input."""
-    commands = get_commands()
-    result = _api("setMyCommands", token, commands=commands)
+    """Push the Telegram-exposed commands to BotFather for predictive input."""
+    cmds = get_commands()
+    result = _api("setMyCommands", token, commands=cmds)
     if result.get("ok"):
-        _log.info(f"registered {len(commands)} slash commands")
+        _log.info(f"registered {len(cmds)} slash commands from central registry")
     else:
         _log.warning(f"failed to register commands: {result}")
-
-
-# ── Built-in commands ──
-register_command("chatid", "Show chat ID and topic ID")
-register_command("status", "Agent status (model, provider, memory)")
-register_command("soul", "Show personality traits")
-register_command("model", "Show current model and provider")
-register_command("skills", "List active skills")
-register_command("memory", "Search agent memory")
-register_command("threads", "List conversation threads")
-register_command("stats", "Session statistics")
-register_command("clear", "Clear conversation in this thread")
-register_command("settings", "View/edit agent settings")
-register_command("cron", "List scheduled tasks")
-register_command("thinking", "Toggle thinking mode on/off")
-register_command("doctor", "Run diagnostics on all components")
-register_command("profile", "View/edit user profile")
-register_command("heartbeat", "Manage periodic tasks checklist")
-register_command("voice", "Toggle voice mode (TTS) for this chat")
-register_command("resume", "Resume the last interrupted task")
-register_command("help", "Show available commands")
 
 
 def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
@@ -817,25 +802,17 @@ def _handle_bot_command(cmd: str, args: str, chat_id: int, user_id: int,
         return True
 
     if cmd == "help":
+        # Pull /help content from the central registry filtered by surface=tg,
+        # grouped by category for readability.
         lines = ["📖 *Commands:*"]
-        for c, info in _command_registry.items():
-            lines.append(f"/{c} — {info['description']}")
+        by_cat = _commands_registry.categories_for("tg")
+        for category, cmds in by_cat.items():
+            lines.append(f"\n_{category}_")
+            for c in cmds:
+                hint = f" {c.args_hint}" if c.args_hint else ""
+                lines.append(f"/{c.name}{hint} — {c.description}")
         send_message(chat_id, "\n".join(lines), token, topic_id=topic_id)
         return True
-
-    # Check dynamic handlers (from skills/plugins)
-    if cmd in _command_registry and _command_registry[cmd].get("handler"):
-        try:
-            result = _command_registry[cmd]["handler"](
-                args, chat_id, user_id, token, topic_id, thread_id
-            )
-            if result:
-                send_message(chat_id, result, token, topic_id=topic_id)
-            return True
-        except Exception as e:
-            _log.error(f"command handler error /{cmd}: {e}")
-            send_message(chat_id, f"⚠️ Error: {str(e)[:200]}", token, topic_id=topic_id)
-            return True
 
     return False
 
