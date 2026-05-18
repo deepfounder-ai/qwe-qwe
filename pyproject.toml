@@ -57,13 +57,18 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "pytest-cov"]
 voice = ["faster-whisper>=1.0.0"]
+# Native Anthropic adapter — unlocks prompt caching (50-90% cost reduction
+# on cached input) and extended-thinking budgets for Sonnet 4.6+ / Opus 4.
+# Without this extra, Claude models still work via OpenRouter through the
+# OpenAI-compatible client — just without caching/thinking features.
+anthropic_native = ["anthropic>=0.50.0"]
 
 [project.scripts]
 castor = "cli:main_entry"
 
 [tool.setuptools]
 packages = ["skills"]
-py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "config", "db", "discovery", "goal_runner", "goal_validators", "inference_setup", "logger", "mcp_client", "memory", "memory_store", "orchestrator", "presets", "pricing", "providers", "rag", "scheduler", "server", "soul", "stt", "subagent", "synthesis", "tasks", "telegram_bot", "telemetry", "threads", "tools", "tts", "turn_context", "updater", "utils", "vault", "worker"]
+py-modules = ["cli", "agent", "agent_loop", "agent_events", "agent_budget", "config", "db", "discovery", "goal_runner", "goal_validators", "inference_setup", "logger", "mcp_client", "memory", "memory_store", "orchestrator", "presets", "pricing", "providers", "providers_anthropic", "providers_anthropic_convert", "providers_anthropic_stream", "rag", "scheduler", "server", "soul", "stt", "subagent", "synthesis", "tasks", "telegram_bot", "telemetry", "threads", "tools", "tts", "turn_context", "updater", "utils", "vault", "worker"]
 
 [tool.setuptools.package-data]
 "*" = ["static/**/*", "schemas/*.yaml", "migrations/*.sql", "migrations/*.md"]
