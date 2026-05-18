@@ -42,6 +42,7 @@ _thread_started = False
 _callbacks = []  # [(fn, args)] — called when task completes
 HEARTBEAT_TASK_NAME = "__heartbeat__"
 SYNTHESIS_TASK_NAME = "__synthesis__"
+SYNTHESIS_CONTINUOUS_TASK_NAME = "__synthesis_continuous__"
 
 
 def _ensure_table():
@@ -465,7 +466,7 @@ def remove_by_thread(thread_id: str) -> int:
     )
     removed = 0
     for rid, name in rows:
-        if name == HEARTBEAT_TASK_NAME or name == SYNTHESIS_TASK_NAME:
+        if name in (HEARTBEAT_TASK_NAME, SYNTHESIS_TASK_NAME, SYNTHESIS_CONTINUOUS_TASK_NAME):
             continue  # system tasks survive even if their thread vanishes
         db.execute("DELETE FROM scheduled_tasks WHERE id=?", (rid,))
         _log.info(f"routine #{rid} '{name}' removed: its thread {thread_id} was deleted")
@@ -564,13 +565,57 @@ def _register_synthesis():
     _log.info(f"synthesis registered: {schedule}")
 
 
+def _register_synthesis_continuous():
+    """Auto-register the continuous-trickle synthesis cron if enabled.
+
+    Fires every ``synthesis_continuous_interval_min`` minutes (default 15)
+    with a small batch (``synthesis_continuous_max_per_run``, default 5).
+    The nightly batch (``__synthesis__``) keeps running as a catch-up for
+    anything the trickle misses or backlogs.
+
+    Idempotent — re-registering at startup updates the schedule if the
+    interval changed, no duplicate row is created.
+    """
+    if not config.get("synthesis_enabled"):
+        return
+    if not config.get("synthesis_continuous_enabled"):
+        return
+    _ensure_table()
+    interval = max(1, int(config.get("synthesis_continuous_interval_min") or 15))
+    schedule = f"every {interval}m"
+    next_run = time.time() + interval * 60
+    _sys_cap = config.get("system_task_budget_usd")
+
+    row = db.fetchone(
+        "SELECT id, schedule FROM scheduled_tasks WHERE name=?",
+        (SYNTHESIS_CONTINUOUS_TASK_NAME,)
+    )
+    if row:
+        # Update schedule + next_run if interval setting changed; otherwise
+        # leave next_run alone so a running scheduler doesn't get reset.
+        if row[1] != schedule:
+            db.execute(
+                "UPDATE scheduled_tasks SET schedule=?, next_run=? WHERE id=?",
+                (schedule, next_run, row[0])
+            )
+            _log.info(f"continuous synthesis schedule updated: {schedule}")
+        return
+    db.execute(
+        "INSERT INTO scheduled_tasks (name, task, schedule, next_run, repeat, enabled, budget_usd_cap, budget_period_sec) "
+        "VALUES (?,?,?,?,1,1,?,86400)",
+        (SYNTHESIS_CONTINUOUS_TASK_NAME, SYNTHESIS_CONTINUOUS_TASK_NAME,
+         schedule, next_run, _sys_cap if _sys_cap else None)
+    )
+    _log.info(f"continuous synthesis registered: {schedule}")
+
+
 def _stamp_system_task_budgets():
     """One-time migration: stamp existing system tasks with budget caps."""
     if db.kv_get("_system_task_budgets_stamped"):
         return
     _sys_cap = config.get("system_task_budget_usd")
     if _sys_cap:
-        for name in (HEARTBEAT_TASK_NAME, SYNTHESIS_TASK_NAME):
+        for name in (HEARTBEAT_TASK_NAME, SYNTHESIS_TASK_NAME, SYNTHESIS_CONTINUOUS_TASK_NAME):
             db.execute(
                 "UPDATE scheduled_tasks SET budget_usd_cap=?, budget_period_sec=86400 "
                 "WHERE name=? AND budget_usd_cap IS NULL",
@@ -587,6 +632,7 @@ def start():
     _thread_started = True
     _register_heartbeat()
     _register_synthesis()
+    _register_synthesis_continuous()
     _stamp_system_task_budgets()
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
@@ -1155,6 +1201,12 @@ def _execute_task(task_desc: str, max_rounds: int = 10, tool_executor=None) -> s
     if task_desc == SYNTHESIS_TASK_NAME:
         import synthesis
         return synthesis.run_synthesis()
+
+    # Continuous synthesis trickle — small batch every N minutes so new
+    # memory becomes searchable promptly (was waiting until 03:00).
+    if task_desc == SYNTHESIS_CONTINUOUS_TASK_NAME:
+        import synthesis
+        return synthesis.run_continuous()
 
     # Simple reminders don't need LLM — just return a clean notification
     reminder_markers = ["remind", "напомни", "напоминание", "напомнить", "выпить", "drink", "stretch", "break"]

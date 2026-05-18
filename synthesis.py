@@ -44,15 +44,25 @@ Rules:
 """
 
 
-def run_synthesis() -> str:
-    """Main entry point. Process all pending synthesis items.
+def run_synthesis(max_items: int | None = None) -> str:
+    """Main entry point. Process pending synthesis items.
+
+    Two operating modes:
+      - Nightly batch (default): once-a-day at ``synthesis_time``, processes
+        up to ``synthesis_max_per_run`` items (default 50). Caller passes
+        ``max_items=None`` to use the config default.
+      - Continuous trickle (added 2026-05): scheduler fires every
+        ``synthesis_continuous_interval_min`` minutes (default 15) with
+        ``max_items=synthesis_continuous_max_per_run`` (default 5). New
+        memory entries become searchable within minutes, not 24 hours.
 
     Returns summary string of what was done.
     """
     if not config.get("synthesis_enabled"):
         return "Synthesis disabled"
 
-    max_items = config.get("synthesis_max_per_run")
+    if max_items is None:
+        max_items = config.get("synthesis_max_per_run")
     pending = memory.get_pending_synthesis(limit=max_items)
 
     if not pending:
@@ -77,6 +87,22 @@ def run_synthesis() -> str:
     summary = _append_log(results)
     _log.info(f"synthesis complete: {summary}")
     return summary
+
+
+def run_continuous() -> str:
+    """Continuous-mode trickle synthesis. Called by scheduler every
+    ``synthesis_continuous_interval_min`` minutes. Processes a SMALL batch
+    so new memory becomes searchable within minutes — without the latency
+    of waiting for the nightly 03:00 batch run.
+
+    Respects the same ``synthesis_enabled`` master switch as the night
+    batch. Returns "Continuous synthesis disabled" if explicitly turned
+    off via ``synthesis_continuous_enabled=0``.
+    """
+    if not config.get("synthesis_continuous_enabled"):
+        return "Continuous synthesis disabled"
+    max_items = config.get("synthesis_continuous_max_per_run")
+    return run_synthesis(max_items=max_items)
 
 
 def _process_group(client, model: str, group_name: str, chunks: list[dict]) -> str:
