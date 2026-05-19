@@ -56,7 +56,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "pytest-cov"]
-voice = ["faster-whisper>=1.0.0"]
+voice = ["faster-whisper>=1.2.1"]
 # Native Anthropic adapter — unlocks prompt caching (50-90% cost reduction
 # on cached input) and extended-thinking budgets for Sonnet 4.6+ / Opus 4.
 # Without this extra, Claude models still work via OpenRouter through the
