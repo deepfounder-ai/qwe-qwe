@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "castor"
-version = "0.22.1"
+version = "0.23.0"
 description = "Business-oriented AI agent — self-hosted, bring your own LLM"
 readme = "README.md"
 license = {text = "MIT"}

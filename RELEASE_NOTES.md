@@ -1,212 +1,106 @@
-## v0.22.1 — Migration reliability fix
+## v0.23.0 — Goal Runtime, Native Anthropic, Plugin Framework
 
-- **fix(db)**: SQLite migration runner now executes statements one-by-one instead of via `executescript()`. This makes `ALTER TABLE ADD COLUMN` migrations idempotent: if `scheduler._ensure_table()` or any other helper pre-creates a column before a migration runs, the "duplicate column name" error is silently skipped rather than aborting the entire migration. Eliminates a test-ordering flakiness introduced after the v0.20 / v0.21 merge.
-- Internal: `_iter_sql_statements()` strips `--` line comments *before* splitting on `;`, so in-comment semicolons (e.g. `-- doesn't rewrite rows; each …`) no longer produce spurious SQL fragments.
-- No schema changes, no API changes, no migration files modified.
+The biggest release since v0.18.7. Goals turn castor from a chat assistant into an autonomous agent that can work for hours on multi-step tasks — surviving disconnects, process restarts, and context-window pressure.
 
 ---
 
-## v0.22.0 — Auto-resume after interrupt
+### Goals — long-running autonomous tasks
 
-- Every abort (WS disconnect, Stop button, server crash) is now recoverable.
-- Web UI shows a banner on reconnect: "Previous turn was interrupted — Resume / Dismiss". The agent picks up from where it left off, not from scratch.
-- Telegram exposes `/resume` for the same flow in chat.
-- Routines auto-resume if the abort was within 5 minutes (configurable).
-- CLI Ctrl+C remains an intentional stop — no resume.
-- New per-source TTL settings in Settings → Cost → Auto-resume: Web (7 days), Telegram (24h), Routines (5 min).
-- Migration 009 adds `resumed_from_run_id` + `dismissed_at` to `agent_runs`.
-- Analytics chain resume runs back to their originals.
+Create a goal ("Research construction costs in Argentina and write a report"), walk away, come back to a completed deliverable. The system plans, delegates to specialized subagents, validates results, and retries on failure — all without user input.
 
----
+**Architecture**: Goal -> Plan -> Subagent dispatch. A separate `castor-worker` daemon claims goals from a durable SQLite queue. Full design doc in `docs/superpowers/plans/`.
 
-## v0.21.0 — Per-routine budget caps
+- **Worker daemon** (`python -m worker`) — claims goals via lease, heartbeats, survives crashes. Also runs inline (`--once` for tests, auto-start in web mode).
+- **Orchestrator** — breaks the goal into subtasks, dispatches subagents, tracks progress via structured facts.
+- **4 subagent types** — `research`, `browser`, `code`, `scraper` — each with a restricted tool whitelist (the security boundary). Fresh LLM context per subtask, 20-round cap.
+- **Acceptance gate** — after the orchestrator returns, validators check each subtask's `done_condition` (5 kinds: `files_exist`, `min_count`, `regex_in_file`, `shell_returns_zero`, `http_200`). Failures inject a remediation note and re-enter the orchestrator (up to 3 attempts).
+- **Structured deliverables** — files, links, reports attached via `goal_attach_output`. UI renders Download/Open/Save buttons.
+- **Per-goal browser sessions** — parallel goals get isolated browser contexts.
+- **Budget enforcement** — wall-clock seconds + USD caps, enforced at the runner level.
+- **Live UI** — Goals view with plan progress, events timeline, facts tab. Polling at 2s while running, 10s when idle.
 
-- Set a USD spending cap per routine, rolling over a configurable window.
-- When the cap is reached, the next scheduled fire is SKIPPED with
-  `status='skipped'`, `error='budget_exceeded'` in agent_runs — history
-  shows what happened. The routine resumes once spend drops below the cap.
-- UI: Routines page shows a budget chip per routine (green / orange /
-  red based on % of cap). Click to set/clear/edit cap + period.
-- API: `GET /api/routines/{id}/budget` and `POST /api/routines/{id}/budget`.
-- Migration 010 adds `budget_usd_cap` + `budget_period_sec` to
-  `scheduled_tasks`. Pre-existing routines have no cap (default).
+New migrations: `011_goals_subtasks_checkpoints.sql` through `014_goal_done_conditions.sql`.
 
 ---
 
-## v0.19.0 — Cost tracking & per-session analytics
+### Native Anthropic provider
 
-- New `agent_runs` table replaces `routine_runs`: one row per LLM call site
-  (main loop, synthesis, skill creator, routine fire) with full token + cost
-  capture.
-- Online pricing from the LiteLLM community JSON, cached locally, with a
-  bundled top-10 fallback for offline / air-gapped operation.
-- Sessions list now shows Tokens + Cost per thread; click a row for a
-  per-run drilldown with model, source, status, duration, tokens, and cost.
-- Routines page shows Cost (30d) so you can spot expensive scheduled jobs.
-- New Settings → Cost tracking section: pricing URL, auto-update toggle,
-  manual refresh button.
-- API: `GET /api/threads` extended with `input_tokens / output_tokens /
-  cost_usd / run_count`; new `GET /api/threads/{id}/runs`,
-  `GET /api/analytics/period`, `GET /api/pricing/status`,
-  `POST /api/pricing/refresh`.
-- Migration 008 atomically replaces legacy `routine_runs` with the new
-  `agent_runs` table.
+Direct Anthropic API support without the OpenAI compatibility shim. Three workstreams merged:
+
+- **Converters** — bidirectional message/tool format translation between OpenAI and Anthropic schemas.
+- **Stream reassembler** — handles Anthropic's SSE delta format (content_block_delta, tool_use blocks) and reassembles into the internal streaming shape.
+- **Client + routing** — `providers.py` auto-routes to the native adapter when the active provider is `anthropic`.
+
+88 new tests across the three workstreams.
 
 ---
 
-# v0.18.7 — Canvas (sandboxed HTML side panel) + Skill import (skills.sh / Anthropic SKILL.md spec)
+### Plugin framework (Hermes-inspired)
 
-Two big features land together because they're the same idea from opposite directions: **richer output → user** (Canvas), and **more capabilities ← community** (Skill import). Plus a Tools & skills tab rebuild so the growing skill list stays usable.
-
----
-
-## 🎨 Canvas — sandboxed HTML in a side panel
-
-The agent can now ship arbitrary HTML to a 480px right-side panel. Three concrete things this unlocks:
-
-### 1. Interactive forms — the agent asks back, structured
-
-```
-You:    Сделай форму записи нового клиента: ФИО, телефон, источник.
-Agent:  [canvas_prompt html="<form>…</form>" title="New client"]
-        → panel slides in on the right
-You:    *fills the form, hits Submit*
-Agent:  → receives {name:"...", phone:"...", source:"..."} as the tool result
-        [memory_save "Новый клиент: ..."]
-        Saved. Записал.
-```
-
-`canvas_prompt` **blocks** until the user submits, exactly like `camera_capture` blocks until a frame is grabbed. The agent gets the form data back as JSON in the same turn — no manual "type each field into chat" step.
-
-### 2. Dashboards & status views — pin them, come back next week
-
-```
-You:    Покажи дашборд по продажам за последнюю неделю.
-Agent:  [canvas_render html="<div style='…'>…<canvas id='chart'></canvas>…"]
-        → renders a styled HTML page with a Chart.js bar chart
-You:    Сохрани его как weekly-sales.
-Agent:  [canvas_save slug="weekly-sales"]
-        ✓
-```
-
-Saved artifacts show up in a new **Canvases** left-nav view (card grid alongside Memory / Scheduler / Presets). Click a card → panel reopens with the saved dashboard. Reload the chat → the message that opened it has a chip "📊 Canvas: weekly-sales" you can click to reopen.
-
-### 3. Mockups & prototypes — visual iteration in chat
-
-```
-You:    Накидай мокап лендинга для приложения «Поход в горы».
-Agent:  [canvas_render html="<header>…</header><section class='hero'>…"]
-        → panel renders the layout
-You:    Сделай hero на тёмном фоне и кнопку CTA крупнее.
-Agent:  [canvas_render …]
-        ✓
-```
-
-The agent iterates the HTML in chat, you see each version side-by-side with the conversation.
-
-### Security model — iframe sandbox is load-bearing
-
-`<iframe sandbox="allow-scripts allow-forms" srcdoc="...">`. Note what's **NOT** there:
-
-- ❌ `allow-same-origin` — iframe origin is `"null"`, no parent cookies / localStorage / DOM
-- ❌ `allow-top-navigation` — can't redirect the host page
-- ❌ `allow-popups` — no `window.open`
-
-The parent listens for `postMessage` from the iframe and filters by `event.source === iframe.contentWindow` (origin-string filtering is useless when the origin is `"null"`). The iframe CAN load public CDN scripts (Chart.js, D3) without cookies, documented as a privacy note in `docs/CANVAS.md`.
-
-256 KB HTML cap enforced at both skill-side and the REST `POST /api/canvas/artifacts` endpoint. Charts with inlined SVG fit comfortably; LLMs can't reliably emit more anyway.
-
-### Five tools, auto-active
-
-`tool_search("dashboard")` / `"form"` / `"mockup"` / `"chart"` / `"widget"` → activates the canvas tools without manual setup:
-
-- `canvas_render(html, title?, slug?)` — fire-and-forget, opens the panel
-- `canvas_prompt(html, title?, timeout_s=300)` — blocks until submit / close / timeout, returns user data as JSON
-- `canvas_save(slug, title?, html?)` — persist as artifact
-- `canvas_load(slug)` — reopen a saved artifact
-- `canvas_list(limit=20)` — markdown table of saved artifacts
-
-Full postMessage protocol, sandbox limits, and a reference HTML template live in `docs/CANVAS.md`.
+Extensible slot-based plugin system for hooking into agent lifecycle events. Plugins can observe/modify behavior at defined extension points without touching core code.
 
 ---
 
-## 📦 Skill import — install community skills from skills.sh / GitHub
+### Synthesis trickle mode
 
-Anthropic's [agentskills.io SKILL.md spec](https://agentskills.io/specification) — the same format Claude Code / Claude.ai use — now works in castor via a thin adapter layer. Browse [skills.sh](https://skills.sh) or any compatible GitHub repo, paste the URL into Settings → Tools & skills → **Import skill**, click Import.
-
-### Recognised URL shapes
-
-- `https://skills.sh/<owner>/<repo>/<skill-name>`
-- `https://github.com/<owner>/<repo>/tree/<ref>/<path-to-skill>`
-- `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path-to-skill>/SKILL.md`
-
-### How the bridge works
-
-skills.sh skills are **markdown instructions for an LLM** + optional executable scripts. castor skills are **single Python modules with `TOOLS` + `execute()`**. The importer generates a thin adapter `.py` at `~/.castor/skills/<name>.py` that exposes one tool — `<name>_help` — returning the full SKILL.md body. Scripts / references / assets land at `~/.castor/skills_imported/<name>/`. The agent reads them via the regular `read_file` / `shell` tools.
-
-Best for **knowledge-heavy procedures** (PDF manipulation patterns, document conversion recipes, etc.). Pure-code wrappers around a specific API are still better written natively via `create_skill`.
-
-### Safety surface — none of this is optional
-
-| Layer | What it does |
-|---|---|
-| **Domain allowlist** | Only `skills.sh` / `github.com` / `raw.githubusercontent.com` / `api.github.com`. Everything else → HTTP 403 `host_not_allowed`. |
-| **SSRF guard** | Private / loopback / link-local IPs blocked via `socket.getaddrinfo` + `ipaddress.ip_address`. Plus a custom `HTTPRedirectHandler` re-validates every redirect hop — a public-host fetch can't 302 into 127.0.0.1 or cloud metadata IPs. |
-| **Name validation** | `^[a-z0-9]+(-[a-z0-9]+)*$`, ≤64 chars (the agentskills.io regex). |
-| **Built-in collision** | `browser`, `canvas`, `skill_creator`, etc. **cannot be replaced** even with `overwrite: true`. Typosquatting defense. |
-| **License surfacing** | Word-anchored SPDX-ish regex + denylist of non-OSS riders (Commons Clause / BUSL / SSPL / Elastic / "Complete terms in LICENSE.txt"). Non-OSS licenses return HTTP **451 `license_confirm_required`** — the UI shows a confirmation panel with the license text before installing. |
-| **Size caps** | SKILL.md ≤100 KB, total fetch ≤1 MB, ≤50 files, binaries / images filtered out. |
-| **Atomic write** | Adapter writes to a tempfile, runs `skills.validate_skill` on it, **then** `os.replace` into final position. A broken renderer can never leave a half-written `.py` in `~/.castor/skills/`. |
-| **Sentinel-protected delete** | `delete_import` checks for the auto-generated sentinel before unlinking. If you replaced an imported skill's `.py` with hand-written code, your file survives. |
-| **Audit trail** | Every install recorded in the `skill_imports` table — source URL, SHA-256 hash, license, timestamp. Query via `GET /api/skills/imports`. |
-
-### REST round-trip
-
-```bash
-curl -X POST http://localhost:7861/api/skills/import \
-  -H 'Content-Type: application/json' \
-  -d '{"url": "https://skills.sh/anthropics/skills/pdf"}'
-```
-
-Returns HTTP 451 if the upstream license isn't OSS; re-POST with `"accept_license": true` to confirm.
-
-Full pattern doc + reference implementations: `docs/SKILLS_IMPORT.md`.
+Background knowledge curator runs continuously (not just overnight), extracting entities and wiki summaries from recent conversations. Keeps the knowledge graph fresh without waiting for the nightly synthesis run.
 
 ---
 
-## 🔍 Tools & skills tab — search + collapsible categories
+### Centralized command registry
 
-The Tools tab in Settings used to be a flat list. As the skill ecosystem grows (built-ins + user-created + imported), that flat list becomes unscannable. New layout:
-
-- **Search box** at the top — filters across tool name, description, and category
-- **Collapsible category headers** — Memory / Files / Web / Browser / Hardware / Skills / Meta. Expand only what you need.
-- **Import skill button** in the header — paste URL, install in one step.
-
-The user-created and imported skills appear in their own categories so you can tell where each tool came from at a glance.
+Slash commands (`/goal`, `/resume`, `/status`, etc.) now registered via a central registry instead of ad-hoc string matching. Easier to add new commands, consistent help output.
 
 ---
 
-## 🐛 Notable fixes
+### Skill export
 
-- **`fix(agent)` — tool_call argument normalization.** Some models (notably Qwen 3 variants) emit `tool_calls` with already-stringified-but-invalid JSON in `arguments` (single quotes, trailing commas). Replay through `_history_with_tool_calls` would crash with `JSONDecodeError` and break the turn. Now normalized to valid JSON before replay.
-
-- **`fix(canvas)` — cross-thread leak + tool confusion.** The model couldn't "read forms back" because `_pending_canvas_renders` was a module global keyed by request_id only — concurrent threads would step on each other. Now bucketed by thread_id.
-
-- **`fix(canvas)` — stale server message.** If you reload castor after upgrading the server, the JS knows about canvas tools but the server doesn't have the endpoint yet. We now show a clear "restart castor" toast instead of a confusing 404.
+Companion to skill import (v0.18.7) — export castor skills to the agentskills.io SKILL.md format for sharing via skills.sh or GitHub.
 
 ---
 
-## 📈 By the numbers
+### JSONL trajectory recording
 
-- **+725 tests passing** (was 545 at v0.18.6) — +180 new tests covering canvas + skill_import + their JS contracts
-- **109 tests in `test_skill_import.py`** alone — including a "live integration" path gated by `RUN_LIVE_TESTS=1` that fetches a real skills.sh skill
-- **Coverage floor unchanged** at 24% — actual 25.93%
-- **Two new SQLite migrations** — `006_canvas_artifacts.sql`, `007_skill_imports.sql`
-- **Two new pattern docs** — `docs/CANVAS.md`, `docs/SKILLS_IMPORT.md`
+Every agent run optionally records a full JSONL trajectory (messages, tool calls, results, timing) for offline analysis, evals, and debugging.
 
 ---
 
-## ⬆️ Upgrade
+### Persistent tool_search activations
+
+`tool_search` activations now persist per-thread across page reloads. Previously, extended tools unlocked via `tool_search("browser")` would disappear on refresh.
+
+---
+
+### DB corruption protection
+
+3-layer defense: rolling backups on startup, SHA-256 integrity check, graceful WAL checkpoint on shutdown. Recovers automatically from the most recent valid backup if corruption is detected.
+
+---
+
+### Notable fixes
+
+- **Orchestrator browser tool leak** — built-in browser skill tools (24) leaked into the orchestrator's tool set, causing the LLM to bypass `dispatch_subagent` and burn 80+ rounds driving a browser directly. Fixed via `_ORCHESTRATOR_EXCLUDED_TOOLS` blacklist.
+- **Goal plan validation** — error message listed wrong `done_condition` kinds; fuzzy matching now suggests corrections (`files_exists` -> `files_exist`); empty plans no longer pass the acceptance gate vacuously.
+- **UI scroll jumps** — clicking nav links with `href="#"` scrolled to top; `render()` only preserved scroll for chat view. Now all `.scroll-col` containers retain position across re-renders.
+- **Failed goals UI** — failed goals wouldn't open in detail view (`!gR.value.error` guard rejected them). Fixed to check `gR.value.id`.
+- **Streaming tool results** — reply event was wiping tool results accumulated during streaming. `allStrings` guard preserves them.
+- **Soul trait [object Object]** — built-in trait descriptions passed raw objects to `esc()`.
+- **Tool-call collapse** — chat UI collapses tool-call rows beyond N per category to reduce visual noise.
+- **16 audit hardening fixes** — security, robustness, and observability improvements.
+- **Auto-migrate from ~/.qwe-qwe/** — seamless data migration on project rename to Castor.
+
+---
+
+### By the numbers
+
+- **1354 tests passing** (was ~725 at v0.22.1), 24 skipped
+- **14 SQLite migrations** (was 10)
+- **Coverage floor** unchanged at 24%
+- **~60 commits** since v0.22.1
+
+---
+
+### Upgrade
 
 ```bash
 git pull
@@ -214,10 +108,7 @@ pip install -e . --upgrade
 python cli.py --web --ssl --port 7861
 ```
 
-Two new migrations apply automatically on first boot. No config changes needed. Telemetry consent unchanged (no new event types).
+Four new migrations apply automatically on first boot. No config changes required. Telemetry consent unchanged.
 
 ---
 
-## 🙏 Inspirations
-
-Canvas takes obvious inspiration from Claude.ai's Artifacts — but the sandboxed-iframe-only approach matters more here, since castor runs on your own machine and Anthropic doesn't sit between the LLM and your filesystem. Skill import works because Anthropic published the [agentskills.io spec](https://agentskills.io/specification) as a portable format — you can drop the same `SKILL.md` into Claude Code, Claude.ai, and castor and it works in all three. The [skills.sh](https://skills.sh) catalog made discovery trivial.
