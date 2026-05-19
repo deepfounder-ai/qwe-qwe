@@ -36,8 +36,12 @@ castor --web --doctor                       # If installed as package; doctor ru
 python -m worker                             # Goal worker daemon (long-running tasks)
 python -m worker --once                      # Claim one goal, run it, exit (for tests)
 
+# Optional: native Anthropic SDK (prompt caching + thinking budgets)
+pip install 'castor[anthropic_native]'       # Activates providers_anthropic.AnthropicNativeClient
+                                              # when provider=anthropic + ANTHROPIC_API_KEY set
+
 # Tests
-pytest tests/                                # All tests (~1140 currently)
+pytest tests/                                # All tests (~1337 currently)
 pytest tests/test_integration.py -v          # Integration tests (TestClient + mocked LLM)
 pytest tests/test_turn_context.py -v         # Per-request state isolation
 pytest tests/test_telemetry.py -v            # Privacy contract + consent gates (74 tests)
@@ -99,6 +103,8 @@ When adding new per-turn state: put it on TurnContext, not as a module global.
 
 **Core tools** (29 always-loaded — check with `grep -c '"name":' tools.py`): memory_save, memory_search, memory_delete, read_file, write_file, shell, http_request, spawn_task, tool_search, send_file, camera_capture, open_url, self_config + 6 browser quickstart tools + 10 meta-tools. `tool_search("keyword")` unlocks extended tools (notes, schedule, secret, mcp, profile, rag, skill, soul, timer + 17 more browser tools).
 
+**`tool_search` activations persist per-thread** (v0.23.x): once a tool is activated within a thread via `tool_search` (or by `tool_search`-equivalent slash command), it stays active across subsequent turns. Storage: kv key `thread_active_tools_<tid>` (JSON array). `_load_active_tools_for_thread(tid)` runs at the top of every `agent.run` to restore the set; `_do_tool_search` persists new additions immediately. The legacy `_reset_active_tools()` is a compat-shim that now LOADS instead of CLEARING — explicit wipe via `_reset_active_tools_for_thread(tid)`. The win: tools array sent to the LLM stays stable across turns, prerequisite for Anthropic prompt-cache hits (tools list is part of the cached prefix).
+
 **Shell safety** (`_check_shell_safety`): speed-bump against obvious bypasses (sudo, rm -rf /, eval $(...), $(curl ...) | sh, Cyrillic lookalikes, hex-encoded rm). **NOT a trust boundary** — agent runs with full user privileges. For real isolation, run in a container. Tests live in `tests/test_shell_safety.py`.
 
 **Path resolution** (`_resolve_path`): Git Bash `/c/Users/...` → Windows `C:/Users/...`. Write whitelist: `~/.castor/workspace/`, `~/.castor/`, cwd.
@@ -136,7 +142,7 @@ When adding new per-turn state: put it on TurnContext, not as a module global.
 - `011_goals_subtasks_checkpoints.sql` — durable goal queue, subtask plan, orchestrator checkpoints + event log.
 - `012_goal_facts.sql` — per-goal structured fact store (key/value scoped by goal_id).
 - `013_goal_outputs.sql` — per-goal deliverables (file/link/report).
-- `014_goal_done_conditions.sql` — per-subtask acceptance criteria (files_exist / min_count / regex_in_file / shell_returns_zero / http_200).
+- `014_goal_done_conditions.sql` — **goal-level** acceptance criteria column (`goals.done_conditions TEXT` as JSON array). Per-subtask criteria live inside the existing `goals.plan` JSON column (no separate migration). Both validated by the 5 kinds in `goal_validators.py`: files_exist / min_count / regex_in_file / shell_returns_zero / http_200.
 - `migrations/README.md` — convention: `NNN_snake_case.sql`, transaction-per-file.
 
 `db._apply_migrations()` runs on first connection. Back-compat: if `schema_version` missing AND `messages` table exists, stamp at 1 without re-running baseline. Add a new migration by dropping a file — no code change needed.
@@ -157,6 +163,8 @@ Key soul.py rules:
 ### Providers (`providers.py`)
 
 OpenAI-compatible client for 10 providers (lmstudio, ollama, openai, openrouter, groq, together, deepseek + perplexity / cerebras / mistral added in v0.17.33). `list_all()` pings local providers in parallel (1s timeout, 30s cache). `detect_context_length()` probes LM Studio `/api/v0/models` or Ollama `/api/show` to discover the real context window (displayed in the Web UI Context Window gauge — denominator is `context_budget`, shown alongside the detected model_context).
+
+**Native Anthropic adapter (v0.23.x)** — when provider=`anthropic` + `ANTHROPIC_API_KEY` set, `get_client()` returns `AnthropicNativeClient` (in `providers_anthropic.py`) instead of the OpenAI-compatible wrapper. Unlocks **prompt caching** (50-90% cost reduction on cached prefixes) and **thinking budgets** for Sonnet 4.6+ / Opus 4. Modules: `providers_anthropic_convert.py` (request/response translation), `providers_anthropic_stream.py` (SSE → OpenAI-shape duck-typed chunks via `@dataclass`-based `_Chunk` / `_Choice` / `_Delta`), `providers_anthropic.py` (client + routing). Adapter is fully duck-typed against `OpenAI().chat.completions.create()`, so `agent_loop` never sees the difference. Falls back to OpenAI-compatible client when `anthropic` SDK absent or key missing. Optional via `pip install 'castor[anthropic_native]'` extra. End-to-end opt-in for OpenRouter Anthropic models via `setting:anthropic_native_routing=1`.
 
 ### Skill Creator (`skills/skill_creator.py`)
 
@@ -267,6 +275,20 @@ Per-routine USD spending caps over a configurable rolling window. Migration `010
 
 **`spawn_task` still exists** as fire-and-forget short-task tool (<5 min, in-memory). `goal_create` / `dispatch_subagent` are the durable alternatives for hours-long work.
 
+### Acceptance gate — anti-capitulation defense (v0.22.1+, migration 014)
+
+Three-layer protection against the orchestrator marking a goal "done" without producing the deliverable the user asked for. Inspired by Anthropic's Stop-hook pattern (`{decision: block, reason: <remediation>}`):
+
+- **Subtask-level (in `db.update_subtask`)**: when LLM calls `subtask_update("st_N", "completed")`, the subtask's stored `done_condition` runs through `goal_validators.run_validator`. Fail → status held (NOT advanced to completed), `attempts++`, `last_validation_failure=<remediation>`. Tool wrapper surfaces `"Subtask X NOT marked complete: validator failed. Remediation: ..."` to the LLM as the tool result so it knows what to fix.
+- **Goal-level (`goals.done_conditions` JSON column, migration `014_goal_done_conditions.sql`)**: 0..N criteria attached to the goal itself, run by `goal_runner` AFTER all subtask validations pass, BEFORE `mark_goal_done`. Set via `POST /api/goals` `done_conditions: [...]` or `POST /api/goals/{id}/done-conditions`.
+- **Plan-required guard**: orchestrator returning with no subtasks AND no goal-level conditions → `mark_goal_failed("no_plan_created")` after `MAX_GATE_ATTEMPTS=3`. Prevents the orchestrator from short-circuiting the entire plan with a one-shot summary.
+
+`goal_validators.py` ships 5 kinds: `files_exist`, `min_count`, `regex_in_file`, `shell_returns_zero`, `http_200`. Each returns `(passed: bool, remediation: str)` and NEVER raises. `goal_runner` retry loop: failures → build a remediation `system_note` + re-enter orchestrator. After 3 attempts of full goal-level retry: `mark_goal_failed("acceptance_gate_exhausted: N subtask + M goal-level condition(s) still failing")`. Configurable via `acceptance_gate_max_attempts`.
+
+**Auto-attach workspace outputs** (`db.auto_attach_workspace_outputs`) — runtime safety net on goal finalize. Scans `~/.castor/workspace/` for files with `mtime > started_at`, attaches each as `kind=file` goal_output. Blacklists `browser_sessions/`, `memory/`, `kb/`, `module_data/`, hidden files, `.pyc/.log/.tmp/.bak/.swp`, files >10MB. Dedups vs orchestrator's explicit `goal_attach_output` calls. Runs in `goal_runner.run`'s `finally` block — fires on EVERY terminal path (done / failed / paused / cancelled) so partial progress is always visible in the UI even when the orchestrator capitulated mid-goal.
+
+**Subagent rejection-reason feedback (Variant A, v0.23.x)** — `dispatch_subagent` accepts `previous_attempt_feedback: str` when re-dispatching the same subtask after rejecting a prior result. Stored on plan as `last_rejection_reason` for UI/audit (rendered as amber callout in the Plan tab, distinct from the red validator-remediation box). Injected as a 2nd `{role:"system"}` message right after the role prompt, BEFORE the user prompt, so the subagent reads it as a "what to avoid this time" directive. Empty/whitespace → treated as None. Capped at 4000 chars before storage AND before prompt injection.
+
 ### Skill loader (`skills/__init__.py`)
 
 **Integrity verification** (v0.22.1): user skills at `~/.castor/skills/` are SHA-256 hashed on first load (manifest stored in `skill_hashes.json`). Subsequent loads verify the hash — mismatch → `ImportError` + log.warning. Built-in skills (under `skills/` in repo) are exempt.
@@ -297,6 +319,54 @@ Persistence: `skill_imports` SQLite table (migration `007`) records `name` PK, s
 REST: `POST /api/skills/import` (declared BEFORE `POST /api/skills/{name}` to avoid the catch-all swallowing `import` as a skill name — same FastAPI ordering gotcha as `/api/presets/onboarding`), `GET /api/skills/imports`, `DELETE /api/skills/imports/{name}`.
 
 Tests in `tests/test_skill_import.py` (33 tests) mock HTTP via `monkeypatch.setattr(si, "_fetch_url", ...)`. Full doc at `docs/SKILLS_IMPORT.md`.
+
+### Skill export to agentskills.io format (`skills/skill_export.py`)
+
+Companion to `skill_import.py` — exports a Castor `.py` skill into the agentskills.io v1 bundle: `<slug>/SKILL.md` (YAML frontmatter + markdown body) + `scripts/<slug>.py` (source preserved verbatim) + optional `references/CASTOR_TOOLS.md` (rendered TOOLS schema reference). AST-based metadata extraction NEVER imports/executes the source (canary test guards top-level side effects). One-step `export_skill_to_zip()` for "Download SKILL.zip" UI. Name slugified `my_skill` → `my-skill` to match agentskills.io regex.
+
+### Commands registry (`commands.py`)
+
+Single source of truth for slash commands across CLI / Telegram / Web. Each entry: `CommandDef(name, description, category, surfaces: frozenset[str], aliases, args_hint)`. Helpers: `by_name(token)` (strips leading `/`, case-insensitive), `resolve(token)` (handles aliases, takes first word only), `for_surface("tg"|"cli"|"web")`, `categories_for(surface)` (grouped for /help rendering).
+
+Consumers derive from it automatically:
+- `telegram_bot.get_commands()` reads `for_surface("tg")` and pushes to BotFather's `setMyCommands`
+- `telegram_bot._handle_bot_command` `/help` renders `categories_for("tg")` grouped
+- `GET /api/commands?surface=web|cli|tg` exposes the list as JSON for future Web autocomplete
+- CLI's `if user_input.startswith("/X")` chain stays surface-specific (handlers differ per surface) but can validate against `by_name`
+
+Adding a new command: append a `CommandDef` literal + handler branch in each surface's dispatcher. Tests pin shape (no leading-slash in name, unique names, ≤256-char descriptions for Telegram limit, aliases don't collide).
+
+### Plugin slot framework (`plugin_registry.py`)
+
+Entry-point-based plugin discovery via Python's standard `importlib.metadata.entry_points`. Slots declared in `KNOWN_SLOTS`:
+- `SLOT_MEMORY_BACKEND` — alternatives to in-tree Qdrant (e.g. Honcho, mem0, supermemory)
+- `SLOT_CONTEXT_ENGINE` — alternative context-compression strategies
+- `SLOT_MODEL_PROVIDER` — alternative LLM backends beyond the OpenAI-compatible / native-Anthropic pair
+- `SLOT_OBSERVABILITY` — metrics / traces / logs sinks
+
+Plugins register in their `pyproject.toml`:
+```toml
+[project.entry-points."castor.memory_backend"]
+honcho = "castor_honcho:Plugin"
+```
+
+Lookup: `plugin_registry.find(slot, name) -> value` / `.list_all(slot) -> [names]`. Lazy discovery, per-slot cache (`clear_cache(slot)` forces rescan). Defensive: broken plugin (ImportError, missing attribute) is logged at WARNING and skipped — never kills the whole slot. Test injection via `_override_for_test(slot, {name: value})` so unit tests don't need a real plugin package installed.
+
+In-tree modules (`memory.py`, `providers.py`, etc.) remain the default for each slot. Migrating an in-tree module to use the registry pattern is a per-slot decision in a future PR — the framework is ready, but no slot is forced into it yet.
+
+### Trajectory recording (`trajectory.py`)
+
+Opt-in JSONL output per agent run at `~/.castor/trajectories/<run_id>.jsonl` — for audit, debug, and future training data. Each event = one JSON line: `run_start`, `tool_start`, `tool_end`, `content`, `thinking`, `turn_end`, `run_end`. JSONL (not JSON) so partial files from crashes stay readable up to last `\n`, and replay tools can stream-process.
+
+Public API: `trajectory.start(source, model=..., thread_id=...) -> TrajectoryRecorder | None`. Context-manager form `with trajectory.recording(source, ...) as rec:` auto-finalises on exit (writes `run_end` even on exception, captures error class+message). Returns a `_NullRecorder` no-op stub when disabled so callers don't need `if rec is not None` guards. `attach_to_emitter(emitter, recorder)` bridges an existing `agent_events.EventEmitter`.
+
+Inspection: `trajectory.load_run(run_id)` (skips malformed lines), `list_runs(limit=50)` (newest first), `prune_old(days)` for auto-cleanup. Settings: `trajectory_enabled` (default 0 = opt-in), `trajectory_keep_days` (default 30). All write paths swallow OSError / JSONEncodeError — broken file never crashes the calling agent.
+
+### Continuous synthesis trickle (`synthesis.py`)
+
+In addition to the once-a-day-at-03:00 batch (`__synthesis__`), scheduler also fires `__synthesis_continuous__` every `synthesis_continuous_interval_min` minutes (default 15) with a small batch of `synthesis_continuous_max_per_run` items (default 5). New memory becomes searchable within minutes instead of waiting until the next 03:00 run. The nightly batch keeps running as catch-up for anything the trickle missed.
+
+Settings: `synthesis_continuous_enabled` (default 1, on; disable doesn't affect nightly), `synthesis_continuous_interval_min`, `synthesis_continuous_max_per_run`. Wrapper `synthesis.run_continuous()` respects its own enable flag separately from the master `synthesis_enabled`. Registration via `scheduler._register_synthesis_continuous()` is idempotent: re-running at startup updates the schedule when the interval setting changes.
 
 ### Canvas skill (`skills/canvas.py`) — sandboxed HTML side panel
 
@@ -381,7 +451,7 @@ Render pattern: every state change rebuilds innerHTML. Event handlers attached v
 
 ## Tests (`tests/`)
 
-All ~1140 tests run in a single pytest process (v0.17.24 — no more sys.modules pollution). Do NOT add `sys.modules[...] = mock_X` at module scope — use `monkeypatch` fixtures (see `tests/conftest.py` for `qwe_temp_data_dir`, `mock_llm`).
+All ~1337 tests run in a single pytest process (v0.17.24 — no more sys.modules pollution). Do NOT add `sys.modules[...] = mock_X` at module scope — use `monkeypatch` fixtures (see `tests/conftest.py` for `qwe_temp_data_dir`, `mock_llm`).
 
 Notable files:
 - `test_integration.py` — TestClient + mocked LLM end-to-end (added to catch v0.17.23-style lazy-import SyntaxErrors)
@@ -406,6 +476,17 @@ Notable files:
 - `test_path_safety.py` — symlink resolution + write whitelist enforcement
 - `test_skill_loading.py` — skill integrity hash verification + namespace collision detection
 - `test_loop_detection.py` — multi-period (1/2/3) loop detection helper
+- `test_anthropic_convert.py` + `test_anthropic_stream.py` + `test_anthropic_client.py` — native Anthropic adapter (88 tests: 34 converter + 41 stream + 13 client/routing)
+- `test_tool_search_persistence.py` — per-thread tool activations survive turn boundary (12 tests)
+- `test_commands_registry.py` — slash-command single-source-of-truth (26 tests)
+- `test_synthesis_continuous.py` — trickle synthesis scheduler + dispatch (14 tests)
+- `test_skill_export.py` — agentskills.io export bundle + zip (33 tests)
+- `test_plugin_registry.py` — entry-point-based plugin discovery (17 tests)
+- `test_trajectory.py` — opt-in JSONL recording for agent runs (24 tests)
+- `test_subagent_feedback.py` — `previous_attempt_feedback` channel from orchestrator → subagent (13 tests)
+- `test_browser_subagent_propagation.py` — ctx propagation pin for per-goal session routing (5 tests)
+- `test_browser_per_goal_sessions.py` — `BrowserSession` registry isolation
+- `test_goal_auto_attach.py` — workspace-diff auto-attach of files written during a goal (13 tests)
 - `conftest.py` — shared fixtures; `scope="session"` TestClient lives here
 
 **JS contract tests live in pytest.** Two exist so far: `test_api_helper_disables_http_cache` (pins `cache:'no-store'`) and `test_reload_path_runs_meta_files_through_splitfiles` (pins live/reload symmetry). Pattern: `Path(...).read_text()` on `static/index.html`, locate a stable anchor string, assert the contract holds in a window after it. Cheap regression guards for JS-side bugs that pytest would otherwise miss entirely.
@@ -457,3 +538,8 @@ Hardening-related settings (v0.22.1): `routine_dry_run_mock` (int, default 1 —
 9. **Skills are gitignored except whitelisted.** When working on built-in skills (`skills/skill_creator.py` etc.), `.gitignore` entry `skills/` excludes them by default; whitelist (`!skills/skill_creator.py`) keeps the built-ins tracked. Side effect: `ruff check .` skips skills/ via gitignore — for those files run `ruff check skills/` explicitly.
 10. **New subagent type?** Add to `subagent.SUBAGENT_TOOLS` with a restricted tool whitelist. Add a matching system prompt in `prompts/subagent_<type>.md`. The whitelist is the security boundary — every extra tool is a chance for the LLM to wander off.
 11. **Before commit**: `ruff check .`, `python scripts/check_js.py` (if you touched `static/index.html`), `pytest tests/`.
+12. **New top-level slash command?** Edit `commands.py::COMMAND_REGISTRY` with a `CommandDef`, set `surfaces=frozenset({...})` for the surfaces you support, then add the handler branch in each surface's dispatcher: `cli.py` for CLI, `telegram_bot._handle_bot_command` for Telegram, the send-side intercept in `static/index.html` for Web. Telegram's BotFather menu auto-updates from the registry on next `_register_commands` call.
+13. **New plugin slot?** Edit `plugin_registry.py::KNOWN_SLOTS` + add a `SLOT_<NAME>` constant. Document the entry-point group name as `castor.<slot>` and what the loaded value's interface should look like (class? factory? module?). Don't force-migrate existing in-tree modules; the framework is for new third-party additions.
+14. **New goal validator kind?** Edit `goal_validators.py::_KINDS`, write `_run_<kind>(spec) -> (bool, remediation_str)`, extend `validate_criterion` with the shape check (required spec fields, types). Update `docs/specs/2026-05-16-acceptance-gate.md`. Tests: ≥4 cases per kind (pass / fail / missing field / type error). Validators MUST never raise — wrap everything in try/except and convert to `(False, "<diagnostic>")`.
+15. **New trajectory event type?** Just call `recorder.event(custom_type, payload)` — the format is open-ended. If it deserves a typed convenience method, add to `TrajectoryRecorder` next to `tool_start` / `tool_end`.
+16. **Want native Anthropic features (caching, thinking budgets)?** Use `pip install 'castor[anthropic_native]'` + set `ANTHROPIC_API_KEY` + switch provider to `anthropic`. To opt OpenRouter Anthropic models into the native adapter: `setting:anthropic_native_routing=1`.
