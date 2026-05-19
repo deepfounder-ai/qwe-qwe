@@ -20,6 +20,7 @@ resolution for the workspace root so it honors `CASTOR_DATA_DIR`.
 
 from __future__ import annotations
 
+import difflib
 import glob as _glob
 import os
 import re
@@ -83,8 +84,12 @@ def validate_criterion(criterion: dict) -> None:
 
     kind = criterion.get("kind")
     if kind not in _KINDS:
+        suggestion = ""
+        close = difflib.get_close_matches(kind or "", list(_KINDS), n=1, cutoff=0.6)
+        if close:
+            suggestion = f" Did you mean {close[0]!r}?"
         raise ValueError(
-            f"criterion.kind must be one of {list(_KINDS)}, got {kind!r}"
+            f"criterion.kind must be one of {list(_KINDS)}, got {kind!r}.{suggestion}"
         )
 
     spec = criterion.get("spec")

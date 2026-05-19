@@ -17,6 +17,26 @@ def _install_shim():
 
         def _fake_run_orchestrator(goal_id, ctx, system_notes=None):
             sys.stderr.write("[shim] fake_run_orchestrator fired for " + str(goal_id) + "\n")
+
+            # Create a minimal plan so the empty-plan guard doesn't reject
+            # the goal. Real orchestrators always call goal_plan_set before
+            # returning — the shim must do the same.
+            import db as _db
+            try:
+                if not (_db.get_goal_plan(goal_id) or {}).get("subtasks"):
+                    _db.set_goal_plan(goal_id, [{
+                        "title": "Execute task",
+                        "description": "Shim-generated subtask",
+                        "done_condition": {
+                            "kind": "shell_returns_zero",
+                            "spec": {"cmd": "true"},
+                        },
+                    }])
+                    _db.update_subtask(goal_id, "st_1", status="completed",
+                                       result_summary="shim done")
+            except Exception as plan_err:
+                sys.stderr.write("[shim] plan setup: " + repr(plan_err) + "\n")
+
             # Fire the checkpoint callback over a few rounds so checkpoints land.
             if ctx is not None and ctx.on_round_complete is not None:
                 for r in range(1, 7):

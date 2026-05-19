@@ -184,11 +184,12 @@ def test_ws_document_written_to_uploads_and_referenced_in_user_input(
     assert fm["size"] == len(body)
 
     # The referenced path actually exists and contains the original bytes
-    path = Path(fm["path"])
+    path = Path(fm["path"]).resolve()
     assert path.exists(), f"upload file not written at {path}"
     assert path.read_bytes() == body
-    # And it lives inside UPLOADS_DIR (not somewhere the filename coerced it to)
-    assert server.UPLOADS_DIR in path.parents
+    # And it lives inside UPLOADS_DIR (not somewhere the filename coerced it to).
+    # resolve() both sides so macOS /var → /private/var symlink doesn't trip the check.
+    assert server.UPLOADS_DIR.resolve() in path.parents
 
 
 def test_ws_document_filename_sanitized_against_path_traversal(
@@ -212,10 +213,11 @@ def test_ws_document_filename_sanitized_against_path_traversal(
     call = captured_agent_call[0]
     fm = call["file_meta"]
     assert fm is not None
-    path = Path(fm["path"])
-    # The resolved path must still be inside UPLOADS_DIR
-    assert server.UPLOADS_DIR in path.parents, (
-        f"sanitizer failed — upload landed at {path}, outside {server.UPLOADS_DIR}"
+    path = Path(fm["path"]).resolve()
+    # The resolved path must still be inside UPLOADS_DIR.
+    # resolve() both sides so macOS /var → /private/var symlink doesn't trip the check.
+    assert server.UPLOADS_DIR.resolve() in path.parents, (
+        f"sanitizer failed — upload landed at {path}, outside {server.UPLOADS_DIR.resolve()}"
     )
     # And no ``..`` or slash survived in the on-disk stem
     assert ".." not in path.name

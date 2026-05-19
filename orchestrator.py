@@ -70,6 +70,22 @@ _ORCHESTRATOR_TOOL_NAMES: set[str] = {
     "dispatch_subagent",
 }
 
+# Browser tools MUST go through dispatch_subagent(type="browser").
+# Without this exclusion, the Layer 2/3 filter in _get_orchestrator_tools()
+# mistakes built-in browser skill tools for user skills and auto-includes
+# them — letting the LLM bypass dispatch and burn 80+ rounds trying to
+# drive a browser directly (observed: goal g_f50013dc5e19481b).
+_ORCHESTRATOR_EXCLUDED_TOOLS: set[str] = {
+    "browser_open", "browser_close", "browser_snapshot",
+    "browser_accessibility", "browser_click", "browser_fill",
+    "browser_eval", "browser_wait_for", "browser_press_key",
+    "browser_screenshot", "browser_back", "browser_forward",
+    "browser_reload", "browser_set_visible", "browser_console",
+    "browser_hover", "browser_select", "browser_drag",
+    "browser_upload", "browser_tabs", "browser_tab_new",
+    "browser_tab_switch", "browser_tab_close", "browser_network",
+}
+
 
 def _get_orchestrator_tools() -> list[dict]:
     """Return the OpenAI-format tool schemas the orchestrator is allowed to call.
@@ -99,7 +115,7 @@ def _get_orchestrator_tools() -> list[dict]:
     _core_names = {t.get("function", {}).get("name") for t in tools.TOOLS}
     for t in all_tools:
         fn_name = t.get("function", {}).get("name")
-        if fn_name and fn_name not in _core_names:
+        if fn_name and fn_name not in _core_names and fn_name not in _ORCHESTRATOR_EXCLUDED_TOOLS:
             keep_names.add(fn_name)
     # Filter + dedupe by name (skills loaded twice = keep first occurrence).
     seen: set[str] = set()

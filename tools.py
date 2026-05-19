@@ -1716,8 +1716,12 @@ def _goal_plan_set_impl(args: dict) -> str:
             "Error: every subtask requires a done_condition. Missing on: "
             + ", ".join(repr(t) for t in missing_dc[:5])
             + (" ..." if len(missing_dc) > 5 else "")
-            + ". Add a done_condition object with kind ∈ "
-              "{file_exists, http_returns, regex_in_output, llm_check} + a spec payload."
+            + ". Add a done_condition with kind + spec. Valid kinds:\n"
+              "  files_exist: {spec: {paths: ['file.md']}}\n"
+              "  min_count: {spec: {glob: '*.csv', min: 1}}\n"
+              "  regex_in_file: {spec: {path: 'report.md', pattern: '## Findings'}}\n"
+              "  shell_returns_zero: {spec: {cmd: 'test -f out.csv'}}\n"
+              "  http_200: {spec: {url: 'https://...'}}"
         )
     if not clean:
         return "Error: no valid subtasks (each needs a 'title' and 'done_condition')."

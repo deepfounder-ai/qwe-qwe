@@ -81,7 +81,7 @@ def _fake_port(device, description="USB-Serial CH340", manufacturer="wch.cn",
     return p
 
 
-def test_list_ports_empty_includes_platform_hints(sp, monkeypatch):
+def test_list_ports_empty_includes_platform_hints(sp, monkeypatch, needs_serial):
     """No ports plugged in → tell the user how to troubleshoot, not
     just an empty list."""
     monkeypatch.setattr(
@@ -98,7 +98,7 @@ def test_list_ports_empty_includes_platform_hints(sp, monkeypatch):
     )
 
 
-def test_list_ports_renders_each_device(sp, monkeypatch):
+def test_list_ports_renders_each_device(sp, monkeypatch, needs_serial):
     monkeypatch.setattr(
         "serial.tools.list_ports.comports",
         lambda: [
@@ -117,7 +117,7 @@ def test_list_ports_renders_each_device(sp, monkeypatch):
     assert "VID:PID" in out
 
 
-def test_list_ports_handles_clones_with_missing_metadata(sp, monkeypatch):
+def test_list_ports_handles_clones_with_missing_metadata(sp, monkeypatch, needs_serial):
     """Cheap CH340 clones often report None for manufacturer/product —
     skill must not crash."""
     p = MagicMock()
@@ -174,18 +174,24 @@ class _FakeSerial:
         self.closed = True
 
 
+@pytest.fixture
+def needs_serial():
+    """Skip the test if pyserial is not installed."""
+    pytest.importorskip("serial", reason="pyserial not installed")
+
+
 def _patch_serial(monkeypatch, fake):
     """Replace `serial.Serial` with a factory returning the supplied fake."""
     import serial as pyserial
     monkeypatch.setattr(pyserial, "Serial", lambda **kw: fake)
 
 
-def test_read_once_requires_port(sp):
+def test_read_once_requires_port(sp, needs_serial):
     out = sp.execute("serial_read_once", {})
     assert "'port' required" in out
 
 
-def test_read_once_returns_text_line_by_default(sp, monkeypatch):
+def test_read_once_returns_text_line_by_default(sp, monkeypatch, needs_serial):
     fake = _FakeSerial()
     fake._line = b"ST,GS,+00012.345,kg\r\n"
     _patch_serial(monkeypatch, fake)
@@ -198,7 +204,7 @@ def test_read_once_returns_text_line_by_default(sp, monkeypatch):
     assert fake.closed is True  # always closes after read
 
 
-def test_read_once_hex_format_for_binary_protocols(sp, monkeypatch):
+def test_read_once_hex_format_for_binary_protocols(sp, monkeypatch, needs_serial):
     """Modbus RTU and similar binary protocols want hex output."""
     fake = _FakeSerial()
     fake._line = bytes([0x01, 0x03, 0x04, 0x00, 0x0A, 0x00, 0x14, 0x9B, 0x42])
@@ -214,7 +220,7 @@ def test_read_once_hex_format_for_binary_protocols(sp, monkeypatch):
     assert "9 bytes hex" in out
 
 
-def test_read_once_bytes_mode_reads_exact_count(sp, monkeypatch):
+def test_read_once_bytes_mode_reads_exact_count(sp, monkeypatch, needs_serial):
     fake = _FakeSerial()
     fake._read_buffer = b"\x01\x02\x03\x04\x05\x06\x07\x08"
     _patch_serial(monkeypatch, fake)
@@ -229,12 +235,12 @@ def test_read_once_bytes_mode_reads_exact_count(sp, monkeypatch):
     assert "08" not in out  # remaining bytes left in buffer
 
 
-def test_read_once_invalid_parity_rejected(sp):
+def test_read_once_invalid_parity_rejected(sp, needs_serial):
     out = sp.execute("serial_read_once", {"port": "COM3", "parity": "X"})
     assert "invalid parity" in out
 
 
-def test_read_once_translates_permission_error_on_linux(sp, monkeypatch):
+def test_read_once_translates_permission_error_on_linux(sp, monkeypatch, needs_serial):
     """A user without dialout group sees a hint, not just `Permission
     denied: '/dev/ttyUSB0'`."""
     import serial as pyserial
@@ -250,7 +256,7 @@ def test_read_once_translates_permission_error_on_linux(sp, monkeypatch):
     assert "dialout" in out  # platform-aware hint fired
 
 
-def test_read_once_translates_filenotfound_to_helpful_message(sp, monkeypatch):
+def test_read_once_translates_filenotfound_to_helpful_message(sp, monkeypatch, needs_serial):
     import serial as pyserial
 
     def boom(**kw):
@@ -263,7 +269,7 @@ def test_read_once_translates_filenotfound_to_helpful_message(sp, monkeypatch):
     assert "serial_list_ports" in out
 
 
-def test_read_once_returns_no_data_message_on_timeout(sp, monkeypatch):
+def test_read_once_returns_no_data_message_on_timeout(sp, monkeypatch, needs_serial):
     fake = _FakeSerial()
     fake._line = b""  # nothing arrived
     _patch_serial(monkeypatch, fake)
@@ -276,7 +282,7 @@ def test_read_once_returns_no_data_message_on_timeout(sp, monkeypatch):
 # ── serial_write — safety gate ─────────────────────────────────────
 
 
-def test_write_default_is_dry_run_and_does_not_open_port(sp, monkeypatch):
+def test_write_default_is_dry_run_and_does_not_open_port(sp, monkeypatch, needs_serial):
     """The whole point of the safety gate: confirm=false MUST NOT
     physically touch the device. We pin this by making Serial() raise
     if it's ever called — the test passes only if no open is
@@ -299,7 +305,7 @@ def test_write_default_is_dry_run_and_does_not_open_port(sp, monkeypatch):
     assert "544152450D0A" in out  # "TARE\r\n" in hex
 
 
-def test_write_with_confirm_actually_writes(sp, monkeypatch):
+def test_write_with_confirm_actually_writes(sp, monkeypatch, needs_serial):
     fake = _FakeSerial()
     _patch_serial(monkeypatch, fake)
 
@@ -314,7 +320,7 @@ def test_write_with_confirm_actually_writes(sp, monkeypatch):
     assert fake.closed is True
 
 
-def test_write_hex_payload_decodes_correctly(sp, monkeypatch):
+def test_write_hex_payload_decodes_correctly(sp, monkeypatch, needs_serial):
     fake = _FakeSerial()
     _patch_serial(monkeypatch, fake)
 
@@ -332,7 +338,7 @@ def test_write_hex_payload_decodes_correctly(sp, monkeypatch):
     assert fake.write_log == [bytes.fromhex("0103000000 02C40B".replace(" ", ""))]
 
 
-def test_write_hex_handles_separators(sp, monkeypatch):
+def test_write_hex_handles_separators(sp, monkeypatch, needs_serial):
     """User-supplied hex can use spaces, colons, commas, semicolons —
     all should be stripped before fromhex()."""
     fake = _FakeSerial()
@@ -345,7 +351,7 @@ def test_write_hex_handles_separators(sp, monkeypatch):
     assert fake.write_log == [bytes.fromhex("01030000")]
 
 
-def test_write_rejects_odd_length_hex(sp):
+def test_write_rejects_odd_length_hex(sp, needs_serial):
     """A typo dropping a digit would silently corrupt the protocol —
     fail loud instead."""
     out = sp.execute("serial_write", {
@@ -355,7 +361,7 @@ def test_write_rejects_odd_length_hex(sp):
     assert "even number of digits" in out
 
 
-def test_write_rejects_non_hex_chars(sp):
+def test_write_rejects_non_hex_chars(sp, needs_serial):
     out = sp.execute("serial_write", {
         "port": "COM3", "data": "ZZ",
         "format": "hex", "confirm": True,
@@ -363,12 +369,12 @@ def test_write_rejects_non_hex_chars(sp):
     assert "invalid hex" in out
 
 
-def test_write_requires_data(sp):
+def test_write_requires_data(sp, needs_serial):
     out = sp.execute("serial_write", {"port": "COM3"})
     assert "'data' required" in out
 
 
-def test_write_propagates_open_failure_with_hint(sp, monkeypatch):
+def test_write_propagates_open_failure_with_hint(sp, monkeypatch, needs_serial):
     import serial as pyserial
 
     def boom(**kw):

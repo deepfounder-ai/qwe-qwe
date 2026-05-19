@@ -4146,6 +4146,17 @@ function render() {
       stickBottom: !userEngaged,   // default: stick to bottom
     };
   }
+  // Generic scroll preservation for ALL .scroll-col containers (goals,
+  // memory, settings, routines, scheduler, canvases, presets).  Chat has
+  // its own stick-to-bottom logic above; skip it here to avoid conflict.
+  let savedViewScroll = null;
+  const viewScrollers = document.querySelectorAll('.scroll-col:not(#chat-scroll)');
+  viewScrollers.forEach(el => {
+    if (el.scrollTop > 0) {
+      savedViewScroll = savedViewScroll || {};
+      savedViewScroll[el.id || '_anon'] = el.scrollTop;
+    }
+  });
   root.className = state.anim ? '' : 'no-anim';
   root.innerHTML =
     '<div class="shell">' +
@@ -4178,6 +4189,16 @@ function render() {
       const col = document.getElementById('chat-scroll');
       if (!col) return;
       col.scrollTop = savedScroll.stickBottom ? col.scrollHeight : savedScroll.top;
+    });
+  }
+  // Restore scroll for all non-chat .scroll-col containers.
+  if (savedViewScroll) {
+    requestAnimationFrame(() => {
+      const scrollers = document.querySelectorAll('.scroll-col:not(#chat-scroll)');
+      scrollers.forEach(el => {
+        const key = el.id || '_anon';
+        if (savedViewScroll[key] != null) el.scrollTop = savedViewScroll[key];
+      });
     });
   }
 }
@@ -4967,7 +4988,7 @@ function renderInspector() {
               (m.source ? '<span class="age" title="Recall source" style="font-family:var(--font-mono);font-size:9px;opacity:0.7">' + esc(m.source) + '</span>' : '') +
               (m.age ? '<span class="age">' + esc(m.age) + '</span>' : '') +
             '</div><div class="txt">' + esc(m.text || '') + '</div></div>').join('')
-        : '<div style="font-size:11px;color:var(--fg-4);line-height:1.5">Send a message — the agent\'s live recall (from thread + wiki + entity + synthesized knowledge) will stream here. Or upload files on the <a href="#" data-nav="memory" style="color:var(--accent)">Memory</a> tab to seed the knowledge base.</div>') +
+        : '<div style="font-size:11px;color:var(--fg-4);line-height:1.5">Send a message — the agent\'s live recall (from thread + wiki + entity + synthesized knowledge) will stream here. Or upload files on the <a href="javascript:void(0)" data-nav="memory" style="color:var(--accent)">Memory</a> tab to seed the knowledge base.</div>') +
     '</div>' +
 
     // Active tools — chips
@@ -6699,7 +6720,7 @@ function renderTabInference() {
       settingRow('Loaded', 'Is the weights already warm on the inference backend?',
         '<span class="status-badge ' + (loaded ? 'ok' : 'warn') + '"><span class="sbdot"></span>' + (loaded ? 'loaded' : 'cold start') + '</span>')
     ) +
-    '<div style="padding:20px 0;color:var(--fg-4);font-size:11.5px">Change provider/model on the <a href="#" data-settings="model" style="color:var(--accent)">Model</a> tab. Provider URL/key are set there too.</div>';
+    '<div style="padding:20px 0;color:var(--fg-4);font-size:11.5px">Change provider/model on the <a href="javascript:void(0)" data-settings="model" style="color:var(--accent)">Model</a> tab. Provider URL/key are set there too.</div>';
 }
 
 function renderTabNetwork() {
@@ -6730,9 +6751,9 @@ function renderTabPrivacy() {
       settingRow('Model inference', 'Local (LM Studio / Ollama) → stays on device. Remote providers (OpenAI / Groq / Anthropic) → your prompts leave.',
         '<span class="status-badge ' + (state.model.provider && ['lmstudio','ollama'].includes((state.model.provider||'').toLowerCase()) ? 'ok' : 'warn') + '"><span class="sbdot"></span>' + esc(state.model.provider || '—') + '</span>') +
       settingRow('Outbound tools', 'Disable by turning specific skills off in Settings → Tools.',
-        '<a href="#" data-settings="tools" class="btn-secondary" style="text-decoration:none">open →</a>') +
+        '<a href="javascript:void(0)" data-settings="tools" class="btn-secondary" style="text-decoration:none">open →</a>') +
       settingRow('Telegram bot', 'When enabled, your Telegram chat is routed through the public Bot API.',
-        '<a href="#" data-settings="telegram" class="btn-secondary" style="text-decoration:none">open →</a>')
+        '<a href="javascript:void(0)" data-settings="telegram" class="btn-secondary" style="text-decoration:none">open →</a>')
     ) +
     renderTelemetryPanel(tel);
 }
@@ -7297,7 +7318,7 @@ async function loadGoalDetail(goalId, opts) {
 
   // Only update goalDetail when the main /goals/{id} call succeeded; the
   // others are best-effort and fall back to the prior state.
-  if (gR.status === 'fulfilled' && gR.value && !gR.value.error) {
+  if (gR.status === 'fulfilled' && gR.value && gR.value.id) {
     state.goalDetail = gR.value;
   } else if (gR.status === 'rejected' && !opts.silent) {
     toast('Failed to load goal: ' + (gR.reason?.message || gR.reason), 'err');
@@ -7445,7 +7466,7 @@ function renderGoalDetailView() {
   // if they haven't switched tabs yet.
   const resultLabel = outputCount > 0 ? 'Result' : 'Result';
 
-  return '<div class="scroll-col"><div class="inner-wide">' +
+  return '<div class="scroll-col" id="goal-scroll"><div class="inner-wide">' +
     // Header
     '<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:16px">' +
       '<button class="icon-btn" data-act="goals-back" title="Back to list">' +
@@ -8147,7 +8168,7 @@ function go(view) {
 }
 
 function wireEvents() {
-  document.querySelectorAll('[data-nav]').forEach(b => { b.onclick = () => go(b.dataset.nav); });
+  document.querySelectorAll('[data-nav]').forEach(b => { b.onclick = (e) => { e.preventDefault(); go(b.dataset.nav); }; });
   document.querySelectorAll('[data-act="palette"]').forEach(b => { b.onclick = openPalette; });
   document.querySelectorAll('[data-act="toggle-threadlist"]').forEach(b => {
     b.onclick = () => { state.threadlistOpen = !state.threadlistOpen; render(); };
@@ -9053,7 +9074,7 @@ function wireEvents() {
     };
   });
 
-  document.querySelectorAll('[data-settings]').forEach(b => { b.onclick = () => openSettingsTab(b.dataset.settings); });
+  document.querySelectorAll('[data-settings]').forEach(b => { b.onclick = (e) => { e.preventDefault(); openSettingsTab(b.dataset.settings); }; });
   if (state.settingsTab === 'cost') wireTabCost();
   document.querySelectorAll('[data-soul]').forEach(inp => {
     inp.addEventListener('change', async () => {

@@ -71,6 +71,20 @@ def test_facts_tab_renders_real_goal_facts_endpoint():
         "loadGoalDetail doesn't fetch /facts endpoint"
 
 
+def test_load_goal_detail_checks_id_not_error_field():
+    """loadGoalDetail must accept the goal row based on presence of ``id``,
+    NOT absence of ``error``. Failed goals have an ``error`` field set —
+    the old ``!gR.value.error`` guard rejected them so the detail view
+    stuck on "Loading goal…" forever."""
+    src = _read()
+    # The correct guard: gR.value.id (every valid goal row has an id).
+    assert "gR.value && gR.value.id" in src, \
+        "loadGoalDetail should check gR.value.id, not !gR.value.error"
+    # The broken guard must NOT be present.
+    assert "!gR.value.error" not in src, \
+        "loadGoalDetail still uses !gR.value.error which breaks failed goals"
+
+
 def test_goals_view_uses_polling_not_websocket():
     """Phase 5 uses HTTP polling; WS push lands in a later phase. Pin that decision."""
     src = _read()

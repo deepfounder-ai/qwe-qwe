@@ -363,3 +363,57 @@ def test_orchestrator_subtask_update_for_missing_subtask(qwe_temp_data_dir):
 
     r = tools.execute("subtask_update", {"subtask_id": "st_99", "status": "completed"})
     assert "Error" in r and "st_99" in r
+
+
+def test_orchestrator_tools_exclude_browser_but_keep_dispatch():
+    """Browser tools from the built-in browser skill must NOT leak into the
+    orchestrator's tool set. The orchestrator should use dispatch_subagent
+    for browser work — having browser_* tools available directly causes the
+    LLM to bypass dispatch and burn 80+ rounds trying to automate a
+    browser itself (observed: goal g_f50013dc5e19481b).
+    """
+    import orchestrator
+
+    orch_tools = orchestrator._get_orchestrator_tools()
+    orch_names = {t.get("function", {}).get("name") for t in orch_tools}
+
+    # No browser_* tools should be present
+    browser_leaked = sorted(n for n in orch_names if n.startswith("browser_"))
+    assert not browser_leaked, (
+        f"Browser tools leaked into orchestrator: {browser_leaked}. "
+        f"They must stay in _ORCHESTRATOR_EXCLUDED_TOOLS so the LLM "
+        f"uses dispatch_subagent(type='browser') instead."
+    )
+
+    # dispatch_subagent must be present — it's the only path to browser work
+    assert "dispatch_subagent" in orch_names, (
+        "dispatch_subagent missing from orchestrator tools"
+    )
+
+    # Core tools must still be present
+    for required in ("goal_plan_set", "subtask_update", "fact_save",
+                     "memory_save", "memory_search", "shell", "read_file"):
+        assert required in orch_names, f"Core tool {required!r} missing"
+
+
+def test_orchestrator_excluded_tools_covers_all_browser_tools():
+    """_ORCHESTRATOR_EXCLUDED_TOOLS must cover every tool the browser skill
+    exposes. If a new browser tool is added to skills/browser.py but not
+    added to the exclusion set, it would leak into the orchestrator.
+    """
+    import orchestrator
+    import skills
+
+    # Get browser tool names from skills.get_tools()
+    skill_tools = skills.get_tools(compact=True)
+    browser_skill_names = {
+        t.get("function", {}).get("name")
+        for t in skill_tools
+        if (t.get("function", {}).get("name") or "").startswith("browser_")
+    }
+
+    missing = browser_skill_names - orchestrator._ORCHESTRATOR_EXCLUDED_TOOLS
+    assert not missing, (
+        f"Browser skill tools not in _ORCHESTRATOR_EXCLUDED_TOOLS: {sorted(missing)}. "
+        f"Add them to prevent leaking into the orchestrator."
+    )

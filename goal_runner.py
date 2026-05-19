@@ -154,8 +154,31 @@ async def run(goal_id: str, shutdown_event: asyncio.Event) -> None:
 
             # Run validators across the current plan.
             plan = db.get_goal_plan(goal_id) or {}
+            subtasks = plan.get("subtasks", [])
+
+            # Guard: orchestrator must create a plan before finishing.
+            # Without this, an empty plan passes the gate vacuously (no
+            # subtasks → no failures → gate passes → goal marked done
+            # with zero actual work).
+            if not subtasks and not (goal.get("done_conditions") or []):
+                if gate_attempt >= max_attempts:
+                    db.mark_goal_failed(
+                        goal_id,
+                        error="no_plan_created: orchestrator returned without "
+                              "creating any subtasks after multiple attempts",
+                    )
+                    return
+                system_notes = [
+                    "PLAN REQUIRED: You returned without creating a plan. "
+                    "You MUST call goal_plan_set with at least one subtask "
+                    "before writing a final answer. Break the user's request "
+                    "into concrete steps and execute them."
+                ]
+                goal = db.get_goal(goal_id) or goal
+                continue  # re-enter orchestrator
+
             failures: list[tuple[str, str]] = []
-            for st in plan.get("subtasks", []):
+            for st in subtasks:
                 cond = st.get("done_condition")
                 if not cond:
                     # Be defensive — older plans / agent-created plans may not
