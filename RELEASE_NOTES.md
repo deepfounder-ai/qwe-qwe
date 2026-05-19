@@ -1,40 +1,46 @@
-## v0.23.0 — Goals, Native Anthropic, Plugins
+## v0.23.0 — Goal Runtime, Native Anthropic, Plugin Framework
 
-### Goals system (orchestrator + subagents)
+The biggest release since v0.18.7. Goals turn castor from a chat assistant into an autonomous agent that can work for hours on multi-step tasks — surviving disconnects, process restarts, and context-window pressure.
 
 Long-running multi-step tasks are now first-class citizens. Create a goal in the Goals view and Castor breaks it into a plan, dispatches subagents per subtask, and tracks progress live.
 
-- **Orchestrator** (`orchestrator.py`) — manages goal lifecycle: plan → dispatch → accept/remediate → finalize
-- **Subagent types** — inline worker, browser session per goal (parallel isolation), skills + MCP tools available to subagents
-- **Done conditions** — each subtask declares acceptance criteria (`goal_validators.py`); 5 validator kinds (exact match, regex, file exists, HTTP check, LLM judge)
-- **Acceptance gate** — on subtask completion the gate re-runs done_conditions; fails kick off a remediation loop with rejection feedback
-- **Structured deliverables** — goals produce typed outputs: files (download), links (open), reports (save to memory)
-- **Budget caps** — wall-clock + USD hard caps enforced per goal
-- **Inline worker** — Goals work out of the box with no extra daemons; launchd/systemd optional for persistent background execution
-- **Live Goals UI** — plan, events, facts tabs; live subtask progress; goal-detail modal with expandable description and markdown rendering
+### Goals — long-running autonomous tasks
 
-### Native Anthropic adapter
+Create a goal ("Research construction costs in Argentina and write a report"), walk away, come back to a completed deliverable. The system plans, delegates to specialized subagents, validates results, and retries on failure — all without user input.
+
+**Architecture**: Goal -> Plan -> Subagent dispatch. A separate `castor-worker` daemon claims goals from a durable SQLite queue. Full design doc in `docs/superpowers/plans/`.
+
+- **Worker daemon** (`python -m worker`) — claims goals via lease, heartbeats, survives crashes. Also runs inline (`--once` for tests, auto-start in web mode).
+- **Orchestrator** — breaks the goal into subtasks, dispatches subagents, tracks progress via structured facts.
+- **4 subagent types** — `research`, `browser`, `code`, `scraper` — each with a restricted tool whitelist (the security boundary). Fresh LLM context per subtask, 20-round cap.
+- **Acceptance gate** — after the orchestrator returns, validators check each subtask's `done_condition` (5 kinds: `files_exist`, `min_count`, `regex_in_file`, `shell_returns_zero`, `http_200`). Failures inject a remediation note and re-enter the orchestrator (up to 3 attempts).
+- **Structured deliverables** — files, links, reports attached via `goal_attach_output`. UI renders Download/Open/Save buttons.
+- **Per-goal browser sessions** — parallel goals get isolated browser contexts.
+- **Budget enforcement** — wall-clock seconds + USD caps, enforced at the runner level.
+- **Live UI** — Goals view with plan progress, events timeline, facts tab. Polling at 2s while running, 10s when idle.
+
+New migrations: `011_goals_subtasks_checkpoints.sql` through `014_goal_done_conditions.sql`.
 
 - Full native client for Claude models (`providers.py`) — no OpenAI shim
 - Three workstreams merged: converters, stream reassembler, routing + 88 tests
 - Model routing: local providers (LM Studio / Ollama) via OpenAI-compat, cloud Claude via native SDK
 - `NEEDS KEY` badge + key modal in provider picker
 
-### Agent infrastructure
+### Native Anthropic provider
 
-- **Plugin slot framework** — hook points for extending agent behavior without forking core (Hermes-inspired)
-- **JSONL trajectory recording** — every agent run saved as a structured trace for observability and debugging
-- **Synthesis trickle mode** — continuous background curator instead of nightly-only batch (Hermes-inspired)
-- **Centralized slash-command registry** — `/commands` now discoverable; plugins can register their own
-- **Persistent tool_search activations** — active tools survive context compaction for cache stability
-- **Rejection feedback channel** — subagents receive structured feedback from prior failed attempts
+Direct Anthropic API support without the OpenAI compatibility shim. Three workstreams merged:
+
+- **Converters** — bidirectional message/tool format translation between OpenAI and Anthropic schemas.
+- **Stream reassembler** — handles Anthropic's SSE delta format (content_block_delta, tool_use blocks) and reassembles into the internal streaming shape.
+- **Client + routing** — `providers.py` auto-routes to the native adapter when the active provider is `anthropic`.
+
+88 new tests across the three workstreams.
 
 ### Skills
 
-- **Skill export** (agentskills.io format) — companion to `skill_import`; share skills with the community
-- **Skill name normalization** — hyphens and underscores treated as equivalent in `_find_skill`
+### Plugin framework (Hermes-inspired)
 
-### Reliability
+Extensible slot-based plugin system for hooking into agent lifecycle events. Plugins can observe/modify behavior at defined extension points without touching core code.
 
 - **3-layer DB corruption protection** — rolling backups, startup integrity check (`PRAGMA integrity_check`), graceful shutdown WAL checkpoint
 - **Auto-migration from `~/.qwe-qwe/`** — users upgrading from the old project name get all data (DB, Qdrant collections, uploads, skills) migrated automatically on first boot
@@ -42,10 +48,74 @@ Long-running multi-step tasks are now first-class citizens. Create a goal in the
 - **fastembed warnings** suppressed (loguru "Local file sizes do not match" spam gone)
 - **Browser**: per-goal sessions for parallel isolation; auto-recovery on dead sessions; `execute()` runs in thread executor to avoid asyncio conflicts
 
-### UI
+### Synthesis trickle mode
 
-- Collapse tool-call rows beyond N per category in chat
-- Per-message token stats in chat
-- Report outputs + final reply rendered as real markdown
-- Goal-detail tabs styled properly; full report content shown inline
-- Auto-dismiss prior aborts on new turn
+Background knowledge curator runs continuously (not just overnight), extracting entities and wiki summaries from recent conversations. Keeps the knowledge graph fresh without waiting for the nightly synthesis run.
+
+---
+
+### Centralized command registry
+
+Slash commands (`/goal`, `/resume`, `/status`, etc.) now registered via a central registry instead of ad-hoc string matching. Easier to add new commands, consistent help output.
+
+---
+
+### Skill export
+
+Companion to skill import (v0.18.7) — export castor skills to the agentskills.io SKILL.md format for sharing via skills.sh or GitHub.
+
+---
+
+### JSONL trajectory recording
+
+Every agent run optionally records a full JSONL trajectory (messages, tool calls, results, timing) for offline analysis, evals, and debugging.
+
+---
+
+### Persistent tool_search activations
+
+`tool_search` activations now persist per-thread across page reloads. Previously, extended tools unlocked via `tool_search("browser")` would disappear on refresh.
+
+---
+
+### DB corruption protection
+
+3-layer defense: rolling backups on startup, SHA-256 integrity check, graceful WAL checkpoint on shutdown. Recovers automatically from the most recent valid backup if corruption is detected.
+
+---
+
+### Notable fixes
+
+- **Orchestrator browser tool leak** — built-in browser skill tools (24) leaked into the orchestrator's tool set, causing the LLM to bypass `dispatch_subagent` and burn 80+ rounds driving a browser directly. Fixed via `_ORCHESTRATOR_EXCLUDED_TOOLS` blacklist.
+- **Goal plan validation** — error message listed wrong `done_condition` kinds; fuzzy matching now suggests corrections (`files_exists` -> `files_exist`); empty plans no longer pass the acceptance gate vacuously.
+- **UI scroll jumps** — clicking nav links with `href="#"` scrolled to top; `render()` only preserved scroll for chat view. Now all `.scroll-col` containers retain position across re-renders.
+- **Failed goals UI** — failed goals wouldn't open in detail view (`!gR.value.error` guard rejected them). Fixed to check `gR.value.id`.
+- **Streaming tool results** — reply event was wiping tool results accumulated during streaming. `allStrings` guard preserves them.
+- **Soul trait [object Object]** — built-in trait descriptions passed raw objects to `esc()`.
+- **Tool-call collapse** — chat UI collapses tool-call rows beyond N per category to reduce visual noise.
+- **16 audit hardening fixes** — security, robustness, and observability improvements.
+- **Auto-migrate from ~/.qwe-qwe/** — seamless data migration on project rename to Castor.
+
+---
+
+### By the numbers
+
+- **1354 tests passing** (was ~725 at v0.22.1), 24 skipped
+- **14 SQLite migrations** (was 10)
+- **Coverage floor** unchanged at 24%
+- **~60 commits** since v0.22.1
+
+---
+
+### Upgrade
+
+```bash
+git pull
+pip install -e . --upgrade
+python cli.py --web --ssl --port 7861
+```
+
+Four new migrations apply automatically on first boot. No config changes required. Telemetry consent unchanged.
+
+---
+

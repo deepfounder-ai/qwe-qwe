@@ -14,7 +14,7 @@ User guides for castor — one document per feature. If you're looking at castor
 
 | Document | About |
 |---|---|
-| [PROVIDERS.md](PROVIDERS.md) | LLM provider setup — LM Studio, Ollama, OpenAI, Groq, OpenRouter, DeepSeek, Together, Perplexity, Cerebras, Mistral. Where to get keys, how to switch per-thread. |
+| [PROVIDERS.md](PROVIDERS.md) | LLM provider setup — LM Studio, Ollama, OpenAI, Anthropic (native), Groq, OpenRouter, DeepSeek, Together, Perplexity, Cerebras, Mistral. Where to get keys, how to switch per-thread. |
 | [SOUL.md](SOUL.md) | Personality tuning — 8 traits, name, language, custom traits |
 | [PRIVACY.md](PRIVACY.md) | What data lives where, telemetry contract, opting in / out |
 
@@ -48,6 +48,7 @@ User guides for castor — one document per feature. If you're looking at castor
 
 | Document | About |
 |---|---|
+| [GOALS.md](GOALS.md) | Long-running autonomous tasks — orchestrator plans, subagents execute, acceptance gate validates. Survives disconnects & restarts. |
 | [ROUTINES.md](ROUTINES.md) | Scheduled tasks — cron syntax, debug-via-dialogue, Telegram delivery |
 | [PRESET_GUIDE.md](PRESET_GUIDE.md) | Presets — bundled skill + knowledge + workspace setups for specific roles |
 | [PRESET_EXAMPLES.md](PRESET_EXAMPLES.md) | Ready-to-install preset gallery |

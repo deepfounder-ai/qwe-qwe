@@ -197,16 +197,72 @@ db.py                — all goal-runtime CRUD: create_goal, claim_next_goal,
                        save_checkpoint, set_goal_plan, fact_save, etc.
 ```
 
+## Acceptance gate — anti-capitulation
+
+Every subtask requires a `done_condition` — a machine-checkable criterion
+that the orchestrator's work actually produced the expected result. After the
+orchestrator returns, the **acceptance gate** runs validators over every
+subtask. If any fail, the gate injects a remediation note and re-enters the
+orchestrator (up to 3 attempts). Only when all validators pass does the goal
+get marked `done`.
+
+This prevents the #1 failure mode: the agent claims "done" without doing
+the work (hallucinated results, capitulation after errors).
+
+### 5 validator kinds
+
+| Kind | Spec | What it checks |
+|---|---|---|
+| `files_exist` | `{paths: ["report.md"]}` | Every path exists on disk |
+| `min_count` | `{glob: "*.csv", min: 1}` | At least N files match the glob |
+| `regex_in_file` | `{path: "report.md", pattern: "## Findings"}` | Regex matches somewhere in the file |
+| `shell_returns_zero` | `{cmd: "test -f out.csv"}` | Shell command exits 0 |
+| `http_200` | `{url: "https://..."}` | HTTP GET returns 200 |
+
+### Fuzzy matching
+
+If the orchestrator misspells a kind (`files_exists` instead of `files_exist`),
+the validator suggests the correct name via `difflib.get_close_matches`.
+
+### Empty plan guard
+
+If the orchestrator returns without ever calling `goal_plan_set`, the gate
+rejects with a remediation note demanding a plan. After 3 failed attempts,
+the goal is marked failed with `no_plan_created`.
+
+## Per-goal browser sessions
+
+Each goal gets an isolated Playwright `BrowserContext`. A login from subtask 1
+carries over to subtask 2..N within the same goal, but parallel goals don't
+leak cookies or state between each other.
+
+The orchestrator cannot use browser tools directly — they are excluded from
+its tool set. Browser work must go through `dispatch_subagent(type="browser")`.
+
+## Structured deliverables
+
+Goals can produce typed outputs via `goal_attach_output`:
+
+| Kind | Example | UI |
+|---|---|---|
+| `file` | `~/workspace/report.csv` | Download button |
+| `link` | `https://dashboard.example.com` | Open button |
+| `report` | Markdown text | Inline rendered, Save to Memory button |
+
 ## Where we are in the roadmap
 
-This document describes what's shipped today (Phase 1 + 2 of the long-running
+This document describes what's shipped today (Phases 1–5 of the long-running
 agent plan in `docs/superpowers/plans/2026-05-15-long-running-agent-architecture.md`).
 
+Shipped:
+- **Phase 1**: durable goal queue + worker daemon
+- **Phase 2**: orchestrator + plan management + subagent dispatch + facts
+- **Phase 3**: per-goal persistent browser contexts
+- **Phase 5**: Web UI — live Goals view with plan, events, facts tabs,
+  pause/resume/abort from UI
+
 Still ahead:
-- **Phase 3**: per-goal persistent browser context (so a login from
-  subtask 1 carries over to subtask 2..N across worker restarts)
 - **Phase 4**: smarter loop detection (hash result, not just args), smart
   compaction that preserves the plan + recent subtask summaries
-- **Phase 5**: Web UI tab for live goal monitoring, pause/resume from UI
 - **Phase 6**: migrate scheduler routines + telegram + CLI to use the
   Goals API as the long-running execution backend
