@@ -73,6 +73,8 @@ Toggle visibility anytime:
 
 Visibility state is per-server, not per-thread. If you want a separate persistent browser session per thread, use [presets](PRESET_GUIDE.md) — each preset has its own browser profile.
 
+**Goals get isolated sessions automatically.** When running inside a goal (via the `browser` subagent type), each goal gets its own Playwright `BrowserContext`. A login from subtask 1 carries over to subtask 2..N within the same goal, but parallel goals don't leak cookies or state between each other. See [GOALS.md](GOALS.md).
+
 ## `open_url` — handoff to the user's browser
 
 When the agent has nothing to do with the page itself ("show me the docs", "open this OAuth flow"):

@@ -16,6 +16,9 @@ castor talks to any **OpenAI-compatible** chat-completions endpoint. Pick the on
 | **Perplexity** | Cloud | [perplexity.ai/settings/api](https://perplexity.ai/settings/api) | Pay-as-you-go |
 | **Cerebras** | Cloud | [cloud.cerebras.ai](https://cloud.cerebras.ai) — extremely fast | Free tier available |
 | **Mistral** | Cloud | [console.mistral.ai/api-keys](https://console.mistral.ai/api-keys) | Trial credit |
+| **Anthropic** | Cloud | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) | Pay-as-you-go |
+
+**Anthropic uses a native adapter** — not the OpenAI compatibility shim. This enables Anthropic-specific features: prompt caching (up to 90% cost reduction on cached input tokens), extended thinking budgets (for Claude Sonnet 4.6+ / Opus 4), and structured tool-use error handling. Set `CASTOR_LLM_KEY` to your Anthropic API key and select `anthropic` as provider — routing is automatic.
 
 Any other OpenAI-compatible provider (Azure OpenAI, AWS Bedrock with the OpenAI shim, vLLM, llama.cpp's server, etc.) works the same way — set `CASTOR_LLM_URL` to its base URL.
 
@@ -29,7 +32,7 @@ Tool-calling is the hard requirement — castor relies on `tool_calls` in the re
 | **Local on a laptop** | Gemma 2 4B / Qwen 2.5 3B | Ollama |
 | **Local on a workstation** | Qwen 2.5 14B / Llama 3.1 8B | LM Studio |
 | **Fast cloud (free)** | Llama 3.1 70B / Mixtral 8x7B | Groq |
-| **Best quality cloud** | GPT-4o / Claude (via OpenRouter) | OpenAI / OpenRouter |
+| **Best quality cloud** | GPT-4o / Claude Sonnet 4.6 | OpenAI / Anthropic |
 | **Cheapest cloud** | DeepSeek V3 | DeepSeek |
 | **Hardest reasoning** | DeepSeek R1 / o1 | DeepSeek / OpenAI |
 
