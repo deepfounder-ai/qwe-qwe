@@ -61,7 +61,7 @@ voice = ["faster-whisper>=1.0.0"]
 # on cached input) and extended-thinking budgets for Sonnet 4.6+ / Opus 4.
 # Without this extra, Claude models still work via OpenRouter through the
 # OpenAI-compatible client — just without caching/thinking features.
-anthropic_native = ["anthropic>=0.50.0"]
+anthropic_native = ["anthropic>=0.102.0"]
 
 [project.scripts]
 castor = "cli:main_entry"
